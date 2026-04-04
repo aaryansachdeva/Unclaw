@@ -11,9 +11,8 @@ import { AGENTS } from './types';
 const SIGNALING_URL = 'ws://localhost:8080';
 
 export function App() {
-  const { videoParentRef, connectionState, pixelStreaming, connect } = usePixelStreaming({
+  const { videoParentRef, connectionState, pixelStreaming } = usePixelStreaming({
     signalingUrl: SIGNALING_URL,
-    autoConnect: true,
   });
 
   const [currentAgentIndex, setCurrentAgentIndex] = useState(0);
@@ -52,7 +51,6 @@ export function App() {
       <StreamView
         videoParentRef={videoParentRef}
         connectionState={connectionState}
-        connect={connect}
       />
       <Titlebar />
 

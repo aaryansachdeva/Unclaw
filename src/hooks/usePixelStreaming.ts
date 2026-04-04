@@ -5,33 +5,32 @@ export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'fai
 
 interface UsePixelStreamingOptions {
   signalingUrl: string;
-  autoConnect?: boolean;
+  /** Delay between reconnect attempts in ms */
+  retryDelay?: number;
 }
 
 interface UsePixelStreamingReturn {
   videoParentRef: React.RefObject<HTMLDivElement | null>;
   connectionState: ConnectionState;
   pixelStreaming: PixelStreaming | null;
-  connect: () => void;
-  disconnect: () => void;
 }
 
 export function usePixelStreaming({
   signalingUrl,
-  autoConnect = true,
+  retryDelay = 3000,
 }: UsePixelStreamingOptions): UsePixelStreamingReturn {
   const videoParentRef = useRef<HTMLDivElement | null>(null);
   const psRef = useRef<PixelStreaming | null>(null);
-  const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
 
-  // Initialize PixelStreaming once the video parent DOM element is ready
   useEffect(() => {
     if (!videoParentRef.current) return;
 
     const config = new Config({
       initialSettings: {
         AutoPlayVideo: true,
-        AutoConnect: autoConnect,
+        AutoConnect: true,
         StartVideoMuted: false,
         HoveringMouse: true,
         WaitForStreamer: true,
@@ -46,44 +45,43 @@ export function usePixelStreaming({
 
     psRef.current = ps;
 
-    // Connection lifecycle events
-    ps.addEventListener('webRtcConnecting', () => {
-      setConnectionState('connecting');
-    });
+    const scheduleRetry = () => {
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = setTimeout(() => {
+        if (psRef.current) {
+          setConnectionState('connecting');
+          psRef.current.reconnect();
+        }
+      }, retryDelay);
+    };
 
+    ps.addEventListener('webRtcConnecting', () => setConnectionState('connecting'));
     ps.addEventListener('webRtcConnected', () => {
       setConnectionState('connected');
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
     });
-
     ps.addEventListener('webRtcDisconnected', () => {
-      setConnectionState('disconnected');
+      setConnectionState('connecting');
+      scheduleRetry();
     });
-
     ps.addEventListener('webRtcFailed', () => {
-      setConnectionState('failed');
+      setConnectionState('connecting');
+      scheduleRetry();
     });
 
     return () => {
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       ps.disconnect();
       psRef.current = null;
     };
-  }, [signalingUrl, autoConnect]);
-
-  const connect = useCallback(() => {
-    psRef.current?.connect();
-    setConnectionState('connecting');
-  }, []);
-
-  const disconnect = useCallback(() => {
-    psRef.current?.disconnect();
-    setConnectionState('disconnected');
-  }, []);
+  }, [signalingUrl, retryDelay]);
 
   return {
     videoParentRef,
     connectionState,
     pixelStreaming: psRef.current,
-    connect,
-    disconnect,
   };
 }

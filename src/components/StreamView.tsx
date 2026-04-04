@@ -1,30 +1,56 @@
+import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ConnectionState } from '../hooks/usePixelStreaming';
+import logoUrl from '../assets/logo.png';
+
+const MIN_LOADING_MS = 2000;
 
 interface StreamViewProps {
   videoParentRef: React.RefObject<HTMLDivElement | null>;
   connectionState: ConnectionState;
-  connect: () => void;
 }
 
-const fadeIn = {
-  initial: { opacity: 0 },
-  animate: { opacity: 1 },
-  exit: { opacity: 0 },
-  transition: { duration: 0.4, ease: [0.16, 1, 0.3, 1] },
-};
+export function StreamView({ videoParentRef, connectionState }: StreamViewProps) {
+  const streamReady = connectionState === 'connected';
 
-export function StreamView({ videoParentRef, connectionState, connect }: StreamViewProps) {
+  // Enforce a minimum display duration on the loading screen so it never flashes.
+  const [canShowStream, setCanShowStream] = useState(false);
+  const loadingShownAt = useRef<number>(Date.now());
+  const releaseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (streamReady) {
+      const elapsed = Date.now() - loadingShownAt.current;
+      const remaining = Math.max(0, MIN_LOADING_MS - elapsed);
+      releaseTimer.current = setTimeout(() => setCanShowStream(true), remaining);
+    } else {
+      // Reset when we drop back to loading
+      setCanShowStream(false);
+      loadingShownAt.current = Date.now();
+      if (releaseTimer.current) {
+        clearTimeout(releaseTimer.current);
+        releaseTimer.current = null;
+      }
+    }
+    return () => {
+      if (releaseTimer.current) clearTimeout(releaseTimer.current);
+    };
+  }, [streamReady]);
+
+  const isConnected = streamReady && canShowStream;
+
   return (
     <div className="absolute inset-0 overflow-hidden" style={{ background: 'var(--bg-void)' }}>
       <div ref={videoParentRef} className="absolute inset-0" />
 
       {/* Bottom vignette */}
       <AnimatePresence>
-        {connectionState === 'connected' && (
+        {isConnected && (
           <motion.div
             key="vignette"
-            {...fadeIn}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
             transition={{ duration: 0.8 }}
             className="absolute bottom-0 left-0 right-0 pointer-events-none"
             style={{
@@ -38,7 +64,7 @@ export function StreamView({ videoParentRef, connectionState, connect }: StreamV
 
       {/* Live badge */}
       <AnimatePresence>
-        {connectionState === 'connected' && (
+        {isConnected && (
           <motion.div
             key="live"
             initial={{ opacity: 0, x: 8 }}
@@ -71,104 +97,118 @@ export function StreamView({ videoParentRef, connectionState, connect }: StreamV
         )}
       </AnimatePresence>
 
-      {/* Status overlays */}
-      <AnimatePresence mode="wait">
-        {connectionState !== 'connected' && (
+      {/* Loading screen (shown whenever not connected) */}
+      <AnimatePresence>
+        {!isConnected && (
           <motion.div
-            key={connectionState}
+            key="loading"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.35 }}
+            transition={{ duration: 0.4 }}
             className="absolute inset-0 z-10 flex flex-col items-center justify-center"
-            style={{ background: 'var(--bg-void)' }}
+            style={{ background: 'var(--bg-void)', paddingBottom: '120px' }}
           >
-            {connectionState === 'connecting' && (
-              <div className="flex flex-col items-center" style={{ gap: '16px' }}>
-                <div className="relative" style={{ width: '40px', height: '40px' }}>
-                  <div style={{
-                    position: 'absolute', inset: 0, borderRadius: '50%',
-                    border: '2px solid transparent', borderTopColor: 'var(--accent)',
-                    animation: 'spin 1s linear infinite',
-                  }} />
-                  <div style={{
-                    position: 'absolute', inset: '6px', borderRadius: '50%',
-                    border: '2px solid transparent', borderTopColor: 'var(--accent-strong)',
-                    animation: 'spin 1.5s linear infinite reverse',
-                  }} />
-                </div>
-                <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 500 }}>
-                  Connecting
-                </span>
-              </div>
-            )}
+            {/* Ambient red glow behind logo */}
+            <div
+              aria-hidden="true"
+              style={{
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                transform: 'translate(-50%, -60%)',
+                width: '520px',
+                height: '520px',
+                borderRadius: '50%',
+                background: 'radial-gradient(circle, rgba(196,68,68,0.12) 0%, rgba(196,68,68,0.04) 40%, transparent 70%)',
+                filter: 'blur(20px)',
+                pointerEvents: 'none',
+              }}
+            />
 
-            {connectionState === 'disconnected' && (
-              <div className="flex flex-col items-center" style={{ gap: '20px' }}>
-                <div style={{
-                  width: '48px', height: '48px', borderRadius: '50%',
-                  border: '1.5px solid var(--border-subtle)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                }}>
-                  <div style={{
-                    width: '8px', height: '8px', borderRadius: '50%',
-                    background: 'rgba(255,255,255,0.12)',
-                  }} />
-                </div>
-                <div className="flex flex-col items-center" style={{ gap: '6px' }}>
-                  <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                    Offline
-                  </span>
-                  <span style={{ fontSize: '11px', color: 'var(--text-ghost)' }}>
-                    Waiting for stream on :8080
-                  </span>
-                </div>
-                <motion.button
-                  whileHover={{ scale: 1.03 }}
-                  whileTap={{ scale: 0.97 }}
-                  onClick={connect}
-                  className="glass-btn"
-                  style={{
-                    padding: '8px 24px', borderRadius: '10px',
-                    border: '1px solid var(--border-focus)',
-                    background: 'var(--accent-dim)',
-                    color: 'var(--accent)', fontSize: '12px', fontWeight: 600,
-                  }}
-                >
-                  Connect
-                </motion.button>
-              </div>
-            )}
+            {/* Logo + breathing aura */}
+            <motion.div
+              initial={{ scale: 0.92, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
+              style={{ position: 'relative', zIndex: 1 }}
+            >
+              <motion.img
+                src={logoUrl}
+                alt="UnClaw"
+                animate={{
+                  scale: [1, 1.03, 1],
+                  filter: [
+                    'drop-shadow(0 0 18px rgba(196,68,68,0.25))',
+                    'drop-shadow(0 0 28px rgba(196,68,68,0.4))',
+                    'drop-shadow(0 0 18px rgba(196,68,68,0.25))',
+                  ],
+                }}
+                transition={{
+                  duration: 3.5,
+                  repeat: Infinity,
+                  ease: 'easeInOut',
+                }}
+                style={{
+                  width: '300px',
+                  height: '300px',
+                  objectFit: 'contain',
+                  userSelect: 'none',
+                  WebkitUserDrag: 'none',
+                } as React.CSSProperties}
+                draggable={false}
+              />
+            </motion.div>
 
-            {connectionState === 'failed' && (
-              <div className="flex flex-col items-center" style={{ gap: '16px' }}>
-                <div style={{
-                  width: '40px', height: '40px', borderRadius: '50%',
-                  border: '1.5px solid rgba(200,122,122,0.12)',
-                  background: 'rgba(200,122,122,0.06)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                }}>
-                  <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--danger)' }} />
-                </div>
-                <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 500 }}>
-                  Connection failed
-                </span>
-                <motion.button
-                  whileHover={{ scale: 1.03 }}
-                  whileTap={{ scale: 0.97 }}
-                  onClick={connect}
-                  className="glass-btn"
-                  style={{
-                    padding: '8px 20px', borderRadius: '8px',
-                    border: '1px solid var(--border-subtle)',
-                    background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
-                    fontSize: '12px', fontWeight: 500,
-                  }}
-                >
-                  Retry
-                </motion.button>
+            {/* Status text */}
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5, delay: 0.2 }}
+              style={{
+                marginTop: '-8px',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '10px',
+                zIndex: 1,
+              }}
+            >
+              {/* Loading dots */}
+              <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
+                {[0, 1, 2].map((i) => (
+                  <motion.div
+                    key={i}
+                    animate={{
+                      opacity: [0.25, 1, 0.25],
+                      y: [0, -2, 0],
+                    }}
+                    transition={{
+                      duration: 1.4,
+                      repeat: Infinity,
+                      delay: i * 0.18,
+                      ease: 'easeInOut',
+                    }}
+                    style={{
+                      width: '4px',
+                      height: '4px',
+                      borderRadius: '50%',
+                      background: 'var(--accent)',
+                    }}
+                  />
+                ))}
               </div>
-            )}
+
+              <span style={{
+                fontSize: '10px',
+                fontWeight: 600,
+                letterSpacing: '0.18em',
+                textTransform: 'uppercase',
+                color: 'var(--text-ghost)',
+              }}>
+                Awaiting stream
+              </span>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
