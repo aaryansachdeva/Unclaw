@@ -1,0 +1,110 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+// One conversation turn. Roles match the OpenAI/Groq chat-completions
+// schema so the array can be sent straight to soul.exe as `history`.
+export interface Turn {
+  role: 'user' | 'assistant';
+  content: string;
+  /** Wall-clock when this turn happened. Useful for debugging + future
+   *  features ("you said X two days ago"). Not sent to the LLM. */
+  ts: number;
+}
+
+const STORAGE_PREFIX = 'unclaw.chat.';
+
+// Hard ceiling on how many turns we keep around. Older turns drop off
+// the front when this is exceeded. 50 = ~25 exchanges; plenty for
+// natural conversation while keeping localStorage and request payloads
+// bounded. Adjust here if you want longer memory.
+const MAX_TURNS = 50;
+
+// How many recent turns we ship to the LLM by default. ~15 covers
+// 7-8 exchanges, which is what feels "current" to most people.
+const DEFAULT_HISTORY_WINDOW = 15;
+
+function storageKey(personaId: string): string {
+  return STORAGE_PREFIX + personaId;
+}
+
+function loadFromStorage(personaId: string): Turn[] {
+  try {
+    const raw = localStorage.getItem(storageKey(personaId));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Turn[];
+    if (!Array.isArray(parsed)) return [];
+    // Defensive shape-check — drop anything malformed.
+    return parsed.filter(
+      t => t && (t.role === 'user' || t.role === 'assistant')
+        && typeof t.content === 'string',
+    );
+  } catch (err) {
+    console.warn('[chatMemory] load failed:', err);
+    return [];
+  }
+}
+
+function saveToStorage(personaId: string, turns: Turn[]): void {
+  try {
+    localStorage.setItem(storageKey(personaId), JSON.stringify(turns));
+  } catch (err) {
+    console.warn('[chatMemory] save failed:', err);
+  }
+}
+
+export interface ChatMemoryAPI {
+  /** Current turn array (newest at end). */
+  turns: Turn[];
+  /** Append a turn and persist. */
+  add: (role: 'user' | 'assistant', content: string) => void;
+  /**
+   * Return the last `limit` turns in the schema soul/Groq expect:
+   * `[{role, content}, ...]`. Used for the `history` field of /chat.
+   */
+  getHistory: (limit?: number) => Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Wipe persisted history for the current persona. */
+  clear: () => void;
+}
+
+/**
+ * Per-persona chat memory. Mounts → reads localStorage; every add/clear
+ * → mirrors back. Switching `personaId` swaps to that persona's history
+ * (so Grace and Mark remember independently).
+ */
+export function useChatMemory(personaId: string): ChatMemoryAPI {
+  const [turns, setTurns] = useState<Turn[]>(() => loadFromStorage(personaId));
+
+  // Keep a ref so callbacks don't see stale state when fired in quick
+  // succession (e.g. user/assistant pair within one render tick).
+  const turnsRef = useRef<Turn[]>(turns);
+  turnsRef.current = turns;
+
+  // Reload when persona changes.
+  useEffect(() => {
+    const next = loadFromStorage(personaId);
+    setTurns(next);
+    turnsRef.current = next;
+  }, [personaId]);
+
+  const add = useCallback<ChatMemoryAPI['add']>((role, content) => {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    const turn: Turn = { role, content: trimmed, ts: Date.now() };
+    const next = [...turnsRef.current, turn].slice(-MAX_TURNS);
+    turnsRef.current = next;
+    setTurns(next);
+    saveToStorage(personaId, next);
+  }, [personaId]);
+
+  const getHistory = useCallback<ChatMemoryAPI['getHistory']>((limit = DEFAULT_HISTORY_WINDOW) => {
+    const slice = turnsRef.current.slice(-limit);
+    return slice.map(t => ({ role: t.role, content: t.content }));
+  }, []);
+
+  const clear = useCallback<ChatMemoryAPI['clear']>(() => {
+    turnsRef.current = [];
+    setTurns([]);
+    try { localStorage.removeItem(storageKey(personaId)); } catch {}
+  }, [personaId]);
+
+  return { turns, add, getHistory, clear };
+}

@@ -72,7 +72,7 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
             exit={{ opacity: 0, x: 8 }}
             transition={{ duration: 0.4, delay: 0.3, ease: [0.16, 1, 0.3, 1] }}
             className="absolute z-20 flex items-center"
-            style={{ top: '48px', right: '14px', gap: '6px' }}
+            style={{ top: '58px', right: '20px', gap: '7px' }}
           >
             <div
               style={{
@@ -117,8 +117,8 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
                 top: '50%',
                 left: '50%',
                 transform: 'translate(-50%, -60%)',
-                width: '520px',
-                height: '520px',
+                width: '580px',
+                height: '580px',
                 borderRadius: '50%',
                 background: 'radial-gradient(circle, rgba(196,68,68,0.12) 0%, rgba(196,68,68,0.04) 40%, transparent 70%)',
                 filter: 'blur(20px)',
@@ -150,8 +150,8 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
                   ease: 'easeInOut',
                 }}
                 style={{
-                  width: '300px',
-                  height: '300px',
+                  width: '340px',
+                  height: '340px',
                   objectFit: 'contain',
                   userSelect: 'none',
                   WebkitUserDrag: 'none',

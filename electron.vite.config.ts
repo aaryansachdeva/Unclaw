@@ -22,6 +22,11 @@ export default defineConfig({
   },
   renderer: {
     root: 'src',
+    // `root: 'src'` makes Vite default publicDir to `src/public`, but our
+    // static assets (Silero ONNX model, AudioWorklet, onnxruntime-web wasm
+    // files) live at the project root in `public/`. Point Vite there so
+    // they're reachable as `/silero_vad.onnx`, `/voice-worklet.js`, etc.
+    publicDir: path.resolve(__dirname, 'public'),
     build: {
       outDir: path.resolve(__dirname, 'dist/renderer'),
       rollupOptions: {

@@ -16,6 +16,7 @@
     "@epicgames-ps/lib-pixelstreamingfrontend-ue5.6": "^0.2.5",
     "framer-motion": "^12.38.0",
     "lucide-react": "^1.7.0",
+    "onnxruntime-web": "^1.24.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },

@@ -17,13 +17,38 @@ const PROMPTS = [
 
 interface InputBarProps {
   onSendMessage: (message: string) => void;
+  /** Disables the textarea and the send button. The mic stays usable. */
   disabled?: boolean;
+  /**
+   * Disables the mic button specifically. Default false — even when
+   * `disabled` is true (e.g. PS not connected yet) the user can still
+   * toggle voice mode and see indicator state.
+   */
+  micDisabled?: boolean;
+  /**
+   * True while voice mode is active (mic open). When set, the mic button
+   * shows the "listening" state instead of the start-recording state.
+   */
+  voiceActive?: boolean;
+  /**
+   * Called when the mic button is clicked. The host (App.tsx) toggles
+   * the underlying continuous voice agent.
+   */
+  onToggleVoice?: () => void;
 }
 
-export function InputBar({ onSendMessage, disabled = false }: InputBarProps) {
+export function InputBar({
+  onSendMessage,
+  disabled = false,
+  micDisabled = false,
+  voiceActive = false,
+  onToggleVoice,
+}: InputBarProps) {
   const [message, setMessage] = useState('');
   const [isFocused, setIsFocused] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
+  // Local fallback when no host-driven voice toggle is wired.
+  const [localRecording, setLocalRecording] = useState(false);
+  const isRecording = onToggleVoice ? voiceActive : localRecording;
 
   const [currentPrompt, setCurrentPrompt] = useState('');
   const [promptVisible, setPromptVisible] = useState(true);
@@ -79,8 +104,8 @@ export function InputBar({ onSendMessage, disabled = false }: InputBarProps) {
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
-    el.style.height = '21px';
-    el.style.height = `${Math.min(el.scrollHeight, 84)}px`;
+    el.style.height = '22px';
+    el.style.height = `${Math.min(el.scrollHeight, 110)}px`;
   }, [message]);
 
   const handleSend = () => {
@@ -104,7 +129,7 @@ export function InputBar({ onSendMessage, disabled = false }: InputBarProps) {
       transition={{ duration: 0.5, delay: 0.25, ease: [0.16, 1, 0.3, 1] }}
       style={{
         position: 'relative',
-        borderRadius: '16px',
+        borderRadius: '18px',
         background: isFocused ? 'var(--glass-bg-hover)' : 'var(--glass-bg)',
         backdropFilter: 'var(--glass-blur)',
         WebkitBackdropFilter: 'var(--glass-blur)',
@@ -117,9 +142,9 @@ export function InputBar({ onSendMessage, disabled = false }: InputBarProps) {
         style={{
           display: 'flex',
           alignItems: 'flex-end',
-          gap: '8px',
-          padding: '10px 10px 10px 18px',
-          minHeight: '44px',
+          gap: '10px',
+          padding: '13px 13px 13px 22px',
+          minHeight: '52px',
         }}
       >
         <div style={{ flex: 1, position: 'relative', minWidth: 0, alignSelf: 'center' }}>
@@ -136,7 +161,7 @@ export function InputBar({ onSendMessage, disabled = false }: InputBarProps) {
             style={{
               display: 'block', width: '100%', background: 'transparent',
               border: 'none', outline: 'none', resize: 'none', overflow: 'hidden',
-              fontSize: '13.5px', lineHeight: '21px',
+              fontSize: '14px', lineHeight: '22px',
               color: 'rgba(255,255,255,0.92)', caretColor: 'var(--accent)',
               opacity: disabled ? 0.3 : 1,
               fontFamily: 'inherit', fontWeight: 400, letterSpacing: '0.01em',
@@ -147,14 +172,14 @@ export function InputBar({ onSendMessage, disabled = false }: InputBarProps) {
             <div
               aria-hidden="true"
               style={{
-                position: 'absolute', top: 0, left: 0, right: 0, height: '21px',
+                position: 'absolute', top: 0, left: 0, right: 0, height: '22px',
                 display: 'flex', alignItems: 'center',
                 pointerEvents: 'none', userSelect: 'none',
                 overflow: 'hidden', whiteSpace: 'nowrap',
               }}
             >
               <span style={{
-                fontSize: '13.5px', lineHeight: '21px', fontWeight: 400,
+                fontSize: '14px', lineHeight: '22px', fontWeight: 400,
                 letterSpacing: '0.01em', color: 'rgba(255,255,255,0.25)',
                 opacity: promptVisible ? 1 : 0,
                 transition: 'opacity 0.4s var(--ease-out-quart)',
@@ -180,8 +205,8 @@ export function InputBar({ onSendMessage, disabled = false }: InputBarProps) {
               aria-label="Send message"
               className="glass-btn"
               style={{
-                flexShrink: 0, width: '34px', height: '34px',
-                borderRadius: '10px',
+                flexShrink: 0, width: '36px', height: '36px',
+                borderRadius: '11px',
                 background: 'rgba(255, 255, 255, 0.12)',
                 color: 'var(--text-primary)',
               }}
@@ -197,15 +222,18 @@ export function InputBar({ onSendMessage, disabled = false }: InputBarProps) {
               transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
               whileHover={{ scale: 1.06 }}
               whileTap={{ scale: 0.92 }}
-              onClick={() => setIsRecording(r => !r)}
-              disabled={disabled}
-              aria-label={isRecording ? 'Stop recording' : 'Start recording'}
+              onClick={() => {
+                if (onToggleVoice) onToggleVoice();
+                else setLocalRecording(r => !r);
+              }}
+              disabled={micDisabled}
+              aria-label={isRecording ? 'Stop voice mode' : 'Start voice mode'}
               className="glass-btn"
               style={{
-                flexShrink: 0, width: '34px', height: '34px',
-                borderRadius: '10px',
+                flexShrink: 0, width: '36px', height: '36px',
+                borderRadius: '11px',
                 background: isRecording ? 'rgba(200,122,122,0.12)' : 'rgba(255,255,255,0.06)',
-                opacity: disabled ? 0.25 : 1,
+                opacity: micDisabled ? 0.25 : 1,
                 animation: isRecording ? 'breathe 2.5s ease-in-out infinite' : 'none',
                 position: 'relative', overflow: 'visible',
               }}

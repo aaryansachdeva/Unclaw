@@ -20,15 +20,15 @@ export function Titlebar() {
       style={{
         WebkitAppRegion: 'drag',
         background: 'linear-gradient(to bottom, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.2) 60%, transparent 100%)',
-        padding: '10px 14px 24px 14px',
+        padding: '14px 20px 30px 20px',
       } as React.CSSProperties}
     >
       <div className="flex items-center justify-between">
         <span
           style={{
-            fontSize: '11px',
+            fontSize: '12px',
             fontWeight: 600,
-            letterSpacing: '0.15em',
+            letterSpacing: '0.18em',
             color: 'rgba(255,255,255,0.4)',
           }}
         >
@@ -37,7 +37,7 @@ export function Titlebar() {
 
         <div
           className="flex items-center"
-          style={{ WebkitAppRegion: 'no-drag', gap: '4px' } as React.CSSProperties}
+          style={{ WebkitAppRegion: 'no-drag', gap: '6px' } as React.CSSProperties}
         >
           {([
             { action: handlePin, label: pinned ? 'Unpin from top' : 'Pin to top', icon: 'pin' },
@@ -52,9 +52,9 @@ export function Titlebar() {
               title={label}
               className="glass-btn"
               style={{
-                width: '28px',
-                height: '28px',
-                borderRadius: '8px',
+                width: '30px',
+                height: '30px',
+                borderRadius: '9px',
                 background: 'rgba(255,255,255,0.08)',
               }}
               onMouseEnter={e => {

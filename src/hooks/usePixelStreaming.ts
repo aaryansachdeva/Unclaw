@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Config, PixelStreaming } from '@epicgames-ps/lib-pixelstreamingfrontend-ue5.6';
+import {
+  Config,
+  PixelStreaming,
+  Logger,
+  LogLevel,
+} from '@epicgames-ps/lib-pixelstreamingfrontend-ue5.6';
+
+// Silence the PS lib's verbose info/debug noise. Warnings + errors only.
+// Done at module load (not inside the hook) so it applies before the first
+// PixelStreaming instance is constructed and survives hook remounts.
+Logger.InitLogging(LogLevel.Warning, true);
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'failed';
 

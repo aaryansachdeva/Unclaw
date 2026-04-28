@@ -1,11 +1,11 @@
-import { app, BrowserWindow, screen, ipcMain, Tray, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, screen, ipcMain, session, Tray, Menu, nativeImage } from 'electron';
 import path from 'path';
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 
-const WINDOW_WIDTH = 340;
-const WINDOW_HEIGHT = 620;
+const WINDOW_WIDTH = 420;
+const WINDOW_HEIGHT = 760;
 const EDGE_MARGIN = 16;
 
 function createWindow() {
@@ -25,9 +25,8 @@ function createWindow() {
     minimizable: true,
     maximizable: false,
     skipTaskbar: false,
-    minWidth: 280,
-    minHeight: 400,
-    maxWidth: 600,
+    minWidth: 320,
+    minHeight: 480,
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
@@ -76,6 +75,28 @@ ipcMain.on('window:toggle-pin', (_event, pinned: boolean) => {
 });
 
 app.whenReady().then(() => {
+  // Grant microphone + media-device access to the renderer so the voice
+  // agent's `navigator.mediaDevices.getUserMedia({audio:true})` works.
+  // Electron rejects all permission requests by default, which silently
+  // fails getUserMedia with NotAllowedError -- that's the "mic button
+  // doesn't do anything" symptom. Allow the specific permissions UnClaw
+  // needs; everything else still goes through Chromium's default deny.
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
+    const allowed = ['media', 'audioCapture', 'mediaKeySystem'];
+    cb(allowed.includes(permission));
+  });
+  // Some Electron versions also gate via this synchronous check.
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
+    return ['media', 'audioCapture', 'mediaKeySystem'].includes(permission);
+  });
+  // Auto-pick a device when getUserMedia gets called without picking one.
+  session.defaultSession.setDevicePermissionHandler((details) => {
+    if (details.deviceType === 'audioInput' || details.deviceType === 'audioOutput') {
+      return true;
+    }
+    return false;
+  });
+
   createWindow();
   createTray();
 });

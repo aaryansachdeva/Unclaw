@@ -27,9 +27,9 @@ export function AgentSwitcher({ agents, currentIndex, onSwitch, disabled = false
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: '4px',
-        padding: '6px 10px',
-        borderRadius: '12px',
+        gap: '6px',
+        padding: '8px 12px',
+        borderRadius: '14px',
         background: 'var(--glass-bg)',
         backdropFilter: 'var(--glass-blur)',
         WebkitBackdropFilter: 'var(--glass-blur)',
@@ -46,16 +46,16 @@ export function AgentSwitcher({ agents, currentIndex, onSwitch, disabled = false
         aria-label="Previous agent"
         className="glass-btn"
         style={{
-          width: '22px', height: '22px', borderRadius: '6px',
+          width: '24px', height: '24px', borderRadius: '7px',
           background: 'rgba(255,255,255,0.04)',
         }}
         onMouseEnter={e => { if (!disabled) e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; }}
         onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.04)'; }}
       >
-        <ChevronLeft size={12} color="rgba(255,255,255,0.45)" strokeWidth={2} />
+        <ChevronLeft size={13} color="rgba(255,255,255,0.45)" strokeWidth={2} />
       </motion.button>
 
-      <div style={{ minWidth: '48px', textAlign: 'center', overflow: 'hidden' }}>
+      <div style={{ minWidth: '60px', textAlign: 'center', overflow: 'hidden' }}>
         <AnimatePresence mode="wait">
           <motion.span
             key={currentIndex}
@@ -65,7 +65,7 @@ export function AgentSwitcher({ agents, currentIndex, onSwitch, disabled = false
             transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
             style={{
               display: 'block',
-              fontSize: '11.5px',
+              fontSize: '12.5px',
               fontWeight: 600,
               letterSpacing: '0.04em',
               color: 'rgba(255,255,255,0.6)',
@@ -84,13 +84,13 @@ export function AgentSwitcher({ agents, currentIndex, onSwitch, disabled = false
         aria-label="Next agent"
         className="glass-btn"
         style={{
-          width: '22px', height: '22px', borderRadius: '6px',
+          width: '24px', height: '24px', borderRadius: '7px',
           background: 'rgba(255,255,255,0.04)',
         }}
         onMouseEnter={e => { if (!disabled) e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; }}
         onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.04)'; }}
       >
-        <ChevronRight size={12} color="rgba(255,255,255,0.45)" strokeWidth={2} />
+        <ChevronRight size={13} color="rgba(255,255,255,0.45)" strokeWidth={2} />
       </motion.button>
     </motion.div>
   );
