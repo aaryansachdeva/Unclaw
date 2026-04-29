@@ -3,7 +3,7 @@
 //   - a 30 s ring buffer of the last raw audio
 //   - the Silero VAD session and prosody engine
 //   - the endpointer state machine
-//   - speculative + final Whisper transcription
+//   - one Whisper transcription per utterance, fired on endpoint
 //   - barge-in / AI-speaking awareness
 //
 // External contract is intentionally tiny: `start({ ... })`, `stop()`,
@@ -13,15 +13,10 @@
 import {
   BARGE_IN_FRAMES,
   BARGE_IN_PROB,
-  EARLY_FIRE_AFTER_MS,
-  ENDPOINT_BASE_MS,
-  FRAME_MS,
-  FRAME_SIZE,
+  MIN_UTTERANCE_PEAK,
   PRE_ROLL_MS,
   RING_BUFFER_SAMPLES,
   SAMPLE_RATE,
-  VAD_ACTIVATION_PROB,
-  VAD_DEACTIVATION_PROB,
 } from './constants';
 import { Endpointer, type EndpointerState } from './endpointer';
 import { ProsodyEngine, type ProsodySnapshot } from './prosodyEngine';
@@ -29,14 +24,18 @@ import { SileroVAD, preloadVAD } from './vadEngine';
 import { transcribe, type TranscriptionResult } from './whisperClient';
 
 // --- public event surface ---------------------------------------------
+//
+// 'state' fires on every endpointer state transition. The hook on top
+// derives isUserSpeaking / silenceCountdown / etc. from it. This is the
+// single source of truth for UI; we deliberately don't ship separate
+// speechStart/speechEnd events because they can be derived from state
+// transitions and the redundancy made it easy to forget one of them
+// (see git log: speechStart was previously unreachable for ~3 weeks).
 
 export type VoiceEvent =
   | { kind: 'state'; state: EndpointerState }
   | { kind: 'frame'; vadProb: number; smoothedProb: number; prosody: ProsodySnapshot }
   | { kind: 'silenceTimer'; requiredMs: number; elapsedMs: number }
-  | { kind: 'speechStart' }
-  | { kind: 'speechEnd'; durationMs: number }
-  | { kind: 'partialTranscript'; text: string }
   | { kind: 'transcript'; text: string; durationS: number; totalMs: number }
   | { kind: 'transcribing'; pending: boolean }
   | { kind: 'bargeIn' }
@@ -69,14 +68,15 @@ export class VoiceController {
   private prosody = new ProsodyEngine();
   private endpointer = new Endpointer();
 
-  // Endpointer / partial-transcript bookkeeping.
-  private partialTranscript = '';
-  private earlyFireSent = false;
-  private earlyFireAbort: AbortController | null = null;
-  private earlyFirePromise: Promise<TranscriptionResult> | null = null;
+  /** Last endpointer state we saw — used to detect transitions. */
+  private prevState: EndpointerState = 'idle';
+
+  /** AbortController for the in-flight Whisper request. */
   private finalAbort: AbortController | null = null;
 
   private inFlightTranscriptionId = 0;
+  /** Per-utterance counter for log correlation. */
+  private finalFireCounter = 0;
 
   // Conversational pacing — average ms between user turns.
   private lastTurnEndedAtMs = 0;
@@ -206,17 +206,19 @@ export class VoiceController {
           });
         }
       };
+
+      // Wait for the VAD model BEFORE wiring the audio graph, so the very
+      // first frame the worklet emits goes straight into processFrame.
+      // Wiring after `source.connect(...)` would stream the first ~6
+      // frames into a no-op handler and silently drop them.
+      await vadInitP;
+      this.worklet.handleFrame = async (samples: Float32Array) => {
+        await this.processFrame(samples);
+      };
       source.connect(this.node);
       // Complete the graph: silent worklet output → destination. Speaker
       // output is identically zero so no audible feedback.
       this.node.connect(this.ctx.destination);
-
-      await vadInitP;
-
-      // Wire the worklet handler now that VAD is ready.
-      this.worklet.handleFrame = async (samples: Float32Array) => {
-        await this.processFrame(samples);
-      };
     } catch (err) {
       this.running = false;
       this.emit({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
@@ -225,11 +227,12 @@ export class VoiceController {
     }
   }
 
-  /** Stop mic + worklet. Cancels in-flight transcriptions. */
+  /** Stop mic + worklet. Cancels any in-flight Whisper request. */
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
-    this.cancelInFlight('stop');
+    this.finalAbort?.abort();
+    this.finalAbort = null;
     await this.cleanup();
   }
 
@@ -290,11 +293,9 @@ export class VoiceController {
     this.bargeInFrames = 0;
 
     // 4. Endpointer step.
-    const before = this.endpointer.currentTimeMs;
     const snap = this.endpointer.feed({
       vadProb,
       prosody,
-      partialTranscript: this.partialTranscript,
       msSinceAIFinished: this.lastAIFinishedAtMs > 0
         ? performance.now() - this.lastAIFinishedAtMs : 0,
       recentTurnPaceMs: this.lastTurnPaceMs,
@@ -302,26 +303,12 @@ export class VoiceController {
 
     this.emit({ kind: 'frame', vadProb, smoothedProb: this.vad.smoothedProb, prosody });
 
-    // Detect transitions for higher-level event emission.
-    if (snap.state === 'speech' && before === 0) {
-      // First-ever frame — ignore.
-    }
-
-    // Speech-start: armed→speech transition (we get into 'speech' the
-    // moment armingFrames count is reached).
-    if (snap.state === 'speech' && snap.utteranceMs <= FRAME_MS * 2) {
-      this.emit({ kind: 'speechStart' });
-      this.partialTranscript = '';
-      this.earlyFireSent = false;
-    }
-
-    // Speculative early-fire: once we've crossed the threshold AND we're
-    // either still in speech or just transitioned to trailing.
-    if (!this.earlyFireSent
-        && (snap.state === 'speech' || snap.state === 'trailing')
-        && snap.utteranceMs >= EARLY_FIRE_AFTER_MS) {
-      this.earlyFireSent = true;
-      this.kickOffEarlyTranscription(snap.speechStartFrameIdx, snap.utteranceMs);
+    // State transitions drive UI. We emit `state` ON CHANGE and
+    // `silenceTimer` only while trailing — the hook resets the
+    // countdown UI on any transition out of trailing.
+    if (snap.state !== this.prevState) {
+      this.prevState = snap.state;
+      this.emit({ kind: 'state', state: snap.state });
     }
 
     if (snap.state === 'trailing') {
@@ -333,9 +320,18 @@ export class VoiceController {
     }
 
     if (snap.justEnded) {
-      const duration = snap.utteranceMs;
-      this.emit({ kind: 'speechEnd', durationMs: duration });
-      this.handleEnded(snap.speechStartFrameIdx, duration).catch((err) => {
+      // Snapshot the ring write position and the trailing-silence amount
+      // RIGHT NOW, at speech-end. handleEnded runs as a microtask and
+      // more frames may land in the ring before it executes — without
+      // these snapshots, the slice would drift later in the buffer (i.e.
+      // grab even more silence) on every invocation.
+      const ringFilledAtEnd = this.ringFilled;
+      const trailingSilenceMs = snap.silenceElapsedMs;
+      this.handleEnded(
+        snap.utteranceMs,
+        trailingSilenceMs,
+        ringFilledAtEnd,
+      ).catch((err) => {
         this.emit({ kind: 'error', message: `endpoint handler: ${err}` });
       });
     }
@@ -344,88 +340,126 @@ export class VoiceController {
   // -------------------------------------------------------------------
   //  Transcription
   // -------------------------------------------------------------------
-  private kickOffEarlyTranscription(speechStartFrameIdx: number, utteranceMs: number): void {
-    const audio = this.sliceUtteranceWithPreroll(speechStartFrameIdx, utteranceMs);
-    if (!audio) return;
-    this.cancelEarly('superseded');
-    const ac = new AbortController();
-    this.earlyFireAbort = ac;
-    this.emit({ kind: 'transcribing', pending: true });
 
-    const prompt = this.opts.whisperPrompt?.() ?? '';
-    this.earlyFirePromise = transcribe(audio, { signal: ac.signal, prompt })
-      .then((r) => {
-        // Stash the partial for endpointer to use. Don't emit "transcript"
-        // yet — that's only for the FINAL result the chat consumes.
-        this.partialTranscript = r.text;
-        this.emit({ kind: 'partialTranscript', text: r.text });
-        return r;
-      })
-      .catch((err) => {
-        if (ac.signal.aborted) {
-          // Expected cancellation, no-op.
-          throw err;
-        }
-        // Real error — keep early-fire null but continue (final fire still works).
-        console.warn('[voice] early transcribe failed:', err);
-        throw err;
-      });
-  }
-
-  private async handleEnded(speechStartFrameIdx: number, durationMs: number): Promise<void> {
-    const audio = this.sliceUtteranceWithPreroll(speechStartFrameIdx, durationMs);
-    if (!audio || audio.length < SAMPLE_RATE * 0.15) {
-      // Too short — ignore (likely a misfire).
-      this.endpointer.reset();
-      this.partialTranscript = '';
-      this.emit({ kind: 'state', state: 'idle' });
-      return;
-    }
-
-    const ourId = ++this.inFlightTranscriptionId;
-
-    // If the early-fire's audio length matches the final length within a
-    // small slop, reuse its result instead of firing a second request.
-    let result: TranscriptionResult | null = null;
-    if (this.earlyFirePromise && this.earlyFireSent && !this.earlyFireAbort?.signal.aborted) {
-      try {
-        result = await this.earlyFirePromise;
-      } catch {
-        result = null;
-      }
-    }
-
-    // Fire a fresh final request if we don't have a usable speculative result.
-    if (!result) {
-      this.cancelFinal('superseded');
-      const ac = new AbortController();
-      this.finalAbort = ac;
-      this.emit({ kind: 'transcribing', pending: true });
-      try {
-        result = await transcribe(audio, {
-          signal: ac.signal,
-          prompt: this.opts.whisperPrompt?.() ?? '',
-        });
-      } catch (err) {
-        if (!ac.signal.aborted) {
-          this.emit({ kind: 'error', message: `transcribe failed: ${err}` });
-        }
-        result = null;
-      }
-    }
-
-    this.emit({ kind: 'transcribing', pending: false });
-
-    // Prep for next utterance regardless of success.
+  /** Reset every per-utterance subsystem and notify UI we're back to idle. */
+  private resetForNextUtterance(): void {
     this.endpointer.reset();
     this.vad.reset();
     this.prosody.reset();
-    this.partialTranscript = '';
-    this.earlyFireSent = false;
-    const now = performance.now();
-    if (this.lastTurnEndedAtMs > 0) {
-      this.lastTurnPaceMs = now - this.lastTurnEndedAtMs;
+    if (this.prevState !== 'idle') {
+      this.prevState = 'idle';
+      this.emit({ kind: 'state', state: 'idle' });
     }
+  }
+
+  private async handleEnded(
+    durationMs: number,
+    trailingSilenceMs: number,
+    ringFilledAtEnd: number,
+  ): Promise<void> {
+    const audio = this.sliceUtteranceWithPreroll(
+      durationMs,
+      trailingSilenceMs,
+      ringFilledAtEnd,
+    );
+    if (!audio || audio.length < SAMPLE_RATE * 0.15) {
+      // Too short — ignore (likely a misfire).
+      console.info(
+        `[stt] endpoint fired but utterance too short ` +
+        `(${audio ? (audio.length / SAMPLE_RATE).toFixed(2) : 0}s) — discarded`,
+      );
+      this.resetForNextUtterance();
+      return;
+    }
+
+    // Pre-flight energy gate. Whisper turbo hallucinates "Thank you" /
+    // "Thanks for watching" on near-silent audio. Two complementary
+    // measurements:
+    //   - peak: max absolute sample value across the speech portion.
+    //     Robust to pause-heavy utterances ("um... ok") where the RMS
+    //     averages out low even though the speaker actually said words.
+    //   - rms: total energy. Useful as a sanity check + log signal.
+    // We gate on PEAK, not RMS — a real spoken word always crosses
+    // peak ≥ ~0.05 even on a quiet mic, while pure-silence audio is
+    // bounded by the noise floor (typically ≤ 0.01).
+    const preRollSamples = Math.round((PRE_ROLL_MS / 1000) * SAMPLE_RATE);
+    const speechView = audio.subarray(Math.min(preRollSamples, audio.length));
+    let sumSq = 0;
+    let peak = 0;
+    for (let i = 0; i < speechView.length; i++) {
+      const v = speechView[i];
+      sumSq += v * v;
+      const a = v < 0 ? -v : v;
+      if (a > peak) peak = a;
+    }
+    const rms = speechView.length > 0 ? Math.sqrt(sumSq / speechView.length) : 0;
+
+    const audioSec = audio.length / SAMPLE_RATE;
+    const silenceThr = this.endpointer.currentSilenceRequiredMs;
+
+    if (peak < MIN_UTTERANCE_PEAK) {
+      console.info(
+        `[stt] endpoint fired but audio too quiet ` +
+        `(peak=${peak.toFixed(4)} rms=${rms.toFixed(4)} ` +
+        `audio=${audioSec.toFixed(2)}s utterance=${(durationMs/1000).toFixed(2)}s) ` +
+        `— discarded`,
+      );
+      this.resetForNextUtterance();
+      return;
+    }
+
+    console.info(
+      `[stt] endpoint fired  ` +
+      `utterance=${(durationMs/1000).toFixed(2)}s  ` +
+      `audio-with-preroll=${audioSec.toFixed(2)}s  ` +
+      `peak=${peak.toFixed(3)}  rms=${rms.toFixed(3)}  ` +
+      `silence-threshold-was=${silenceThr.toFixed(0)}ms`,
+    );
+
+    const ourId = ++this.inFlightTranscriptionId;
+    this.emit({ kind: 'transcribing', pending: true });
+
+    // Single transcription request, fired now that the user has actually
+    // stopped speaking. We used to speculatively fire a second one ~1 s
+    // into the utterance and reuse it here on a length match — removed
+    // because the cost doubled per turn for a small wall-time win.
+    let result: TranscriptionResult | null = null;
+    // If a previous request is still in flight (rapid back-to-back
+    // utterances), abort it — its result would be filtered out by the
+    // inFlightTranscriptionId check anyway, but cancelling saves bytes
+    // and frees the proxy connection sooner.
+    this.finalAbort?.abort();
+    const ac = new AbortController();
+    this.finalAbort = ac;
+    const fireId = ++this.finalFireCounter;
+    console.info(
+      `[stt] FINAL #${fireId}  audio=${audioSec.toFixed(2)}s (${audio.length} samples)`,
+    );
+    const t0 = performance.now();
+    try {
+      result = await transcribe(audio, {
+        signal: ac.signal,
+        prompt: this.opts.whisperPrompt?.() ?? '',
+      });
+      const wall = (performance.now() - t0).toFixed(0);
+      console.info(
+        `[stt] FINAL #${fireId} resp  ` +
+        `wall=${wall}ms  proxy=${result.proxyMs ?? '?'}ms  ` +
+        `text="${result.text}"  rejection=${result.rejection ?? '-'}`,
+      );
+    } catch (err) {
+      if (!ac.signal.aborted) {
+        console.error(`[stt] FINAL #${fireId} failed:`, err);
+        this.emit({ kind: 'error', message: `transcribe failed: ${err}` });
+      }
+      result = null;
+    }
+
+    this.emit({ kind: 'transcribing', pending: false });
+    this.resetForNextUtterance();
+
+    const now = performance.now();
+    if (this.lastTurnEndedAtMs > 0) this.lastTurnPaceMs = now - this.lastTurnEndedAtMs;
     this.lastTurnEndedAtMs = now;
 
     if (this.inFlightTranscriptionId !== ourId) return;
@@ -433,7 +467,6 @@ export class VoiceController {
     const text = result.text.trim();
     if (!text) return;
     this.emit({ kind: 'transcript', text, durationS: result.durationS, totalMs: result.totalMs });
-    this.emit({ kind: 'state', state: 'idle' });
   }
 
   // -------------------------------------------------------------------
@@ -453,24 +486,46 @@ export class VoiceController {
     }
   }
 
-  /** Produce a contiguous Float32Array from the ring covering speech + pre-roll. */
-  private sliceUtteranceWithPreroll(speechStartFrameIdx: number, utteranceMs: number): Float32Array | null {
-    if (speechStartFrameIdx < 0) return null;
+  /**
+   * Produce a contiguous Float32Array from the ring covering pre-roll +
+   * speech only — NO trailing silence. The endpointer fires after several
+   * hundred ms of confirmed silence, so the live ring tail at handleEnded
+   * time is silence; anchoring the slice at the live tail (the previous
+   * implementation did) gave Whisper a buffer that was mostly silence,
+   * which is exactly what triggers the "Thank you" / "Thanks for
+   * watching" hallucinations the model loves so much.
+   *
+   * Anchoring at `ringFilledAtEnd - trailingSilenceSamples` gives us the
+   * actual end-of-speech in absolute sample coordinates; we then walk
+   * backwards `utteranceMs + PRE_ROLL_MS` to get the start.
+   */
+  private sliceUtteranceWithPreroll(
+    utteranceMs: number,
+    trailingSilenceMs: number,
+    ringFilledAtEnd: number,
+  ): Float32Array | null {
     const preRollSamples = Math.round((PRE_ROLL_MS / 1000) * SAMPLE_RATE);
     const utteranceSamples = Math.round((utteranceMs / 1000) * SAMPLE_RATE);
-    const totalSamples = preRollSamples + utteranceSamples;
+    const trailingSilenceSamples = Math.max(
+      0, Math.round((trailingSilenceMs / 1000) * SAMPLE_RATE),
+    );
 
-    // Cap at how much we have. ringFilled is monotonic (samples ever
-    // written); the actual buffer holds at most `ring.length`.
-    const have = Math.min(this.ringFilled, this.ring.length);
-    const want = Math.min(totalSamples, have);
+    // Anchor: end of speech in absolute coords (samples-ever-written).
+    // Clamp to 0 in case something upstream gave us nonsense.
+    const speechEndAbs = Math.max(0, ringFilledAtEnd - trailingSilenceSamples);
+    const speechStartAbs = Math.max(0, speechEndAbs - utteranceSamples);
+    const preRollStartAbs = Math.max(0, speechStartAbs - preRollSamples);
+
+    // Don't read past what the ring still holds — only the most recent
+    // `ring.length` samples are available.
+    const oldestAvailableAbs = Math.max(0, this.ringFilled - this.ring.length);
+    const sliceStartAbs = Math.max(preRollStartAbs, oldestAvailableAbs);
+    const sliceEndAbs = Math.min(speechEndAbs, this.ringFilled);
+
+    const want = sliceEndAbs - sliceStartAbs;
     if (want < SAMPLE_RATE * 0.1) return null;
 
-    // Source range in absolute coords: [end - want, end).
-    const endAbs = this.ringFilled;
-    const startAbs = endAbs - want;
-    const startIdx = ((startAbs % this.ring.length) + this.ring.length) % this.ring.length;
-
+    const startIdx = ((sliceStartAbs % this.ring.length) + this.ring.length) % this.ring.length;
     const out = new Float32Array(want);
     if (startIdx + want <= this.ring.length) {
       out.set(this.ring.subarray(startIdx, startIdx + want));
@@ -485,19 +540,6 @@ export class VoiceController {
   // -------------------------------------------------------------------
   //  Cleanup
   // -------------------------------------------------------------------
-  private cancelInFlight(reason: string): void {
-    this.cancelEarly(reason);
-    this.cancelFinal(reason);
-  }
-  private cancelEarly(_reason: string): void {
-    this.earlyFireAbort?.abort();
-    this.earlyFireAbort = null;
-    this.earlyFirePromise = null;
-  }
-  private cancelFinal(_reason: string): void {
-    this.finalAbort?.abort();
-    this.finalAbort = null;
-  }
   private async cleanup(): Promise<void> {
     try {
       this.node?.disconnect();

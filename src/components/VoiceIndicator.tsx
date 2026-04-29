@@ -1,203 +1,139 @@
-// Visual feedback for the voice agent. Three layered surfaces:
+// Compact voice-state surface that lives next to AgentSwitcher in the
+// bottom row. Geometry mirrors AgentSwitcher (radius 14px, padding
+// 8px 12px, glass background) so the row reads as a single design
+// family. The chip's footprint is intentionally fixed once mounted —
+// only color, icon, and label *content* change while voice mode is
+// active. No internal AnimatePresence, no countdown rail, no `ms`
+// readout, no two-row layout. Bars + icon + fixed-width label only.
 //
-//   1. State icon + label  — "ready" / "listening" / "thinking…" / "transcribing"
-//   2. Live VAD bars       — five vertical bars whose heights track the
-//                            smoothed speech probability; subtle when idle,
-//                            bright + glowing while the user speaks.
-//   3. Silence countdown   — a thin progress bar showing elapsed/required
-//                            silence ms. Width animates smoothly so the
-//                            user can SEE how much pause they have left.
-//                            When the dynamic threshold jumps (e.g. the
-//                            partial transcript ends in "uh"), the bar
-//                            visibly decompresses, telegraphing "you've
-//                            got more time."
+// State language:
+//   ready        →  mic icon (ghost), "ready" label
+//   listening    →  mic in --live, bars react to vadLevel, "listening"
+//   thinking     →  mic ghost, bars idle, "thinking" label
+//   transcribing →  spinner in --accent, bars freeze, "transcribing"
+//   error        →  danger-tinted glass chip, role="alert"
 //
-// The silence countdown is the secret-sauce element — almost no
-// production voice agent shows it, and it eliminates the "did it cut me
-// off?" anxiety because the timeout is now visible.
+// All colors flow through tokens; live/accent glows are derived via
+// color-mix so a token swap propagates everywhere automatically.
 
-import { motion, AnimatePresence } from 'framer-motion';
-import { Mic, Loader2, Sparkles, AlertCircle } from 'lucide-react';
+import { motion } from 'framer-motion';
+import { Mic, Loader2, AlertCircle } from 'lucide-react';
 
 interface VoiceIndicatorProps {
   isListening: boolean;
   isUserSpeaking: boolean;
   isTranscribing: boolean;
-  vadLevel: number;                 // smoothed [0, 1]
+  vadLevel: number;                             // smoothed [0, 1]
   silence: { requiredMs: number; elapsedMs: number };
   error?: string | null;
 }
+
+// Project easing tokens, expressed as bezier tuples because Framer's
+// `ease` prop does not accept CSS-variable strings (it silently drops
+// them and falls back to default easing).
+const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
 const NUM_BARS = 5;
 const BAR_GAP = 3;
 const BAR_W = 2.5;
 const BAR_MIN = 3;
 const BAR_MAX = 16;
+// How much each off-center bar lags the central one, creating the
+// outward "ripple" feel rather than 5 bars moving in lockstep.
+const BAR_FALLOFF = 0.18;
 
-const C_TEXT_DIM = 'rgba(255,255,255,0.45)';
-const C_TEXT     = 'rgba(255,255,255,0.85)';
-const C_TEXT_HOT = 'rgba(170,255,200,0.95)';   // mint when active
-const C_BG       = 'rgba(255,255,255,0.04)';
-const C_BG_HOT   = 'rgba(170,255,200,0.06)';
-const C_BORDER   = 'rgba(255,255,255,0.10)';
-const C_BORDER_HOT = 'rgba(170,255,200,0.30)';
-const C_BAR_IDLE = 'rgba(255,255,255,0.30)';
-const C_BAR_HOT  = 'rgba(170,255,200,0.90)';
-const C_RAIL     = 'rgba(255,255,255,0.08)';
-const C_FILL_A   = 'rgba(170,255,200,0.95)';   // mint
-const C_FILL_B   = 'rgba(180,200,255,0.85)';   // lavender
-const C_ERR_FILL = 'rgba(255,160,160,0.95)';
-const C_ERR_BG   = 'rgba(220, 80, 80, 0.10)';
-const C_ERR_BD   = 'rgba(220, 80, 80, 0.32)';
+const LIVE_GLOW = 'color-mix(in srgb, var(--live) 45%, transparent)';
+const ACCENT_GLOW = 'color-mix(in srgb, var(--accent) 45%, transparent)';
+
+// Width of the label slot. "TRANSCRIBING" at 10px / 600 / 0.10em
+// uppercase measures ~88px; round up to leave a hair of breathing
+// room and lock the chip's total width across all four labels.
+const LABEL_SLOT_WIDTH = 92;
 
 export function VoiceIndicator({
   isListening,
   isUserSpeaking,
   isTranscribing,
   vadLevel,
-  silence,
+  silence: _silence, // eslint-disable-line @typescript-eslint/no-unused-vars
   error,
 }: VoiceIndicatorProps) {
-  // Error chip wins — show it whenever we have one, even if not listening.
-  if (error) {
-    return (
-      <motion.div
-        initial={{ opacity: 0, y: 4 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.18 }}
-        title={error}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '7px',
-          padding: '5px 11px',
-          borderRadius: '999px',
-          background: C_ERR_BG,
-          border: `1px solid ${C_ERR_BD}`,
-          color: C_ERR_FILL,
-          fontSize: '10px',
-          fontWeight: 600,
-          letterSpacing: '0.06em',
-          maxWidth: '320px',
-        }}
-      >
-        <AlertCircle size={11} strokeWidth={2.2} />
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {error}
-        </span>
-      </motion.div>
-    );
-  }
-
+  if (error) return <ErrorChip error={error} />;
   if (!isListening && !isTranscribing) return null;
 
-  const inTrailing = silence.requiredMs > 0;
-  const remainingMs = inTrailing ? Math.max(0, silence.requiredMs - silence.elapsedMs) : 0;
-  const countdownPct = inTrailing
-    ? Math.min(1, Math.max(0, silence.elapsedMs / silence.requiredMs))
-    : 0;
   const hot = isUserSpeaking || isTranscribing;
+  const activeColor = isTranscribing ? 'var(--accent)' : 'var(--live)';
+  const activeGlow = isTranscribing ? ACCENT_GLOW : LIVE_GLOW;
 
-  // Status label drives the whole tone of the chip.
-  let label = 'ready';
-  if (isTranscribing) label = 'transcribing';
-  else if (isUserSpeaking) label = 'listening';
-  else if (inTrailing) label = 'thinking';
+  // Four canonical states map to four canonical labels. Order matters:
+  // transcribing wins over speaking, speaking wins over listening-idle.
+  // "thinking" is reserved for the brief window where we're still in
+  // listening mode but neither speaking nor transcribing — i.e. the
+  // app is waiting on the user.
+  const label = isTranscribing
+    ? 'transcribing'
+    : isUserSpeaking
+      ? 'listening'
+      : isListening
+        ? 'ready'
+        : 'thinking';
 
   return (
     <motion.div
       key="voice-indicator"
-      initial={{ opacity: 0, y: 4 }}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 4 }}
-      transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+      transition={{ duration: 0.5, delay: 0.15, ease: EASE_OUT_EXPO }}
       style={{
         display: 'inline-flex',
-        flexDirection: 'column',
-        alignItems: 'stretch',
-        gap: '6px',
-        padding: '6px 12px 7px',
+        alignItems: 'center',
+        gap: '8px',
+        padding: '8px 12px',
         borderRadius: '14px',
-        background: hot ? C_BG_HOT : C_BG,
-        border: `1px solid ${hot ? C_BORDER_HOT : C_BORDER}`,
-        backdropFilter: 'blur(8px) saturate(1.1)',
-        WebkitBackdropFilter: 'blur(8px) saturate(1.1)',
-        boxShadow: hot ? '0 0 16px rgba(170,255,200,0.10)' : 'none',
-        transition: 'background 200ms ease, border-color 200ms ease, box-shadow 240ms ease',
-        minWidth: '180px',
+        background: hot ? 'var(--glass-bg-hover)' : 'var(--glass-bg)',
+        backdropFilter: 'var(--glass-blur)',
+        WebkitBackdropFilter: 'var(--glass-blur)',
+        border: `1px solid ${hot ? 'var(--glass-border-focus)' : 'var(--glass-border)'}`,
+        transition:
+          'background 250ms var(--ease-out-quart), border-color 250ms var(--ease-out-quart)',
       }}
     >
-      {/* row 1: icon · bars · label · ms */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-        <StatusIcon
-          isUserSpeaking={isUserSpeaking}
-          isTranscribing={isTranscribing}
-          inTrailing={inTrailing}
-        />
+      <StatusIcon
+        isUserSpeaking={isUserSpeaking}
+        isTranscribing={isTranscribing}
+        activeColor={activeColor}
+      />
 
-        <Bars vadLevel={vadLevel} hot={hot} />
+      <Bars
+        vadLevel={vadLevel}
+        hot={hot}
+        activeColor={activeColor}
+        activeGlow={activeGlow}
+      />
 
-        <span style={{
+      {/* Fixed-width label slot. Width is locked to the longest
+          possible string ("transcribing"), text is left-aligned so
+          shorter labels don't recenter on every change. This is the
+          load-bearing fix for the resize thrash. */}
+      <span
+        style={{
+          minWidth: `${LABEL_SLOT_WIDTH}px`,
+          textAlign: 'left',
           fontSize: '10px',
           fontWeight: 600,
           letterSpacing: '0.10em',
           textTransform: 'uppercase',
-          color: hot ? C_TEXT_HOT : C_TEXT_DIM,
-          transition: 'color 180ms ease',
-          fontVariantCaps: 'all-small-caps',
-        }}>
-          {label}
-        </span>
-
-        {/* spacer pushes ms to the right */}
-        <span style={{ flex: 1 }} />
-
-        <AnimatePresence>
-          {inTrailing && (
-            <motion.span
-              key="ms"
-              initial={{ opacity: 0, x: 4 }}
-              animate={{ opacity: 0.7, x: 0 }}
-              exit={{ opacity: 0, x: 4 }}
-              transition={{ duration: 0.14 }}
-              style={{
-                fontSize: '10px',
-                fontVariantNumeric: 'tabular-nums',
-                color: C_TEXT,
-                fontWeight: 500,
-                letterSpacing: '0.02em',
-              }}
-            >
-              {remainingMs.toFixed(0)}<span style={{ opacity: 0.5, marginLeft: '2px' }}>ms</span>
-            </motion.span>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* row 2: countdown rail (always present so layout doesn't jump,
-          opacity hides it until trailing) */}
-      <div
-        aria-hidden
-        style={{
-          height: '2px',
-          width: '100%',
-          borderRadius: '1px',
-          background: C_RAIL,
-          overflow: 'hidden',
-          opacity: inTrailing ? 1 : 0,
-          transition: 'opacity 160ms ease',
+          color: hot ? activeColor : 'var(--text-secondary)',
+          transition: 'color 250ms var(--ease-out-quart)',
+          whiteSpace: 'nowrap',
         }}
       >
-        <div
-          style={{
-            width: `${countdownPct * 100}%`,
-            height: '100%',
-            background: `linear-gradient(to right, ${C_FILL_A}, ${C_FILL_B})`,
-            transition: 'width 60ms linear',
-            boxShadow: '0 0 6px rgba(170,255,200,0.4)',
-          }}
-        />
-      </div>
+        {label}
+      </span>
     </motion.div>
   );
 }
@@ -205,45 +141,63 @@ export function VoiceIndicator({
 // ---------- subviews ---------------------------------------------------
 
 function StatusIcon({
-  isUserSpeaking, isTranscribing, inTrailing,
-}: { isUserSpeaking: boolean; isTranscribing: boolean; inTrailing: boolean }) {
+  isUserSpeaking,
+  isTranscribing,
+  activeColor,
+}: {
+  isUserSpeaking: boolean;
+  isTranscribing: boolean;
+  activeColor: string;
+}) {
+  // Drives the existing `spin` keyframes in styles.css instead of
+  // running a Framer rotation loop — gets `prefers-reduced-motion`
+  // suppression for free via the global media query.
   if (isTranscribing) {
     return (
-      <motion.span
-        animate={{ rotate: 360 }}
-        transition={{ duration: 0.9, repeat: Infinity, ease: 'linear' }}
-        style={{ display: 'inline-flex', color: C_TEXT_HOT }}
+      <span
+        aria-hidden
+        style={{
+          display: 'inline-flex',
+          color: activeColor,
+          animation: 'spin 0.9s linear infinite',
+        }}
       >
         <Loader2 size={11} strokeWidth={2.4} />
-      </motion.span>
+      </span>
     );
   }
-  if (inTrailing) {
-    return (
-      <motion.span
-        animate={{ opacity: [0.45, 1, 0.45] }}
-        transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
-        style={{ display: 'inline-flex', color: C_TEXT_HOT }}
-      >
-        <Sparkles size={11} strokeWidth={2} />
-      </motion.span>
-    );
-  }
+
   return (
-    <span style={{
-      display: 'inline-flex',
-      color: isUserSpeaking ? C_TEXT_HOT : C_TEXT_DIM,
-      transition: 'color 180ms ease',
-    }}>
+    <span
+      aria-hidden
+      style={{
+        display: 'inline-flex',
+        color: isUserSpeaking ? activeColor : 'var(--text-ghost)',
+        transition: 'color 250ms var(--ease-out-quart)',
+      }}
+    >
       <Mic size={11} strokeWidth={2} />
     </span>
   );
 }
 
-function Bars({ vadLevel, hot }: { vadLevel: number; hot: boolean }) {
+function Bars({
+  vadLevel,
+  hot,
+  activeColor,
+  activeGlow,
+}: {
+  vadLevel: number;
+  hot: boolean;
+  activeColor: string;
+  activeGlow: string;
+}) {
   const totalW = NUM_BARS * BAR_W + (NUM_BARS - 1) * BAR_GAP;
+  const center = (NUM_BARS - 1) / 2;
+
   return (
     <div
+      aria-hidden
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -254,11 +208,10 @@ function Bars({ vadLevel, hot }: { vadLevel: number; hot: boolean }) {
       }}
     >
       {Array.from({ length: NUM_BARS }).map((_, i) => {
-        // Center bar is loudest; outer bars need higher level to peak.
-        const center = (NUM_BARS - 1) / 2;
-        const distance = Math.abs(i - center) / center;        // 0..1
-        const local = Math.max(0, Math.min(1, vadLevel - distance * 0.18));
+        const distance = Math.abs(i - center) / center;
+        const local = Math.max(0, Math.min(1, vadLevel - distance * BAR_FALLOFF));
         const h = BAR_MIN + local * (BAR_MAX - BAR_MIN);
+        const isStrong = hot && local > 0.4;
         return (
           <div
             key={i}
@@ -266,16 +219,55 @@ function Bars({ vadLevel, hot }: { vadLevel: number; hot: boolean }) {
               width: `${BAR_W}px`,
               height: `${h}px`,
               borderRadius: '1.5px',
-              background: hot
-                ? `linear-gradient(to top, ${C_BAR_HOT}, ${C_FILL_B})`
-                : C_BAR_IDLE,
-              transition: 'height 80ms cubic-bezier(0.4, 0, 0.2, 1), background 200ms ease',
-              boxShadow: hot && local > 0.4
-                ? '0 0 4px rgba(170,255,200,0.45)' : 'none',
+              background: hot ? activeColor : 'var(--text-ghost)',
+              opacity: hot ? 0.6 + local * 0.4 : 0.55,
+              transition:
+                'height 80ms var(--ease-out-quart), background 250ms var(--ease-out-quart), opacity 250ms var(--ease-out-quart)',
+              boxShadow: isStrong ? `0 0 4px ${activeGlow}` : 'none',
             }}
           />
         );
       })}
     </div>
+  );
+}
+
+function ErrorChip({ error }: { error: string }) {
+  return (
+    <motion.div
+      role="alert"
+      title={error}
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.5, delay: 0.15, ease: EASE_OUT_EXPO }}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '8px',
+        padding: '8px 12px',
+        borderRadius: '12px',
+        background: 'color-mix(in srgb, var(--danger) 10%, var(--glass-bg))',
+        border:
+          '1px solid color-mix(in srgb, var(--danger) 28%, var(--glass-border))',
+        backdropFilter: 'var(--glass-blur)',
+        WebkitBackdropFilter: 'var(--glass-blur)',
+        color: 'var(--danger)',
+        fontSize: '12px',
+        fontWeight: 600,
+        letterSpacing: '0.04em',
+        maxWidth: '320px',
+      }}
+    >
+      <AlertCircle size={12} strokeWidth={2.2} aria-hidden />
+      <span
+        style={{
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {error}
+      </span>
+    </motion.div>
   );
 }

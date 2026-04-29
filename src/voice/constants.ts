@@ -32,18 +32,10 @@ export const PRE_ROLL_MS = 250;
 export const ENDPOINT_BASE_MS = 600;
 export const ENDPOINT_MIN_MS = 300;
 export const ENDPOINT_MAX_MS = 1500;
-export const ENDPOINT_FILLER_PENALTY_MS = 400;       // ends in "uh"/"um"/"like"
-export const ENDPOINT_INCOMPLETE_SYNTAX_PENALTY_MS = 250;  // ends in "the"/"and"/"to"...
 export const ENDPOINT_THINKING_BONUS_MS = 200;       // flat envelope, low energy
 export const ENDPOINT_DECISIVE_END_BONUS_MS = -150;  // sharp drop after high amplitude
 export const ENDPOINT_RAPID_TURN_BONUS_MS = -100;    // fast back-and-forth
 export const ENDPOINT_COLD_START_BONUS_MS = 200;     // first turn after AI finished
-
-// Speculative early-fire. After this much confirmed speech, kick off a
-// Whisper request with the audio so far (cancels and re-fires on continued
-// speech). Effectively makes transcription happen in parallel with the
-// final part of the utterance.
-export const EARLY_FIRE_AFTER_MS = 1000;
 
 // Hard cap: any single utterance longer than this gets force-endpointed.
 // Stops a stuck-mic situation from running forever.
@@ -55,22 +47,48 @@ export const MAX_UTTERANCE_MS = 30_000;
 export const BARGE_IN_PROB = 0.78;
 export const BARGE_IN_FRAMES = 8;             // ~256 ms of strong speech
 
-// Filler / incomplete syntax word lists. Lowercased, last-word match.
-export const FILLER_WORDS = new Set([
-  'uh', 'um', 'er', 'erm', 'mm', 'mmm', 'hmm', 'like', 'so', 'and',
-  'okay', 'right',
-]);
-
-// "Looks incomplete" tail words. Sentences rarely end on these.
-export const INCOMPLETE_TAIL_WORDS = new Set([
-  'the', 'a', 'an', 'to', 'for', 'of', 'on', 'in', 'at', 'with',
-  'is', 'are', 'was', 'were', 'be', 'been', 'has', 'have', 'had',
-  'i', 'you', 'we', 'they', 'he', 'she', 'it', 'my', 'your', 'our',
-  'this', 'that', 'these', 'those',
-  'because', 'but', 'or', 'if', 'when', 'while', 'as', 'than',
-]);
-
 // Whisper API. Matches the soul.exe /transcribe proxy contract.
 export const TRANSCRIBE_URL = 'http://127.0.0.1:8765/transcribe';
 export const WHISPER_LANGUAGE = 'en';   // 'auto' for multilingual
 export const WHISPER_MODEL = 'whisper-large-v3-turbo';
+
+// Anti-hallucination knobs. Whisper (Groq's turbo build especially)
+// loves to fill near-silent audio with "Thank you." / "Thanks for
+// watching." / "you" — leftovers from its YouTube training data.
+// Three layers of defense:
+//   1. Peak-amplitude gate before sending. We use peak rather than RMS
+//      because pause-heavy utterances ("uhh... ok then") average out
+//      low even with real speech, and the cost of a false-skip on a
+//      truly-silent call is much smaller than the cost of always
+//      hallucinating "Thank you."
+//   2. no_speech_prob from verbose_json: Whisper's own confidence
+//      that a segment is non-speech. Combined-segment threshold.
+//   3. Hallucination string set: known short outputs that almost
+//      never come from real user speech.
+export const MIN_UTTERANCE_PEAK = 0.04;        // ~ -28 dBFS peak, well above noise floor
+export const MAX_NO_SPEECH_PROB = 0.6;         // segment-weighted average
+
+// Lowercase + punctuation/whitespace stripped before comparison.
+export const HALLUCINATION_TEXTS = new Set<string>([
+  '',
+  'you',
+  'thank you',
+  'thanks',
+  'thanks for watching',
+  'thank you for watching',
+  'thank you for watching this video',
+  'thank you so much',
+  'thank you very much',
+  'thanks for listening',
+  'bye',
+  'bye bye',
+  'goodbye',
+  'okay',
+  'ok',
+  'mhm',
+  'mm',
+  'mm hmm',
+  'uh huh',
+  'subtitles by the amaraorg community',
+  'subtitles by the amara org community',
+]);

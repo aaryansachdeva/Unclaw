@@ -68,6 +68,8 @@ export function useVoiceAgent(opts: UseVoiceAgentOptions) {
   }), []);
 
   // Subscribe to controller events and translate them to React state.
+  // The controller emits `state` once per endpointer transition; we
+  // derive every UI flag from that single signal so they can't drift.
   useEffect(() => {
     const off = controller.on((ev: VoiceEvent) => {
       switch (ev.kind) {
@@ -77,18 +79,22 @@ export function useVoiceAgent(opts: UseVoiceAgentOptions) {
         case 'silenceTimer':
           setState(s => ({ ...s, silence: { requiredMs: ev.requiredMs, elapsedMs: ev.elapsedMs } }));
           break;
-        case 'speechStart':
-          setState(s => ({ ...s, isUserSpeaking: true, state: 'speech',
-                                 silence: { requiredMs: 0, elapsedMs: 0 } }));
+        case 'state': {
+          // 'speech' is the only state where we paint "user is talking."
+          // 'trailing' is paused-mid-utterance; UI shows the silence
+          // countdown (driven by silenceTimer events) but NOT the
+          // speaking indicator. Any non-trailing state clears the
+          // countdown so it doesn't linger when the user resumes.
+          const isUserSpeaking = ev.state === 'speech';
+          const silence = ev.state === 'trailing' ? undefined : { requiredMs: 0, elapsedMs: 0 };
+          setState(s => ({
+            ...s,
+            state: ev.state,
+            isUserSpeaking,
+            silence: silence ?? s.silence,
+          }));
           break;
-        case 'speechEnd':
-          setState(s => ({ ...s, isUserSpeaking: false, state: 'idle',
-                                 silence: { requiredMs: 0, elapsedMs: 0 } }));
-          break;
-        case 'state':
-          setState(s => ({ ...s, state: ev.state,
-                                 isUserSpeaking: ev.state === 'speech' }));
-          break;
+        }
         case 'transcribing':
           setState(s => ({ ...s, isTranscribing: ev.pending }));
           break;

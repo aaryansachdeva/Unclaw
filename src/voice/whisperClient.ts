@@ -1,10 +1,15 @@
 // Whisper transcription client. POSTs WAV blobs to soul.exe's /transcribe
-// proxy (which forwards to Groq's whisper-large-v3-turbo). Designed to
-// support speculative early-fire transcription: kick off a request after
-// ~1 s of speech so it computes in parallel with the rest of the
-// utterance, and cancel + re-fire if the user keeps talking.
+// proxy (which forwards to Groq's whisper-large-v3-turbo). Fires once
+// per utterance, after the endpointer has decided the user has stopped.
 
-import { SAMPLE_RATE, TRANSCRIBE_URL, WHISPER_LANGUAGE, WHISPER_MODEL } from './constants';
+import {
+  HALLUCINATION_TEXTS,
+  MAX_NO_SPEECH_PROB,
+  SAMPLE_RATE,
+  TRANSCRIBE_URL,
+  WHISPER_LANGUAGE,
+  WHISPER_MODEL,
+} from './constants';
 
 export interface TranscriptionResult {
   text: string;
@@ -15,6 +20,22 @@ export interface TranscriptionResult {
   totalMs: number;
   /** ms reported by the soul proxy as Groq round-trip. */
   proxyMs: number | undefined;
+  /** Why the text is empty, if it is. Useful for log-level decisions upstream. */
+  rejection?: 'no_speech' | 'hallucination' | null;
+}
+
+interface VerboseSegment {
+  no_speech_prob?: number;
+  avg_logprob?: number;
+  text?: string;
+}
+
+/** Compare-friendly form of a Whisper output: lowercase, punctuation stripped. */
+function normalizeForCompare(s: string): string {
+  return s.toLowerCase()
+    .replace(/[\p{P}\p{S}]/gu, ' ')   // strip punctuation + symbols
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 export interface TranscribeOptions {
@@ -22,17 +43,13 @@ export interface TranscribeOptions {
   signal?: AbortSignal;
   /** Optional Whisper hint (vocabulary, persona name). Improves accuracy. */
   prompt?: string;
-  /** BCP-47 code or 'auto'. Defaults to constants.WHISPER_LANGUAGE. */
-  language?: string;
-  /** Override model. Defaults to whisper-large-v3-turbo. */
-  model?: string;
 }
 
 /**
  * Encode PCM Float32 samples (in [-1, 1]) at 16 kHz mono as a WAV blob.
  * Inlined here (no separate util) so this module is self-contained.
  */
-export function encodeWav(samples: Float32Array, sampleRate = SAMPLE_RATE): Blob {
+function encodeWav(samples: Float32Array, sampleRate = SAMPLE_RATE): Blob {
   const numSamples = samples.length;
   const buffer = new ArrayBuffer(44 + numSamples * 2);
   const view = new DataView(buffer);
@@ -77,8 +94,8 @@ export async function transcribe(
   const wav = encodeWav(samples);
   const fd = new FormData();
   fd.append('file', wav, 'audio.wav');
-  fd.append('model', opts.model ?? WHISPER_MODEL);
-  fd.append('language', opts.language ?? WHISPER_LANGUAGE);
+  fd.append('model', WHISPER_MODEL);
+  fd.append('language', WHISPER_LANGUAGE);
   if (opts.prompt) fd.append('prompt', opts.prompt);
 
   const t0 = performance.now();
@@ -93,11 +110,50 @@ export async function transcribe(
     throw new Error(`transcribe ${res.status}: ${txt.slice(0, 200)}`);
   }
   const raw = await res.json();
+  const rawText = typeof raw.text === 'string' ? raw.text : '';
+
+  // Anti-hallucination filter. Whisper turbo fills near-silent or noisy
+  // audio with stock YouTube outros ("Thank you.", "Thanks for
+  // watching.") even at temperature=0. We catch those two ways:
+  //
+  //   1. The verbose_json response includes per-segment
+  //      `no_speech_prob`. If the segment-duration-weighted average is
+  //      high, Whisper itself is signalling "this isn't speech."
+  //   2. A small set of stock hallucinated phrases — the comparison is
+  //      done after lowercasing and stripping punctuation, so
+  //      "Thank you." and "thank you" both match.
+  let rejection: 'no_speech' | 'hallucination' | null = null;
+  const segs: VerboseSegment[] = Array.isArray(raw.segments) ? raw.segments : [];
+  if (segs.length > 0) {
+    let totalDur = 0;
+    let weighted = 0;
+    for (const s of segs) {
+      const start = typeof (s as { start?: number }).start === 'number' ? (s as { start: number }).start : 0;
+      const end = typeof (s as { end?: number }).end === 'number' ? (s as { end: number }).end : start;
+      const dur = Math.max(end - start, 0.05);
+      const p = typeof s.no_speech_prob === 'number' ? s.no_speech_prob : 0;
+      totalDur += dur;
+      weighted += p * dur;
+    }
+    const avgNoSpeech = totalDur > 0 ? weighted / totalDur : 0;
+    if (avgNoSpeech >= MAX_NO_SPEECH_PROB) rejection = 'no_speech';
+  }
+
+  const normalized = normalizeForCompare(rawText);
+  if (!rejection && HALLUCINATION_TEXTS.has(normalized)) {
+    rejection = 'hallucination';
+  }
+
+  if (rejection) {
+    console.info(`[stt] dropped (${rejection}): "${rawText.trim()}"`);
+  }
+
   return {
-    text: typeof raw.text === 'string' ? raw.text : '',
+    text: rejection ? '' : rawText,
     durationS: typeof raw.duration === 'number' ? raw.duration : samples.length / SAMPLE_RATE,
     raw,
     totalMs,
     proxyMs: typeof raw._proxy_ms === 'number' ? raw._proxy_ms : undefined,
+    rejection,
   };
 }

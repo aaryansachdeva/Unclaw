@@ -12,7 +12,7 @@
 // surprisingly expensive in JS and the envelope+ZCR pair already gives
 // most of the signal. Easy to add later if telemetry says it's needed.
 
-import { FRAME_MS, FRAME_SIZE, SAMPLE_RATE } from './constants';
+import { FRAME_MS } from './constants';
 
 const ENVELOPE_WINDOW_MS = 1000;
 const ENVELOPE_SLOTS = Math.ceil(ENVELOPE_WINDOW_MS / FRAME_MS);  // ~31 slots
@@ -107,6 +107,3 @@ export class ProsodyEngine {
 function clamp(x: number, lo: number, hi: number): number {
   return x < lo ? lo : x > hi ? hi : x;
 }
-
-// Sanity-only export for tests / debugging.
-export { FRAME_SIZE, SAMPLE_RATE };
