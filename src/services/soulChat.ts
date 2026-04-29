@@ -24,6 +24,22 @@ export interface SoulChatOptions {
   systemExtension?: string;
 }
 
+/** Function-call result emitted when the LLM picks one of soul's tools.
+ *  See `_GROQ_TOOLS` in soul_exe_server.py for the canonical list. */
+export interface SoulChatAction {
+  /** Tool name. Action tools: 'give_a_kiss' | 'do_dance' | 'say_hello'.
+   *  Reminder tools: 'create_event_reminder' | 'update_reminder' |
+   *  'delete_reminder' | 'mark_reminder_complete'. */
+  name: string;
+  /** Decoded JSON arguments. Always includes a `response` string used as
+   *  the spoken reply; reminder tools include id / fields too. */
+  args: Record<string, unknown>;
+  /** Present on `create_event_reminder`: the freshly inserted record. */
+  reminder?: { id: string; title: string; when_iso: string; notes: string };
+  /** Present on update / delete / complete tools. */
+  reminder_id?: string;
+}
+
 export interface SoulChatResult {
   /** Job id soul.exe stored under. UE auto-pulls /result/{id} via /ws broadcast. */
   id: string;
@@ -42,6 +58,10 @@ export interface SoulChatResult {
   /** Total face frames generated. */
   n_frames?: number;
   duration?: number;
+  /** Set when the LLM invoked one of the registered function-calling tools.
+   *  The client uses this to emit a UE animation event (kiss/dance/hello)
+   *  or to refresh the reminders panel after a CRUD tool. */
+  action?: SoulChatAction;
   /** Server fields we don't strongly type. */
   [key: string]: unknown;
 }

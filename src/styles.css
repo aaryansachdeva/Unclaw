@@ -7,9 +7,9 @@
   --border-dim: rgba(255, 255, 255, 0.04);
   --border-subtle: rgba(255, 255, 255, 0.08);
   --border-focus: rgba(196, 68, 68, 0.22);
-  --text-primary: #f0ede8;
-  --text-secondary: #908a82;
-  --text-ghost: #5a554e;
+  --text-primary: #fafafa;
+  --text-secondary: #b8b3ad;
+  --text-ghost: #6e6862;
   --accent: #c44444;
   --accent-dim: rgba(196, 68, 68, 0.08);
   --accent-glow: rgba(196, 68, 68, 0.14);
@@ -18,11 +18,20 @@
   --danger: #c87a7a;
 
   /* Glass material token */
-  --glass-bg: rgba(255, 255, 255, 0.06);
-  --glass-bg-hover: rgba(255, 255, 255, 0.10);
-  --glass-border: rgba(255, 255, 255, 0.09);
-  --glass-border-focus: rgba(255, 255, 255, 0.18);
-  --glass-blur: blur(40px) saturate(1.6);
+  /* Frosted slate — picks up the navy ambient of the pixel stream
+     without competing as a dark mass. Two-intensity strategy:
+       --glass-bg        always-on primary chrome (AgentSwitcher, InputBar)
+       --glass-bg-hover  ambient pill hover state — soft reveal
+       --glass-bg-panel  expanded widget panels — slightly heavier
+     The panel token is intentionally close to (and only slightly
+     above) the hover state so opening a widget feels like a
+     continuation of hovering it, not a step into a dark "modal".  */
+  --glass-bg: rgba(40, 48, 65, 0.32);
+  --glass-bg-hover: rgba(40, 48, 65, 0.48);
+  --glass-bg-panel: rgba(40, 48, 65, 0.52);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-border-focus: rgba(255, 255, 255, 0.20);
+  --glass-blur: blur(36px) saturate(1.7);
 
   /* Easing */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
@@ -109,6 +118,15 @@ textarea {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* Voice indicator: bars wave during transcription. transform-only so
+   it stays GPU-accelerated and never reflows the chip. Adjacent bars
+   get staggered animation-delay to read as a flowing wave rather than
+   a unison pulse. */
+@keyframes voice-bar-wave {
+  0%, 100% { transform: scaleY(0.22); }
+  50%      { transform: scaleY(0.92); }
 }
 
 /* Reduced motion */
