@@ -1,29 +1,16 @@
-// Reminders widget shaped after the old project's mobile widget tab:
+// Reminders panel content. Wrapped by SheetPanel; no longer owns
+// open/close state or its own surface — everything that was inside
+// the old expanded glass card lives here, and the dock's widget icon
+// is the trigger.
 //
-//   collapsed     [bell] Reminders [N]                   (small pill)
-//   click ↓
-//   expanded     ┌────────────────────────────────┐
-//                │  Today                         │
-//                │  ☐ Pay rent       7pm         │
-//                │  Tomorrow                      │
-//                │  ☐ Dentist        9am         │
-//                │  ...                           │
-//                └────────────────────────────────┘
-//                [bell] Reminders                   [×]
-//
-// The expanded glass card grows UPWARD from the pill (absolute
-// positioning, `bottom: 100% + 8px`) so the layout below — AgentSwitcher,
-// InputBar — never reflows when the panel opens.
-//
-// Talks to soul.exe `/reminders*`. The `available` flag silently hides
-// the whole widget when the soul build doesn't expose those endpoints
-// (e.g. older deploys), so this module is forwards-compatible.
+// Talks to soul.exe `/reminders*`. The `available` flag silently
+// hides the body when the soul build doesn't expose those endpoints.
 
 import {
   useCallback, useEffect, useMemo, useRef, useState,
 } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, X, Check, Bell, ChevronRight } from 'lucide-react';
+import { Plus, X, Check, ChevronRight } from 'lucide-react';
 import {
   Reminder,
   createReminder,
@@ -34,29 +21,21 @@ import {
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
-interface RemindersProps {
+interface RemindersPanelProps {
   /** Bumping this number forces a refetch (e.g. after a chat round
    *  that may have created or modified reminders via tool calls). */
   refreshKey?: number;
-  /** Controlled open/close. App.tsx lifts this so only one widget panel
-   *  can be expanded at a time — without it, multiple panels overlap
-   *  each other against the pixel stream. */
-  isOpen?: boolean;
-  onToggle?: () => void;
+  /** Called whenever the reminder count changes — lets the dock
+   *  badge stay in sync without re-querying the service itself. */
+  onCountChange?: (count: number) => void;
 }
 
-export function Reminders({
+export function RemindersPanel({
   refreshKey = 0,
-  isOpen,
-  onToggle,
-}: RemindersProps) {
+  onCountChange,
+}: RemindersPanelProps) {
   const [available, setAvailable] = useState<boolean | null>(null);
   const [reminders, setReminders] = useState<Reminder[]>([]);
-  // Fall back to internal state when no controller is wired. Keeps the
-  // component testable in isolation.
-  const [internalOpen, setInternalOpen] = useState(false);
-  const open = isOpen ?? internalOpen;
-  const setOpen = onToggle ?? (() => setInternalOpen(o => !o));
   const [composeOpen, setComposeOpen] = useState(false);
   const [collapsedDays, setCollapsedDays] = useState<Set<string>>(new Set());
   const [pending, setPending] = useState<Set<string>>(new Set());
@@ -73,6 +52,11 @@ export function Reminders({
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh, refreshKey]);
+
+  // Bubble count up so the dock badge can show it.
+  useEffect(() => {
+    onCountChange?.(reminders.length);
+  }, [reminders.length, onCountChange]);
 
   const handleCreate = useCallback(async (input: {
     title: string; when_iso: string; notes: string;
@@ -127,250 +111,97 @@ export function Reminders({
     });
   }, []);
 
-  // Sort + group by local-day key so we can render "Today"/"Tomorrow"
-  // separators between rows, matching the mobile pattern.
   const groups = useMemo(() => groupByDay(reminders), [reminders]);
 
-  // Endpoint missing → render nothing.
-  if (available === false) return null;
-  // Initial fetch in flight: don't paint until we know whether the panel
-  // is even available (avoids a brief pill flash that vanishes).
+  if (available === false) return <UnavailableState />;
   if (available === null) return null;
 
   const count = reminders.length;
 
   return (
-    <div style={{ position: 'relative' }}>
-      {/* Expanded content — grows UP from the pill via bottom: 100% so
-          it never displaces the bottom-row layout. */}
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            key="panel"
-            initial={{ opacity: 0, y: 6, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 6, scale: 0.98 }}
-            transition={{ duration: 0.22, ease: EASE_OUT_EXPO }}
-            // Deep "stage glass" surface — opaque enough to read against
-            // any pixel-stream content (bright skin tones, hair, blue
-            // gradients). Light-glass tokens render invisible on bright
-            // backgrounds; this is the dark-chrome counterpart we use
-            // exclusively for the expanded panels.
-            style={{
-              position: 'absolute',
-              bottom: 'calc(100% + 8px)',
-              left: 0,
-              width: 360,
-              maxHeight: '60vh',
-              overflowY: 'auto',
-              padding: 14,
-              borderRadius: 16,
-              background: 'var(--glass-bg-panel)',
-              backdropFilter: 'var(--glass-blur)',
-              WebkitBackdropFilter: 'var(--glass-blur)',
-              border: '1px solid var(--glass-border-focus)',
-              boxShadow: [
-                '0 1px 0 rgba(255, 255, 255, 0.06) inset',
-                '0 16px 36px -10px rgba(0, 0, 0, 0.45)',
-              ].join(', '),
-              pointerEvents: 'auto',
-            }}
-          >
-            {/* Inline title + add button — the pill below is the
-                close affordance, so we don't need a redundant
-                close here. */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                marginBottom: 10,
-              }}
-            >
-              <span
-                style={{
-                  flex: 1,
-                  fontSize: 14,
-                  fontWeight: 600,
-                  color: 'var(--text-primary)',
-                  letterSpacing: '-0.01em',
-                }}
-              >
-                Reminders
-              </span>
-              <motion.button
-                type="button"
-                whileHover={{ scale: 1.08 }}
-                whileTap={{ scale: 0.9 }}
-                onClick={() => setComposeOpen(o => !o)}
-                aria-label={composeOpen ? 'Cancel new reminder' : 'New reminder'}
-                className="glass-btn"
-                style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: '50%',
-                  background: composeOpen
-                    ? 'color-mix(in srgb, var(--accent) 22%, transparent)'
-                    : 'rgba(255,255,255,0.08)',
-                  color: composeOpen ? 'var(--accent)' : 'var(--text-secondary)',
-                  border: '1px solid rgba(255,255,255,0.12)',
-                  transition: 'background 0.2s var(--ease-out-quart)',
-                }}
-              >
-                <Plus
-                  size={12}
-                  strokeWidth={2.4}
-                  style={{
-                    transform: composeOpen ? 'rotate(45deg)' : 'rotate(0deg)',
-                    transition: 'transform 0.2s var(--ease-out-quart)',
-                  }}
-                />
-              </motion.button>
-            </div>
-
-            <AnimatePresence initial={false}>
-              {composeOpen && (
-                <ComposeForm
-                  key="compose"
-                  onSubmit={handleCreate}
-                  onCancel={() => setComposeOpen(false)}
-                />
-              )}
-            </AnimatePresence>
-
-            {/* List */}
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-              {count === 0 && !composeOpen ? (
-                <EmptyState />
-              ) : (
-                groups.map(g => (
-                  <DayGroup
-                    key={g.key}
-                    label={g.label}
-                    items={g.items}
-                    collapsed={collapsedDays.has(g.key)}
-                    onToggle={() => toggleDay(g.key)}
-                    pending={pending}
-                    onComplete={handleComplete}
-                    onDelete={handleDelete}
-                  />
-                ))
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Pill — collapsed view AND header-while-open. Same width-stable
-          layout in both modes; only the icon and color change. */}
-      <Pill
-        open={open}
-        count={count}
-        onToggle={setOpen}
-      />
-    </div>
-  );
-}
-
-// ---------- pill ------------------------------------------------------
-
-function Pill({
-  open,
-  count,
-  onToggle,
-}: {
-  open: boolean;
-  count: number;
-  onToggle: () => void;
-}) {
-  // Surface only when active or hovered — at rest the pill is just
-  // the icon + label floating on the pixel stream so the row reads
-  // less "chrome panel" and more "ambient controls." On hover/open
-  // the glass + border swims in.
-  const [hover, setHover] = useState(false);
-  const surfaceOn = hover || open;
-  return (
-    <motion.button
-      type="button"
-      whileHover={{ scale: 1.02 }}
-      whileTap={{ scale: 0.97 }}
-      onClick={onToggle}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      aria-expanded={open}
-      aria-label={open ? 'Close reminders' : 'Open reminders'}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '8px 14px',
-        height: 40,
-        borderRadius: 14,
-        background: surfaceOn
-          ? (open ? 'var(--glass-bg-hover)' : 'var(--glass-bg)')
-          : 'transparent',
-        backdropFilter: surfaceOn ? 'var(--glass-blur)' : 'none',
-        WebkitBackdropFilter: surfaceOn ? 'var(--glass-blur)' : 'none',
-        border: `1px solid ${
-          surfaceOn ? (open ? 'var(--glass-border-focus)' : 'var(--glass-border)') : 'transparent'
-        }`,
-        boxShadow: surfaceOn
-          ? '0 1px 0 rgba(255,255,255,0.04) inset, 0 4px 12px rgba(0,0,0,0.25)'
-          : 'none',
-        cursor: 'pointer',
-        transition:
-          'background 0.2s var(--ease-out-quart), border-color 0.2s var(--ease-out-quart), box-shadow 0.2s var(--ease-out-quart)',
-      }}
-    >
-      <Bell
-        size={14}
-        strokeWidth={2}
-        color="var(--text-primary)"
-        aria-hidden
+    <div>
+      {/* Header row — the SheetPanel already shows the title, so we
+          just need the inline "+ new" affordance here. */}
+      <div
         style={{
-          filter: surfaceOn ? 'none' : 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))',
-        }}
-      />
-      <span
-        style={{
-          fontSize: 12,
-          fontWeight: 600,
-          letterSpacing: '0.04em',
-          color: 'var(--text-primary)',
-          textShadow: surfaceOn ? 'none' : '0 1px 2px rgba(0,0,0,0.55)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 8,
+          marginBottom: 10,
         }}
       >
-        Reminders
-      </span>
-      {count > 0 && (
         <span
           style={{
             fontSize: 11,
             fontWeight: 600,
+            letterSpacing: '0.06em',
+            textTransform: 'uppercase',
             color: 'var(--text-secondary)',
-            minWidth: 12,
-            textAlign: 'right',
-            opacity: open ? 1 : 0.85,
-            textShadow: surfaceOn ? 'none' : '0 1px 2px rgba(0,0,0,0.55)',
           }}
         >
-          {count}
+          {count > 0 ? `${count} active` : 'No reminders'}
         </span>
-      )}
-      {/* Trailing affordance flips between chevron-up cue (closed) and
-          ×-close cue (open). Kept in the same slot so the pill width
-          doesn't shift when toggling. */}
-      <span
-        aria-hidden
-        style={{
-          display: 'inline-flex',
-          marginLeft: 2,
-          color: 'var(--text-ghost)',
-        }}
-      >
-        {open ? <X size={11} strokeWidth={2.4} /> : null}
-      </span>
-    </motion.button>
+        <motion.button
+          type="button"
+          whileHover={{ scale: 1.06 }}
+          whileTap={{ scale: 0.92 }}
+          onClick={() => setComposeOpen(o => !o)}
+          aria-label={composeOpen ? 'Cancel new reminder' : 'New reminder'}
+          className="glass-btn"
+          style={{
+            width: 24,
+            height: 24,
+            borderRadius: '50%',
+            background: composeOpen
+              ? 'color-mix(in srgb, var(--accent) 22%, transparent)'
+              : 'rgba(255,255,255,0.08)',
+            color: composeOpen ? 'var(--accent)' : 'var(--text-secondary)',
+            border: '1px solid rgba(255,255,255,0.12)',
+            transition: 'background 0.2s var(--ease-out-quart)',
+          }}
+        >
+          <Plus
+            size={12}
+            strokeWidth={2.4}
+            style={{
+              transform: composeOpen ? 'rotate(45deg)' : 'rotate(0deg)',
+              transition: 'transform 0.2s var(--ease-out-quart)',
+            }}
+          />
+        </motion.button>
+      </div>
+
+      <AnimatePresence initial={false}>
+        {composeOpen && (
+          <ComposeForm
+            key="compose"
+            onSubmit={handleCreate}
+            onCancel={() => setComposeOpen(false)}
+          />
+        )}
+      </AnimatePresence>
+
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {count === 0 && !composeOpen ? (
+          <EmptyState />
+        ) : (
+          groups.map((g, gi) => (
+            <DayGroup
+              key={g.key}
+              label={g.label}
+              items={g.items}
+              collapsed={collapsedDays.has(g.key)}
+              onToggle={() => toggleDay(g.key)}
+              pending={pending}
+              onComplete={handleComplete}
+              onDelete={handleDelete}
+              groupIndex={gi}
+            />
+          ))
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -384,11 +215,12 @@ interface DayGroupProps {
   pending: Set<string>;
   onComplete: (id: string) => void;
   onDelete: (id: string) => void;
+  groupIndex: number;
 }
 
 function DayGroup({
   label, items, collapsed, onToggle,
-  pending, onComplete, onDelete,
+  pending, onComplete, onDelete, groupIndex,
 }: DayGroupProps) {
   return (
     <div style={{ marginBottom: 4 }}>
@@ -436,13 +268,17 @@ function DayGroup({
             style={{ overflow: 'hidden' }}
           >
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {items.map(r => (
+              {items.map((r, i) => (
                 <ReminderRow
                   key={r.id}
                   reminder={r}
                   isPending={pending.has(r.id)}
                   onComplete={() => onComplete(r.id)}
                   onDelete={() => onDelete(r.id)}
+                  // Stagger entrance only for the first 8 across the
+                  // whole panel — beyond that it stops feeling
+                  // intentional and starts feeling slow.
+                  staggerDelay={Math.min(0.04 * (groupIndex * 4 + i), 0.32)}
                 />
               ))}
             </div>
@@ -456,12 +292,13 @@ function DayGroup({
 // ---------- row -------------------------------------------------------
 
 function ReminderRow({
-  reminder, isPending, onComplete, onDelete,
+  reminder, isPending, onComplete, onDelete, staggerDelay,
 }: {
   reminder: Reminder;
   isPending: boolean;
   onComplete: () => void;
   onDelete: () => void;
+  staggerDelay: number;
 }) {
   const [hover, setHover] = useState(false);
   const isComplete = !!reminder.completed_at;
@@ -474,7 +311,7 @@ function ReminderRow({
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: isComplete ? 0.45 : 1, y: 0 }}
       exit={{ opacity: 0, y: -4, transition: { duration: 0.15 } }}
-      transition={{ duration: 0.22, ease: EASE_OUT_EXPO }}
+      transition={{ duration: 0.22, delay: staggerDelay, ease: EASE_OUT_EXPO }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
@@ -528,6 +365,7 @@ function ReminderRow({
             display: '-webkit-box',
             WebkitLineClamp: 2,
             WebkitBoxOrient: 'vertical',
+            letterSpacing: '-0.01em',
           }}
         >
           {reminder.title}
@@ -536,11 +374,11 @@ function ReminderRow({
           <div
             style={{
               marginTop: 4,
-              fontSize: 11.5,
+              fontSize: 12,
               fontWeight: 500,
               color: overdue && !isComplete ? 'var(--danger)' : 'var(--text-secondary)',
               opacity: isComplete ? 0.5 : 1,
-              letterSpacing: '0.01em',
+              fontVariantNumeric: 'tabular-nums',
               lineHeight: 1.3,
               whiteSpace: 'nowrap',
               overflow: 'hidden',
@@ -593,7 +431,7 @@ function ReminderRow({
   );
 }
 
-// ---------- empty state ----------------------------------------------
+// ---------- empty / unavailable --------------------------------------
 
 function EmptyState() {
   return (
@@ -603,15 +441,29 @@ function EmptyState() {
       transition={{ duration: 0.3 }}
       style={{
         padding: '14px 4px 6px 4px',
-        fontSize: 12.5,
+        fontSize: 13,
         lineHeight: 1.5,
         color: 'var(--text-secondary)',
       }}
     >
       Ask the agent to add a reminder, or press the{' '}
-      <Plus size={10} style={{ display: 'inline', verticalAlign: 'baseline' }} />{' '}
+      <Plus size={11} style={{ display: 'inline', verticalAlign: 'baseline' }} />{' '}
       to add one yourself.
     </motion.div>
+  );
+}
+
+function UnavailableState() {
+  return (
+    <div
+      style={{
+        padding: '14px 4px',
+        fontSize: 13,
+        color: 'var(--text-secondary)',
+      }}
+    >
+      Reminders aren't available on this build of soul.
+    </div>
   );
 }
 
@@ -699,9 +551,9 @@ function ComposeForm({ onSubmit, onCancel }: ComposeFormProps) {
               borderRadius: 7,
               background: 'transparent',
               color: 'var(--text-ghost)',
-              fontSize: 10,
+              fontSize: 11,
               fontWeight: 600,
-              letterSpacing: '0.08em',
+              letterSpacing: '0.04em',
               textTransform: 'uppercase',
             }}
           >
@@ -719,9 +571,9 @@ function ComposeForm({ onSubmit, onCancel }: ComposeFormProps) {
                 ? 'color-mix(in srgb, var(--accent) 22%, transparent)'
                 : 'rgba(255,255,255,0.04)',
               color: title.trim() ? 'var(--accent)' : 'var(--text-ghost)',
-              fontSize: 10,
+              fontSize: 11,
               fontWeight: 600,
-              letterSpacing: '0.08em',
+              letterSpacing: '0.04em',
               textTransform: 'uppercase',
               opacity: title.trim() ? 1 : 0.45,
             }}
@@ -755,7 +607,6 @@ interface DayBucket {
 }
 
 function groupByDay(rs: Reminder[]): DayBucket[] {
-  // Sort first by when_iso (no-time entries last), then group by day.
   const withTime = rs.filter(r => !!r.when_iso).slice().sort(
     (a, b) => a.when_iso.localeCompare(b.when_iso),
   );
@@ -776,8 +627,6 @@ function groupByDay(rs: Reminder[]): DayBucket[] {
   for (const r of noTime) {
     addToBucket(buckets, 'no-date', 'Someday', r);
   }
-
-  // Preserve insertion order (which is sort order).
   return Array.from(buckets.values());
 }
 
@@ -813,7 +662,6 @@ function dayLabel(d: Date): string {
   if (target.getTime() === today.getTime()) return 'Today';
   if (target.getTime() === tomorrow.getTime()) return 'Tomorrow';
 
-  // Within a week → weekday name.
   const diffDays = Math.round(
     (target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24),
   );
@@ -834,7 +682,7 @@ function dayLabel(d: Date): string {
 function formatRowSubtitle(r: Reminder): string {
   const time = formatClockOnly(r.when_iso);
   const notes = (r.notes ?? '').trim();
-  if (time && notes) return `${time} · ${notes}`;
+  if (time && notes) return `${time} - ${notes}`;
   return time || notes;
 }
 

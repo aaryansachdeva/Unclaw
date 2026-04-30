@@ -1,42 +1,23 @@
-// Stocks widget shaped after the same mobile-tab pattern as Reminders /
-// News / Weather:
-//
-//   collapsed     [chart] Stocks  +0.42%                 (small pill)
-//   click ↓
-//   expanded     ┌──────────────────────────────────┐
-//                │ Watchlist                    5   │
-//                │ AAPL ····· $182.30  +1.23 (+0.68%)│
-//                │ MSFT ····· $415.10  -0.40 (-0.10%)│
-//                │ ...                              │
-//                └──────────────────────────────────┘
-//                [chart] Stocks  +0.42%               [×]
-//
-// Grows UPWARD; rows are read-only. Auto-refreshes every 60 s on mount
-// since soul caches upstream for 60 s anyway (Twelve Data's free tier
-// caps at 8 req/min).
+// Stocks panel content. Wrapped by SheetPanel; auto-refreshes every
+// 60 s on mount because soul caches upstream for 60 s anyway (Twelve
+// Data's free tier caps at 8 req/min).
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { BarChart3, X } from 'lucide-react';
+import { motion } from 'framer-motion';
 import { getStocks, StockQuote } from '../services/stocks';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
-interface StocksProps {
-  /** Bumping this number forces a refetch (chat round side effects). */
+interface StocksPanelProps {
   refreshKey?: number;
-  /** Controlled open/close. App.tsx lifts this so only one widget panel
-   *  can be expanded at a time. */
-  isOpen?: boolean;
-  onToggle?: () => void;
+  /** Bubble the watchlist's average day-pct up so the dock badge can
+   *  tint it green/red. */
+  onDayPctChange?: (pct: number | null) => void;
 }
 
-export function Stocks({ refreshKey = 0, isOpen, onToggle }: StocksProps) {
+export function StocksPanel({ refreshKey = 0, onDayPctChange }: StocksPanelProps) {
   const [available, setAvailable] = useState<boolean | null>(null);
   const [quotes, setQuotes] = useState<StockQuote[]>([]);
-  const [internalOpen, setInternalOpen] = useState(false);
-  const open = isOpen ?? internalOpen;
-  const setOpen = onToggle ?? (() => setInternalOpen(o => !o));
   const reqIdRef = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -49,7 +30,6 @@ export function Stocks({ refreshKey = 0, isOpen, onToggle }: StocksProps) {
 
   useEffect(() => {
     void refresh();
-    // Soul caches upstream for 60 s; widget polls every 60 s.
     const id = window.setInterval(() => { void refresh(); }, 60 * 1000);
     return () => window.clearInterval(id);
   }, [refresh]);
@@ -58,202 +38,86 @@ export function Stocks({ refreshKey = 0, isOpen, onToggle }: StocksProps) {
     if (refreshKey > 0) void refresh();
   }, [refreshKey, refresh]);
 
-  if (available === false) return null;
+  // Bubble aggregate pct up.
+  useEffect(() => {
+    if (!quotes.length) {
+      onDayPctChange?.(null);
+      return;
+    }
+    const avg = quotes.reduce((acc, q) => acc + q.change_pct, 0) / quotes.length;
+    onDayPctChange?.(avg);
+  }, [quotes, onDayPctChange]);
+
+  if (available === false) {
+    return (
+      <div style={unavailableStyle}>
+        Stocks aren't available on this build of soul.
+      </div>
+    );
+  }
   if (available === null) return null;
 
   const count = quotes.length;
-  // Aggregate % change — the simple average across the watchlist. Tints the
-  // pill green/red to telegraph the day at a glance.
   const avgPct = count > 0
     ? quotes.reduce((acc, q) => acc + q.change_pct, 0) / count
     : 0;
-  const avgUp = avgPct >= 0;
 
   return (
-    <div style={{ position: 'relative' }}>
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            key="panel"
-            initial={{ opacity: 0, y: 6, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 6, scale: 0.98 }}
-            transition={{ duration: 0.22, ease: EASE_OUT_EXPO }}
-            style={{
-              position: 'absolute',
-              bottom: 'calc(100% + 8px)',
-              left: 0,
-              width: 360,
-              maxHeight: '60vh',
-              overflowY: 'auto',
-              padding: 14,
-              borderRadius: 16,
-              background: 'var(--glass-bg-panel)',
-              backdropFilter: 'var(--glass-blur)',
-              WebkitBackdropFilter: 'var(--glass-blur)',
-              border: '1px solid var(--glass-border-focus)',
-              boxShadow: [
-                '0 1px 0 rgba(255, 255, 255, 0.06) inset',
-                '0 16px 36px -10px rgba(0, 0, 0, 0.45)',
-              ].join(', '),
-              pointerEvents: 'auto',
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                marginBottom: 10,
-              }}
-            >
-              <span
-                style={{
-                  flex: 1,
-                  fontSize: 14,
-                  fontWeight: 600,
-                  color: 'var(--text-primary)',
-                  letterSpacing: '-0.01em',
-                }}
-              >
-                Watchlist
-              </span>
-              {count > 0 && (
-                <span
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 500,
-                    color: 'var(--text-secondary)',
-                  }}
-                >
-                  {count}
-                </span>
-              )}
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {count === 0 ? (
-                <EmptyState />
-              ) : (
-                quotes.map(q => <QuoteRow key={q.symbol} quote={q} />)
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <Pill
-        open={open}
-        avgPct={avgPct}
-        avgUp={avgUp}
-        hasData={count > 0}
-        onToggle={setOpen}
-      />
-    </div>
-  );
-}
-
-// ---------- pill ------------------------------------------------------
-
-function Pill({
-  open, avgPct, avgUp, hasData, onToggle,
-}: {
-  open: boolean;
-  avgPct: number;
-  avgUp: boolean;
-  hasData: boolean;
-  onToggle: () => void;
-}) {
-  const [hover, setHover] = useState(false);
-  const surfaceOn = hover || open;
-  return (
-    <motion.button
-      type="button"
-      whileHover={{ scale: 1.02 }}
-      whileTap={{ scale: 0.97 }}
-      onClick={onToggle}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      aria-expanded={open}
-      aria-label={open ? 'Close stocks' : 'Open stocks'}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '8px 14px',
-        height: 40,
-        borderRadius: 14,
-        background: surfaceOn
-          ? (open ? 'var(--glass-bg-hover)' : 'var(--glass-bg)')
-          : 'transparent',
-        backdropFilter: surfaceOn ? 'var(--glass-blur)' : 'none',
-        WebkitBackdropFilter: surfaceOn ? 'var(--glass-blur)' : 'none',
-        border: `1px solid ${
-          surfaceOn ? (open ? 'var(--glass-border-focus)' : 'var(--glass-border)') : 'transparent'
-        }`,
-        boxShadow: surfaceOn
-          ? '0 1px 0 rgba(255,255,255,0.04) inset, 0 4px 12px rgba(0,0,0,0.25)'
-          : 'none',
-        cursor: 'pointer',
-        transition:
-          'background 0.2s var(--ease-out-quart), border-color 0.2s var(--ease-out-quart), box-shadow 0.2s var(--ease-out-quart)',
-      }}
-    >
-      <BarChart3
-        size={14}
-        strokeWidth={2}
-        color="var(--text-primary)"
-        aria-hidden
+    <div>
+      <div
         style={{
-          filter: surfaceOn ? 'none' : 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))',
-        }}
-      />
-      <span
-        style={{
-          fontSize: 12,
-          fontWeight: 600,
-          letterSpacing: '0.04em',
-          color: 'var(--text-primary)',
-          textShadow: surfaceOn ? 'none' : '0 1px 2px rgba(0,0,0,0.55)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 8,
+          marginBottom: 10,
         }}
       >
-        Stocks
-      </span>
-      {hasData && (
         <span
           style={{
             fontSize: 11,
             fontWeight: 600,
-            // Day tint: green for up, red for down. Lives on the right
-            // edge in the same slot the count occupies in the other pills,
-            // so the row width stays stable across widgets.
-            color: avgUp ? 'var(--live)' : 'var(--accent)',
-            minWidth: 12,
-            textAlign: 'right',
-            opacity: open ? 1 : 0.85,
-            textShadow: surfaceOn ? 'none' : '0 1px 2px rgba(0,0,0,0.55)',
+            letterSpacing: '0.06em',
+            textTransform: 'uppercase',
+            color: 'var(--text-secondary)',
           }}
         >
-          {formatPct(avgPct)}
+          {count > 0 ? `${count} symbols` : 'Empty watchlist'}
         </span>
-      )}
-      <span
-        aria-hidden
-        style={{
-          display: 'inline-flex',
-          marginLeft: 2,
-          color: 'var(--text-ghost)',
-        }}
-      >
-        {open ? <X size={11} strokeWidth={2.4} /> : null}
-      </span>
-    </motion.button>
+        {count > 0 && (
+          <span
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              fontVariantNumeric: 'tabular-nums',
+              color: avgPct >= 0 ? 'var(--live)' : 'var(--accent)',
+            }}
+          >
+            {formatPct(avgPct)}
+          </span>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {count === 0 ? (
+          <EmptyState />
+        ) : (
+          quotes.map((q, i) => (
+            <QuoteRow
+              key={q.symbol}
+              quote={q}
+              staggerDelay={Math.min(0.04 * i, 0.32)}
+            />
+          ))
+        )}
+      </div>
+    </div>
   );
 }
 
 // ---------- row -------------------------------------------------------
 
-function QuoteRow({ quote }: { quote: StockQuote }) {
+function QuoteRow({ quote, staggerDelay }: { quote: StockQuote; staggerDelay: number }) {
   const [hover, setHover] = useState(false);
   const up = quote.change >= 0;
   const tint = up ? 'var(--live)' : 'var(--accent)';
@@ -263,7 +127,7 @@ function QuoteRow({ quote }: { quote: StockQuote }) {
       layout
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.22, ease: EASE_OUT_EXPO }}
+      transition={{ duration: 0.22, delay: staggerDelay, ease: EASE_OUT_EXPO }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
@@ -278,7 +142,6 @@ function QuoteRow({ quote }: { quote: StockQuote }) {
           'background 0.18s var(--ease-out-quart), border-color 0.18s var(--ease-out-quart)',
       }}
     >
-      {/* Symbol + name (truncated) */}
       <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
         <span
           style={{
@@ -295,10 +158,10 @@ function QuoteRow({ quote }: { quote: StockQuote }) {
           <span
             style={{
               marginTop: 2,
-              fontSize: 11.5,
+              fontSize: 12,
               fontWeight: 500,
               color: 'var(--text-secondary)',
-              letterSpacing: '0.01em',
+              letterSpacing: 0,
               lineHeight: 1.3,
               whiteSpace: 'nowrap',
               overflow: 'hidden',
@@ -310,7 +173,6 @@ function QuoteRow({ quote }: { quote: StockQuote }) {
         )}
       </div>
 
-      {/* Price + change */}
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0 }}>
         <span
           style={{
@@ -327,10 +189,9 @@ function QuoteRow({ quote }: { quote: StockQuote }) {
         <span
           style={{
             marginTop: 2,
-            fontSize: 11.5,
+            fontSize: 12,
             fontWeight: 500,
             color: tint,
-            letterSpacing: '0.01em',
             lineHeight: 1.3,
             fontVariantNumeric: 'tabular-nums',
             whiteSpace: 'nowrap',
@@ -343,8 +204,6 @@ function QuoteRow({ quote }: { quote: StockQuote }) {
   );
 }
 
-// ---------- empty state ----------------------------------------------
-
 function EmptyState() {
   return (
     <motion.div
@@ -353,7 +212,7 @@ function EmptyState() {
       transition={{ duration: 0.3 }}
       style={{
         padding: '14px 4px 6px 4px',
-        fontSize: 12.5,
+        fontSize: 13,
         lineHeight: 1.5,
         color: 'var(--text-secondary)',
       }}
@@ -363,22 +222,28 @@ function EmptyState() {
   );
 }
 
+const unavailableStyle: React.CSSProperties = {
+  padding: '14px 4px',
+  fontSize: 13,
+  color: 'var(--text-secondary)',
+};
+
 // ---------- helpers --------------------------------------------------
 
 function formatPrice(price: number, currency: string): string {
   const sym = currencySymbol(currency);
-  if (!Number.isFinite(price)) return `${sym}—`;
+  if (!Number.isFinite(price)) return `${sym}-`;
   return `${sym}${price.toFixed(2)}`;
 }
 
 function formatChange(change: number): string {
-  if (!Number.isFinite(change)) return '—';
+  if (!Number.isFinite(change)) return '-';
   const sign = change >= 0 ? '+' : '';
   return `${sign}${change.toFixed(2)}`;
 }
 
 function formatPct(pct: number): string {
-  if (!Number.isFinite(pct)) return '—';
+  if (!Number.isFinite(pct)) return '-';
   const sign = pct >= 0 ? '+' : '';
   return `${sign}${pct.toFixed(2)}%`;
 }

@@ -129,6 +129,36 @@ textarea {
   50%      { transform: scaleY(0.92); }
 }
 
+/* Voice button breathes while the AI is thinking — slow, subtle
+   scale loop that signals "still working" without competing with
+   the input field. Driven by the `isSending` prop on the button. */
+@keyframes voice-breathing {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.05); }
+}
+
+/* Sheet body — thin scrollbar so the panel content can scroll
+   without the default 3px chrome grabbing the eye. */
+.sheet-scroll::-webkit-scrollbar { width: 6px; }
+.sheet-scroll::-webkit-scrollbar-track { background: transparent; }
+.sheet-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.10);
+  border-radius: 3px;
+}
+.sheet-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+/* Single ambient gradient sweep — used by the dock to acknowledge
+   that the AI just produced a response. Pure transform on a
+   pseudo-element so it never reflows the dock. */
+@keyframes dock-ai-sweep {
+  0%   { transform: translateX(-100%); opacity: 0; }
+  20%  { opacity: 1; }
+  80%  { opacity: 1; }
+  100% { transform: translateX(100%); opacity: 0; }
+}
+
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

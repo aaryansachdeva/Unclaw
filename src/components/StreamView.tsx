@@ -62,41 +62,6 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
         )}
       </AnimatePresence>
 
-      {/* Live badge */}
-      <AnimatePresence>
-        {isConnected && (
-          <motion.div
-            key="live"
-            initial={{ opacity: 0, x: 8 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 8 }}
-            transition={{ duration: 0.4, delay: 0.3, ease: [0.16, 1, 0.3, 1] }}
-            className="absolute z-20 flex items-center"
-            style={{ top: '58px', right: '20px', gap: '7px' }}
-          >
-            <div
-              style={{
-                width: '6px',
-                height: '6px',
-                borderRadius: '50%',
-                background: 'var(--live)',
-                boxShadow: '0 0 8px var(--live)',
-                animation: 'pulse-dot 2.5s ease-in-out infinite',
-              }}
-            />
-            <span style={{
-              fontSize: '9px',
-              fontWeight: 700,
-              letterSpacing: '0.12em',
-              color: 'var(--live)',
-              opacity: 0.8,
-            }}>
-              LIVE
-            </span>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {/* Loading screen (shown whenever not connected) */}
       <AnimatePresence>
         {!isConnected && (
