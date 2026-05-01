@@ -55,6 +55,10 @@ interface InputBarProps {
   personaName: string;
   isSending: boolean;
   disabled: boolean;
+  /** True when the user has at least one attachment staged (e.g. a
+   *  screenshot). Lets send fire with empty text — the attachment
+   *  itself becomes the message. */
+  hasAttachments?: boolean;
   onSendMessage: (message: string) => void;
   /** Open/close a sheet (slash command target). */
   onOpenSheet: (key: SheetKey) => void;
@@ -70,12 +74,18 @@ interface InputBarProps {
   onNextPersona: () => void;
   /** Disable the persona switcher when stream isn't connected. */
   personaDisabled?: boolean;
+  /** Called when the user pastes an image into the textarea. Each
+   *  pasted image is normalized to PNG, base64-encoded (no data-URL
+   *  prefix), and reported with its natural dimensions so it can be
+   *  attached alongside Ctrl+Shift+G screenshots. */
+  onPasteImage?: (img: { base64: string; width: number; height: number }) => void;
 }
 
 export function InputBar({
   personaName,
   isSending,
   disabled,
+  hasAttachments = false,
   onSendMessage,
   onOpenSheet,
   onDispatchAnimation,
@@ -84,11 +94,11 @@ export function InputBar({
   onPrevPersona,
   onNextPersona,
   personaDisabled = false,
+  onPasteImage,
 }: InputBarProps) {
   const reduce = useReducedMotion() ?? false;
   const [message, setMessage] = useState('');
   const [isFocused, setIsFocused] = useState(false);
-  const [plusHover, setPlusHover] = useState(false);
   const [pulse, setPulse] = useState<'none' | 'submit' | 'sweep'>('none');
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const wasSendingRef = useRef(false);
@@ -195,12 +205,16 @@ export function InputBar({
       return;
     }
     const text = message.trim();
-    if (!text || disabled) return;
+    // Allow image-only sends: when the user has staged a screenshot
+    // (or several) we let Enter fire with no text — the attachment
+    // is the message. Otherwise require text. Guard against double-
+    // fires while a send is in flight without clearing keystrokes.
+    if ((!text && !hasAttachments) || disabled || isSending) return;
     onSendMessage(text);
     setMessage('');
     setPulse('submit');
     window.setTimeout(() => setPulse('none'), 280);
-  }, [slash, message, disabled, onSendMessage]);
+  }, [slash, message, hasAttachments, disabled, isSending, onSendMessage]);
 
   const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (slash.active) {
@@ -235,6 +249,64 @@ export function InputBar({
     textareaRef.current?.focus();
   }, [slash]);
 
+  // Paste-to-attach: when the user Ctrl+Vs into the textarea and the
+  // clipboard carries an image (copied from a browser, Snipping Tool,
+  // Figma, anywhere), short-circuit the default text paste and stage
+  // each image as an attachment. Multiple images in one paste all get
+  // attached. Non-image clipboard payloads fall through to the
+  // browser's default paste so plain text still works.
+  //
+  // We normalize every image to PNG via a canvas roundtrip so the
+  // backend can always assume `image/png` regardless of what format
+  // the source app put on the clipboard (JPEG, WEBP, GIF, etc.).
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (!onPasteImage) return;
+      const items = e.clipboardData?.items;
+      if (!items || items.length === 0) return;
+      const imageItems: DataTransferItem[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        if (it.kind === 'file' && it.type.startsWith('image/')) {
+          imageItems.push(it);
+        }
+      }
+      if (imageItems.length === 0) return; // text paste — let it through
+      e.preventDefault();
+      for (const it of imageItems) {
+        const blob = it.getAsFile();
+        if (!blob) continue;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result;
+          if (typeof dataUrl !== 'string') return;
+          const img = new Image();
+          img.onload = () => {
+            // Re-encode as PNG via canvas so the backend can rely on
+            // `data:image/png;base64,...` regardless of source format.
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            ctx.drawImage(img, 0, 0);
+            const pngDataUrl = canvas.toDataURL('image/png');
+            const base64 = pngDataUrl.split(',')[1] ?? '';
+            if (!base64) return;
+            onPasteImage({
+              base64,
+              width: img.naturalWidth,
+              height: img.naturalHeight,
+            });
+          };
+          img.src = dataUrl;
+        };
+        reader.readAsDataURL(blob);
+      }
+    },
+    [onPasteImage],
+  );
+
   const handleSlashHover = useCallback((i: number) => {
     if (i === slash.highlightedIndex) return;
     if (i < slash.highlightedIndex) {
@@ -245,6 +317,9 @@ export function InputBar({
   }, [slash]);
 
   const hasText = message.trim().length > 0;
+  // Show the send button when there's text OR a staged attachment.
+  // Attachment-only sends are valid (image-only chat about a screenshot).
+  const canSend = hasText || hasAttachments;
 
   // Border tint reflects the pulse state; submit + sweep both warm it
   // briefly to the accent so the user sees acknowledgement.
@@ -331,6 +406,7 @@ export function InputBar({
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
             disabled={disabled}
@@ -385,7 +461,6 @@ export function InputBar({
               </span>
             </div>
           )}
-          {isSending && <ThinkingIndicator />}
         </div>
 
         {/* Row 2: agent switcher (left) + action cluster (right) */}
@@ -447,7 +522,7 @@ export function InputBar({
 
           {/* Right action cluster: + button always; send when text,
               voice when empty (same 36x36 slot crossfades). */}
-          <PlusButton hovered={plusHover} onHoverChange={setPlusHover} />
+          <PlusButton />
           <div
             style={{
               position: 'relative',
@@ -460,9 +535,9 @@ export function InputBar({
               style={{
                 position: 'absolute',
                 inset: 0,
-                opacity: hasText ? 0 : 1,
-                transform: hasText ? 'scale(0.94)' : 'scale(1)',
-                pointerEvents: hasText ? 'none' : 'auto',
+                opacity: canSend ? 0 : 1,
+                transform: canSend ? 'scale(0.94)' : 'scale(1)',
+                pointerEvents: canSend ? 'none' : 'auto',
                 transition:
                   'opacity 0.18s var(--ease-out-quart), transform 0.18s var(--ease-out-quart)',
               }}
@@ -474,10 +549,10 @@ export function InputBar({
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.92 }}
               onClick={handleSend}
-              disabled={disabled || !hasText}
+              disabled={disabled || !canSend || isSending}
               aria-label="Send message"
-              aria-hidden={!hasText}
-              tabIndex={hasText ? 0 : -1}
+              aria-hidden={!canSend}
+              tabIndex={canSend ? 0 : -1}
               className="glass-btn"
               style={{
                 position: 'absolute',
@@ -491,9 +566,9 @@ export function InputBar({
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                opacity: hasText ? 1 : 0,
-                transform: hasText ? 'scale(1)' : 'scale(0.94)',
-                pointerEvents: hasText ? 'auto' : 'none',
+                opacity: canSend ? 1 : 0,
+                transform: canSend ? 'scale(1)' : 'scale(0.94)',
+                pointerEvents: canSend ? 'auto' : 'none',
                 transition:
                   'opacity 0.18s var(--ease-out-quart), transform 0.18s var(--ease-out-quart)',
               }}
@@ -562,143 +637,41 @@ function InlineChevron({
 }
 
 // ---------------------------------------------------------------------
-// + button with hover tooltip
+// + button
 // ---------------------------------------------------------------------
 
-function PlusButton({
-  hovered,
-  onHoverChange,
-}: {
-  hovered: boolean;
-  onHoverChange: (h: boolean) => void;
-}) {
+function PlusButton() {
   return (
-    <div
-      style={{ position: 'relative', flexShrink: 0 }}
-      onMouseEnter={() => onHoverChange(true)}
-      onMouseLeave={() => onHoverChange(false)}
-    >
-      <motion.button
-        type="button"
-        whileHover={{ scale: 1.05 }}
-        whileTap={{ scale: 0.92 }}
-        aria-label="Add files and more"
-        className="glass-btn"
-        style={{
-          width: 36,
-          height: 36,
-          borderRadius: '50%',
-          background: 'rgba(255,255,255,0.06)',
-          border: '1px solid rgba(255,255,255,0.10)',
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: 'var(--text-secondary)',
-          transition: 'background 0.2s var(--ease-out-quart), color 0.2s var(--ease-out-quart)',
-        }}
-        onMouseEnter={e => {
-          e.currentTarget.style.background = 'rgba(255,255,255,0.12)';
-          e.currentTarget.style.color = 'var(--text-primary)';
-        }}
-        onMouseLeave={e => {
-          e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
-          e.currentTarget.style.color = 'var(--text-secondary)';
-        }}
-      >
-        <Plus size={16} strokeWidth={2.2} />
-      </motion.button>
-      <AnimatePresence>
-        {hovered && (
-          <motion.div
-            key="plus-tooltip"
-            role="tooltip"
-            initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.16, ease: EASE_OUT_EXPO }}
-            style={{
-              position: 'absolute',
-              bottom: 'calc(100% + 8px)',
-              left: 0,
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '5px 8px',
-              background: 'rgba(20, 20, 20, 0.94)',
-              border: '1px solid rgba(255,255,255,0.08)',
-              borderRadius: 6,
-              fontSize: 11,
-              fontWeight: 500,
-              color: 'var(--text-primary)',
-              whiteSpace: 'nowrap',
-              pointerEvents: 'none',
-              boxShadow: '0 4px 12px rgba(0,0,0,0.35)',
-              zIndex: 5,
-            }}
-          >
-            <span>Add files and more</span>
-            <span
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                minWidth: 14,
-                height: 14,
-                padding: '0 4px',
-                background: 'rgba(255,255,255,0.10)',
-                borderRadius: 3,
-                fontSize: 10,
-                fontWeight: 600,
-                color: 'var(--text-primary)',
-              }}
-            >
-              /
-            </span>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------
-// "Grace is thinking" indicator (overlays the placeholder while AI works)
-// ---------------------------------------------------------------------
-
-function ThinkingIndicator() {
-  return (
-    <div
-      aria-hidden
+    <motion.button
+      type="button"
+      whileHover={{ scale: 1.05 }}
+      whileTap={{ scale: 0.92 }}
+      aria-label="Add files and more"
+      className="glass-btn"
       style={{
-        position: 'absolute',
-        inset: 0,
-        display: 'flex',
+        flexShrink: 0,
+        width: 36,
+        height: 36,
+        borderRadius: '50%',
+        background: 'rgba(255,255,255,0.06)',
+        border: '1px solid rgba(255,255,255,0.10)',
+        display: 'inline-flex',
         alignItems: 'center',
-        gap: 6,
-        pointerEvents: 'none',
-        fontSize: 14,
-        lineHeight: '22px',
-        color: 'rgba(255,255,255,0.55)',
-        fontStyle: 'italic',
+        justifyContent: 'center',
+        color: 'var(--text-secondary)',
+        transition: 'background 0.2s var(--ease-out-quart), color 0.2s var(--ease-out-quart)',
+      }}
+      onMouseEnter={e => {
+        e.currentTarget.style.background = 'rgba(255,255,255,0.12)';
+        e.currentTarget.style.color = 'var(--text-primary)';
+      }}
+      onMouseLeave={e => {
+        e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+        e.currentTarget.style.color = 'var(--text-secondary)';
       }}
     >
-      <span>thinking</span>
-      <span style={{ display: 'inline-flex', gap: 3 }}>
-        {[0, 1, 2].map(i => (
-          <span
-            key={i}
-            style={{
-              display: 'inline-block',
-              width: 4,
-              height: 4,
-              borderRadius: '50%',
-              background: 'var(--accent)',
-              animation: `pulse-dot 1.2s ease-in-out ${i * 0.18}s infinite`,
-            }}
-          />
-        ))}
-      </span>
-    </div>
+      <Plus size={16} strokeWidth={2.2} />
+    </motion.button>
   );
 }
 

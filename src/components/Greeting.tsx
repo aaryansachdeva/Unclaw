@@ -62,7 +62,7 @@ export function Greeting({ userName = 'friend' }: GreetingProps) {
       transition={{ duration: 0.6, delay: 0.4, ease: EASE_OUT_EXPO }}
       style={{
         position: 'absolute',
-        top: 120,
+        top: 72,
         left: 22,
         right: 22,
         maxWidth: 520,
@@ -115,7 +115,7 @@ export function Greeting({ userName = 'friend' }: GreetingProps) {
             letterSpacing: 0,
             margin: '10px 0 0 0',
             textShadow: '0 1px 3px rgba(0, 0, 0, 0.55)',
-            maxWidth: 520,
+            maxWidth: 360,
           }}
         >
           “{quote.text}” <span style={{ opacity: 0.7 }}>— {quote.author}</span>

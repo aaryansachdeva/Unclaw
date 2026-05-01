@@ -1,4 +1,4 @@
-// Right-edge sliding sheet. Renders one panel at a time (Reminders,
+// Left-edge sliding sheet. Renders one panel at a time (Reminders,
 // Stocks, News, Weather) inside a frosted-slate surface anchored
 // between the titlebar and the dock. Closes via the X button, the
 // triggering widget icon, click-outside, or Escape.
@@ -137,11 +137,11 @@ export function SheetPanel({
           // animating only `x` + opacity for entry/exit.
           initial={reduce
             ? { x: 0, y: '-50%', opacity: 1 }
-            : { x: 16, y: '-50%', opacity: 0 }}
+            : { x: -16, y: '-50%', opacity: 0 }}
           animate={{ x: 0, y: '-50%', opacity: 1 }}
           exit={reduce
             ? { y: '-50%', opacity: 0 }
-            : { x: 16, y: '-50%', opacity: 0 }}
+            : { x: -16, y: '-50%', opacity: 0 }}
           transition={reduce
             ? { duration: 0 }
             : { type: 'spring', stiffness: 320, damping: 34, mass: 0.8 }}
@@ -154,7 +154,7 @@ export function SheetPanel({
             // middle.
             position: 'absolute',
             top: `calc(50% + ${ICON_OFFSET[activeKey]}px)`,
-            right: 70,
+            left: 70,
             width: 300,
             maxHeight: 'min(440px, calc(100% - 200px))',
             zIndex: 35,

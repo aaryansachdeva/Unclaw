@@ -22,6 +22,12 @@ export interface SoulChatOptions {
    *  Grace/Mark/etc. without touching the server's structured-output
    *  formatting rules. */
   systemExtension?: string;
+  /** One or more screenshots attached to this turn. Each entry is a
+   *  base64-encoded PNG with NO data-URL prefix. Soul auto-routes
+   *  any image-bearing request to the vision-capable escalation
+   *  model (gpt-5.4-nano); the 20b is text-only and gets skipped.
+   *  An empty/omitted array sends no images. */
+  images?: string[];
 }
 
 /** Function-call result emitted when the LLM picks one of soul's tools.
@@ -62,6 +68,11 @@ export interface SoulChatResult {
    *  The client uses this to emit a UE animation event (kiss/dance/hello)
    *  or to refresh the reminders panel after a CRUD tool. */
   action?: SoulChatAction;
+  /** Set when 20b chose to escalate to gpt-5-mini + Playwright MCP. The
+   *  current /chat result is the transition reply (already voiced); the
+   *  client should poll /escalation/{id}/next for follow-up narrations
+   *  and the final response. See services/escalation.ts. */
+  escalation?: { id: string; reason: string };
   /** Server fields we don't strongly type. */
   [key: string]: unknown;
 }
@@ -80,6 +91,7 @@ export async function chatViaSoul(
   if (opts.ttsProvider) body.tts_provider = opts.ttsProvider;
   if (opts.lipsyncModel) body.lipsync_model = opts.lipsyncModel;
   if (opts.systemExtension) body.system_extension = opts.systemExtension;
+  if (opts.images && opts.images.length > 0) body.images = opts.images;
 
   const res = await fetch(`${SOUL_URL}/chat`, {
     method: 'POST',

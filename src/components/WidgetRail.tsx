@@ -1,7 +1,7 @@
-// Vertical widget rail anchored to the right edge of the window. Four
+// Vertical widget rail anchored to the left edge of the window. Four
 // hover-only icons, stacked. Click an icon to toggle the corresponding
 // sheet. The rail stays in place when a sheet opens (the sheet sits to
-// its left), so the layout never reflows.
+// its right), so the layout never reflows.
 
 import { motion, useReducedMotion } from 'framer-motion';
 import { Bell, BarChart3, Newspaper, Cloud } from 'lucide-react';
@@ -37,12 +37,12 @@ export function WidgetRail({
       // icon-offset alignment was off by ~half the rail's height.
       initial={reduce
         ? { opacity: 0, y: '-50%' }
-        : { opacity: 0, x: 8, y: '-50%' }}
+        : { opacity: 0, x: -8, y: '-50%' }}
       animate={{ opacity: 1, x: 0, y: '-50%' }}
       transition={{ duration: 0.5, delay: 0.4, ease: EASE_OUT_EXPO }}
       style={{
         position: 'absolute',
-        right: 14,
+        left: 14,
         top: '50%',
         display: 'flex',
         flexDirection: 'column',
@@ -117,7 +117,7 @@ function RailIcon({
       style={{
         position: 'relative',
         display: 'flex',
-        justifyContent: 'flex-end',
+        justifyContent: 'flex-start',
       }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
