@@ -20,7 +20,7 @@ import {
   useReducedMotion,
 } from 'framer-motion';
 import {
-  Plus, ArrowRight, ChevronLeft, ChevronRight,
+  Plus, ArrowRight, ChevronLeft, ChevronRight, Pencil, RotateCcw,
 } from 'lucide-react';
 
 import { SheetKey } from '../hooks/useSheet';
@@ -68,6 +68,12 @@ interface InputBarProps {
   ) => void;
   /** Slash command for /clear. */
   onClearMemory: () => void;
+  /** Reopen the onboarding wizard. Backs the pencil button next to the
+   *  persona switcher and the /onboard slash command. */
+  onOpenOnboarding: () => void;
+  /** Wipe the saved profile and restart the wizard from scratch. Backs
+   *  the temporary reset button next to the pencil. */
+  onResetProfile: () => void;
   voice: InputVoiceState;
   /** Persona switcher — chevron-prev / chevron-next, inline in row 2. */
   onPrevPersona: () => void;
@@ -90,6 +96,8 @@ export function InputBar({
   onOpenSheet,
   onDispatchAnimation,
   onClearMemory,
+  onOpenOnboarding,
+  onResetProfile,
   voice,
   onPrevPersona,
   onNextPersona,
@@ -190,6 +198,11 @@ export function InputBar({
     },
     onClearMemory: () => {
       onClearMemory();
+      setMessage('');
+      slashReset();
+    },
+    onOpenOnboarding: () => {
+      onOpenOnboarding();
       setMessage('');
       slashReset();
     },
@@ -516,6 +529,78 @@ export function InputBar({
               disabled={personaDisabled}
             />
           </div>
+
+          {/* Edit-profile pencil — sits next to the persona switcher.
+              Reopens the onboarding wizard with the current values
+              prefilled. Same affordance the /onboard slash command
+              triggers. */}
+          <button
+            type="button"
+            onClick={onOpenOnboarding}
+            aria-label="Edit profile"
+            title="Edit profile"
+            style={{
+              flexShrink: 0,
+              width: 22,
+              height: 22,
+              borderRadius: 6,
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-ghost)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              transition: 'all 0.15s var(--ease-out-quart)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'var(--glass-bg-hover)';
+              e.currentTarget.style.color = 'var(--text-primary)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'transparent';
+              e.currentTarget.style.color = 'var(--text-ghost)';
+            }}
+          >
+            <Pencil size={12} strokeWidth={2.2} />
+          </button>
+
+          {/* TEMPORARY: reset profile + re-run onboarding from scratch.
+              Sits next to the pencil so it's a one-click test path
+              while we iterate. Will likely move to a settings menu
+              once the wizard's stable. */}
+          <button
+            type="button"
+            onClick={onResetProfile}
+            aria-label="Reset profile and re-run onboarding"
+            title="Reset profile (re-run onboarding)"
+            style={{
+              flexShrink: 0,
+              width: 22,
+              height: 22,
+              borderRadius: 6,
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-ghost)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              transition: 'all 0.15s var(--ease-out-quart)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'var(--glass-bg-hover)';
+              e.currentTarget.style.color = 'var(--accent)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'transparent';
+              e.currentTarget.style.color = 'var(--text-ghost)';
+            }}
+          >
+            <RotateCcw size={12} strokeWidth={2.2} />
+          </button>
 
           {/* Spacer */}
           <div style={{ flex: 1 }} />

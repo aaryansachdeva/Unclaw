@@ -309,7 +309,7 @@ export function Titlebar({
               textShadow: '0 1px 3px rgba(0,0,0,0.7)',
             }}
           >
-            Reconnecting...
+            Reconnecting to UnClaw Engine...
           </motion.div>
         )}
       </AnimatePresence>

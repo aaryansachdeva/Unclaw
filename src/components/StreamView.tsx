@@ -171,7 +171,7 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
                 textTransform: 'uppercase',
                 color: 'var(--text-ghost)',
               }}>
-                Awaiting stream
+                Waiting for UnClaw Engine
               </span>
             </motion.div>
           </motion.div>

@@ -7,7 +7,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import {
   Bell, BarChart3, Newspaper, Cloud, Sparkles, Eraser,
-  Heart, Wind, LucideIcon,
+  Heart, Wind, UserCog, LucideIcon,
 } from 'lucide-react';
 
 import { SheetKey } from './useSheet';
@@ -34,6 +34,8 @@ interface UseSlashCommandsArgs {
   onDispatchAnimation: (name: 'give_a_kiss' | 'do_dance' | 'say_hello') => void;
   /** Clear conversation memory. The host shows a confirm dialog. */
   onClearMemory: () => void;
+  /** Reopen the onboarding wizard (edit profile mode). */
+  onOpenOnboarding: () => void;
 }
 
 export interface SlashAPI {
@@ -60,6 +62,7 @@ export function useSlashCommands({
   onOpenSheet,
   onDispatchAnimation,
   onClearMemory,
+  onOpenOnboarding,
 }: UseSlashCommandsArgs): SlashAPI {
   const [highlightedIndex, setHighlightedIndex] = useState(0);
 
@@ -115,7 +118,13 @@ export function useSlashCommands({
       icon: Eraser,
       run: () => onClearMemory(),
     },
-  ], [onOpenSheet, onDispatchAnimation, onClearMemory]);
+    {
+      command: '/onboard',
+      description: 'Edit your profile + vibe sliders',
+      icon: UserCog,
+      run: () => onOpenOnboarding(),
+    },
+  ], [onOpenSheet, onDispatchAnimation, onClearMemory, onOpenOnboarding]);
 
   const active = value.startsWith('/');
   const query = active ? value.slice(1).toLowerCase() : '';

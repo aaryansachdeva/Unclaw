@@ -20,6 +20,8 @@ import { chatViaSoul, SoulChatAction, SoulChatResult } from './services/soulChat
 import { pollNextEscalation } from './services/escalation';
 import { listReminders } from './services/reminders';
 import { getStocks } from './services/stocks';
+import { fetchProfile, deleteProfile, type UserProfile } from './services/profile';
+import { Wizard } from './components/Onboarding/Wizard';
 import { personalityFor } from './personalities';
 import { AGENTS } from './types';
 
@@ -116,6 +118,16 @@ export function App() {
   // content; this is just the lightweight count/aggregate snapshot.
   const [remindersCount, setRemindersCount] = useState(0);
   const [stocksDayPct, setStocksDayPct] = useState<number | null>(null);
+
+  // User profile — fetched at app start. `null` means soul has no
+  // profile yet, which triggers the onboarding wizard in firstRun mode.
+  // `undefined` means the fetch hasn't resolved yet (we render nothing
+  // profile-dependent until then to avoid a flash of "Aryan").
+  const [profile, setProfile] = useState<UserProfile | null | undefined>(undefined);
+  // Wizard visibility + mode. 'first' = no profile yet, can't be cancelled.
+  // 'edit' = user reopened to tweak; cancel returns to chat.
+  // null = wizard closed.
+  const [wizardMode, setWizardMode] = useState<'first' | 'edit' | null>(null);
 
   const persona = personalityFor(AGENTS[currentAgentIndex].name);
   const memory = useChatMemory(persona.id);
@@ -471,8 +483,12 @@ export function App() {
 
   // Top-level badge poll. Independent of the panels — the rail
   // shows counts from app start, and refresh on every chat round
-  // (so reminder tool calls reflect immediately).
+  // (so reminder tool calls reflect immediately). Gated on the
+  // pixel-streaming connection: nothing hits soul before the stream
+  // is up, so a cold launch doesn't burn requests against a server
+  // that the user hasn't even seen the agent on yet.
   useEffect(() => {
+    if (connectionState !== 'connected') return;
     let cancelled = false;
     void (async () => {
       const r = await listReminders();
@@ -481,9 +497,42 @@ export function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, [refreshKey]);
+  }, [refreshKey, connectionState]);
+
+  // Fetch the user profile, but only once the stream is connected.
+  // Null -> open the onboarding wizard in firstRun mode. Any non-null
+  // profile lets us silently skip onboarding and feed the saved name
+  // into the greeting / system prompts. Server-side rendering of the
+  // profile into chat prompts happens automatically in soul, so we
+  // don't have to thread profile values into the systemExtension here.
+  const profileFetchedRef = useRef(false);
+  useEffect(() => {
+    if (connectionState !== 'connected') return;
+    if (profileFetchedRef.current) return;
+    profileFetchedRef.current = true;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const p = await fetchProfile();
+        if (cancelled) return;
+        setProfile(p);
+        if (!p) setWizardMode('first');
+      } catch (err) {
+        if (!cancelled) {
+          console.warn('[profile] fetch failed', err);
+          // Fail-soft: don't block the app on a profile fetch error.
+          // We treat it as "no profile" so the wizard opens; the user
+          // can retry from there.
+          setProfile(null);
+          setWizardMode('first');
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [connectionState]);
 
   useEffect(() => {
+    if (connectionState !== 'connected') return;
     let cancelled = false;
     const fetchStocks = async () => {
       const s = await getStocks();
@@ -497,7 +546,7 @@ export function App() {
     void fetchStocks();
     const id = window.setInterval(fetchStocks, 60_000);
     return () => { cancelled = true; window.clearInterval(id); };
-  }, []);
+  }, [connectionState]);
 
   const handleClearMemory = useCallback(() => {
     if (memory.turns.length === 0) return;
@@ -570,7 +619,14 @@ export function App() {
         showReconnecting={showReconnecting}
       />
 
-      <Greeting userName="Aryan" />
+      {/* Everything below this point — greeting, widgets, sheet, status,
+          screenshots, input bar, wizard — is gated on the stream being
+          connected. Cold launch shows ONLY the StreamView's loading
+          screen + the Titlebar (window controls). No app chrome appears
+          before the agent does, and no requests fire against soul. */}
+      {isConnected && (
+        <>
+      <Greeting userName={profile?.name || 'friend'} />
 
       <WidgetRail
         activeWidget={activeWidget}
@@ -690,42 +746,86 @@ export function App() {
 
       {/* Bottom dock — single InputBar pill with the AgentSwitcher
           inlined in its second row (matches the old project layout).
-          Absolute-positioned so SheetPanel can never displace it. */}
-      <div
-        style={{
-          position: 'absolute',
-          left: 16,
-          right: 16,
-          bottom: 16,
-          zIndex: 30,
-          pointerEvents: 'none',
-        }}
-      >
-        <div style={{ pointerEvents: 'auto' }}>
-          <InputBar
-            personaName={persona.displayName}
-            isSending={isSending}
-            disabled={!isConnected}
-            hasAttachments={attachedImages.length > 0}
-            onSendMessage={handleSendMessage}
-            onOpenSheet={handleToggleWidget}
-            onDispatchAnimation={dispatchAnimation}
-            onClearMemory={handleClearMemory}
-            voice={{
-              active: voice.isListening,
-              disabled: isSending,
-              vadLevel: voice.vadLevel,
-              isUserSpeaking: voice.isUserSpeaking,
-              isTranscribing: voice.isTranscribing,
-              toggle: () => { void voice.toggle(); },
+          Absolute-positioned so SheetPanel can never displace it.
+          Hidden while the onboarding wizard is open: the wizard
+          OCCUPIES this same anchor (left:16, right:16, bottom:16),
+          so the input bar would visually fight it. We also gate on
+          `profile !== undefined` so the bar doesn't flash before the
+          first profile fetch resolves. */}
+      {profile !== undefined && !wizardMode && (
+        <motion.div
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+          style={{
+            position: 'absolute',
+            left: 16,
+            right: 16,
+            bottom: 16,
+            zIndex: 30,
+            pointerEvents: 'none',
+          }}
+        >
+          <div style={{ pointerEvents: 'auto' }}>
+            <InputBar
+              personaName={persona.displayName}
+              isSending={isSending}
+              disabled={!isConnected}
+              hasAttachments={attachedImages.length > 0}
+              onSendMessage={handleSendMessage}
+              onOpenSheet={handleToggleWidget}
+              onDispatchAnimation={dispatchAnimation}
+              onClearMemory={handleClearMemory}
+              onOpenOnboarding={() => setWizardMode('edit')}
+              onResetProfile={() => {
+                void deleteProfile()
+                  .catch((err) => console.warn('[profile] delete failed', err))
+                  .finally(() => {
+                    setProfile(null);
+                    setWizardMode('first');
+                  });
+              }}
+              voice={{
+                active: voice.isListening,
+                disabled: isSending,
+                vadLevel: voice.vadLevel,
+                isUserSpeaking: voice.isUserSpeaking,
+                isTranscribing: voice.isTranscribing,
+                toggle: () => { void voice.toggle(); },
+              }}
+              onPrevPersona={handlePrevPersona}
+              onNextPersona={handleNextPersona}
+              personaDisabled={!isConnected}
+              onPasteImage={handlePasteImage}
+            />
+          </div>
+        </motion.div>
+      )}
+
+      {/* Onboarding wizard. Mounted on first launch (no profile) and
+          on demand via the pencil icon / /onboard slash command. The
+          welcome line plays automatically on first-run mount; the
+          aha-moment greeting plays after a successful save. Both flow
+          through dispatchChatResult so UE plays them via the same
+          path as a regular reply. */}
+      <AnimatePresence>
+        {wizardMode && (
+          <Wizard
+            key="onboarding-wizard"
+            firstRun={wizardMode === 'first'}
+            initial={profile}
+            personaPrompt={persona.prompt}
+            onChatResult={dispatchChatResult}
+            onComplete={(saved) => {
+              setProfile(saved);
+              setWizardMode(null);
             }}
-            onPrevPersona={handlePrevPersona}
-            onNextPersona={handleNextPersona}
-            personaDisabled={!isConnected}
-            onPasteImage={handlePasteImage}
+            onCancel={() => setWizardMode(null)}
           />
-        </div>
-      </div>
+        )}
+      </AnimatePresence>
+        </>
+      )}
     </div>
   );
 }
