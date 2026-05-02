@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { Pin, PinOff, Settings, Eraser } from 'lucide-react';
+import { Pin, PinOff, Settings, Eraser, LogOut } from 'lucide-react';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
+
+interface TitlebarUser {
+  name: string | null;
+  email: string;
+  avatar_url: string | null;
+}
 
 interface TitlebarProps {
   /** Memory turn count — 0 hides the gear's clear-memory row entirely. */
@@ -14,6 +20,23 @@ interface TitlebarProps {
   /** When true, the chrome shows a "Reconnecting…" banner under the
    *  bar — used while the pixel stream is dropped. */
   showReconnecting?: boolean;
+  /** Signed-in user. When set, the profile avatar shows on the right
+   *  side and clicking it opens a small menu with email + Sign out. */
+  user?: TitlebarUser | null;
+  /** Triggered from the profile menu's "Sign out" row. */
+  onSignOut?: () => void;
+}
+
+function userInitials(user: TitlebarUser): string {
+  const source = (user.name || user.email || '').trim();
+  if (!source) return '?';
+  const words = source.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return source[0].toUpperCase();
+}
+
+function userDisplayName(user: TitlebarUser): string {
+  return (user.name && user.name.trim()) || user.email;
 }
 
 export function Titlebar({
@@ -21,11 +44,15 @@ export function Titlebar({
   personaName,
   onClearMemory,
   showReconnecting = false,
+  user = null,
+  onSignOut,
 }: TitlebarProps) {
   const reduce = useReducedMotion() ?? false;
   const [pinned, setPinned] = useState(true);
   const [gearOpen, setGearOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const gearWrapRef = useRef<HTMLDivElement | null>(null);
+  const profileWrapRef = useRef<HTMLDivElement | null>(null);
 
   const handlePin = () => {
     const next = !pinned;
@@ -33,18 +60,24 @@ export function Titlebar({
     window.electronAPI?.togglePin(next);
   };
 
-  // Click-outside on the gear popover.
+  // Single click-outside handler for both popovers — keeps DOM listener
+  // count predictable as more menus get added later.
   useEffect(() => {
-    if (!gearOpen) return undefined;
+    if (!gearOpen && !profileOpen) return undefined;
     const onPointer = (e: MouseEvent) => {
-      const node = gearWrapRef.current;
-      if (!node) return;
-      if (e.target instanceof Node && !node.contains(e.target)) {
+      const target = e.target instanceof Node ? e.target : null;
+      if (!target) return;
+      if (gearOpen && gearWrapRef.current && !gearWrapRef.current.contains(target)) {
         setGearOpen(false);
+      }
+      if (profileOpen && profileWrapRef.current && !profileWrapRef.current.contains(target)) {
+        setProfileOpen(false);
       }
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setGearOpen(false);
+      if (e.key !== 'Escape') return;
+      setGearOpen(false);
+      setProfileOpen(false);
     };
     document.addEventListener('mousedown', onPointer);
     document.addEventListener('keydown', onKey);
@@ -52,7 +85,7 @@ export function Titlebar({
       document.removeEventListener('mousedown', onPointer);
       document.removeEventListener('keydown', onKey);
     };
-  }, [gearOpen]);
+  }, [gearOpen, profileOpen]);
 
   return (
     <>
@@ -215,6 +248,173 @@ export function Titlebar({
             className="flex items-center"
             style={{ WebkitAppRegion: 'no-drag', gap: 4 } as React.CSSProperties}
           >
+            {/* Profile menu — visible only when signed in. Sits to the
+                left of the window controls so it reads as "you" rather
+                than as part of the OS chrome cluster. */}
+            {user && (
+              <div ref={profileWrapRef} style={{ position: 'relative', marginRight: 6 }}>
+                <motion.button
+                  type="button"
+                  whileTap={reduce ? undefined : { scale: 0.92 }}
+                  onClick={() => setProfileOpen((o) => !o)}
+                  aria-label="Profile menu"
+                  aria-expanded={profileOpen}
+                  title={userDisplayName(user)}
+                  className="glass-btn"
+                  style={{
+                    width: 26,
+                    height: 26,
+                    borderRadius: '50%',
+                    background: profileOpen
+                      ? 'rgba(255, 255, 255, 0.14)'
+                      : 'rgba(255, 255, 255, 0.06)',
+                    border: '1px solid rgba(255, 255, 255, 0.10)',
+                    color: 'var(--text-primary)',
+                    overflow: 'hidden',
+                    transition: 'background 180ms var(--ease-out-quart)',
+                    padding: 0,
+                  }}
+                  onMouseEnter={(e) => {
+                    if (profileOpen) return;
+                    e.currentTarget.style.background = 'rgba(255, 255, 255, 0.10)';
+                  }}
+                  onMouseLeave={(e) => {
+                    if (profileOpen) return;
+                    e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+                  }}
+                >
+                  {user.avatar_url ? (
+                    <img
+                      src={user.avatar_url}
+                      alt=""
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        objectFit: 'cover',
+                        borderRadius: '50%',
+                        display: 'block',
+                      }}
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <span
+                      aria-hidden
+                      style={{
+                        fontSize: 10.5,
+                        fontWeight: 700,
+                        letterSpacing: '0.02em',
+                        color: 'var(--text-primary)',
+                      }}
+                    >
+                      {userInitials(user)}
+                    </span>
+                  )}
+                </motion.button>
+
+                <AnimatePresence>
+                  {profileOpen && (
+                    <motion.div
+                      key="profile-popover"
+                      role="menu"
+                      initial={reduce ? { opacity: 1, y: 0 } : { opacity: 0, y: 4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
+                      transition={{ duration: 0.18, ease: EASE_OUT_EXPO }}
+                      style={{
+                        position: 'absolute',
+                        top: 32,
+                        right: 0,
+                        minWidth: 240,
+                        padding: 6,
+                        borderRadius: 12,
+                        background: 'var(--glass-bg-panel)',
+                        backdropFilter: 'var(--glass-blur)',
+                        WebkitBackdropFilter: 'var(--glass-blur)',
+                        border: '1px solid var(--glass-border-focus)',
+                        boxShadow: [
+                          '0 1px 0 rgba(255,255,255,0.06) inset',
+                          '0 12px 28px -8px rgba(0,0,0,0.45)',
+                        ].join(', '),
+                      }}
+                    >
+                      <div
+                        style={{
+                          padding: '10px 12px 8px',
+                          borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
+                          marginBottom: 4,
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 2,
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 13,
+                            fontWeight: 600,
+                            color: 'var(--text-primary)',
+                            letterSpacing: '-0.01em',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {userDisplayName(user)}
+                        </span>
+                        {user.name && (
+                          <span
+                            style={{
+                              fontSize: 11.5,
+                              color: 'var(--text-secondary)',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {user.email}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setProfileOpen(false);
+                          onSignOut?.();
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 10,
+                          width: '100%',
+                          padding: '8px 10px',
+                          borderRadius: 8,
+                          background: 'transparent',
+                          border: 'none',
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                          color: 'var(--text-primary)',
+                          fontFamily: 'inherit',
+                          fontSize: 13,
+                          fontWeight: 500,
+                          letterSpacing: '-0.01em',
+                          transition: 'background 120ms var(--ease-out-quart)',
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'transparent';
+                        }}
+                      >
+                        <LogOut size={14} strokeWidth={2} color="var(--text-secondary)" />
+                        <span>Sign out</span>
+                      </button>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            )}
+
             {([
               { action: handlePin, label: pinned ? 'Unpin from top' : 'Pin to top', icon: 'pin' as const },
               { action: () => window.electronAPI?.minimize(), label: 'Minimize', icon: 'min' as const },

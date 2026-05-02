@@ -21,7 +21,6 @@ import { InterestsStep, type InterestsValues } from './InterestsStep';
 import { WelcomeStep } from './WelcomeStep';
 import type { VibeValues } from './VibeStep';
 import {
-  saveProfile,
   fetchOnboardingWelcome,
   fetchOnboardingGreet,
   DEFAULT_VIBE,
@@ -40,6 +39,9 @@ interface WizardProps {
   /** Active persona's prompt — passed to /onboarding/greet so the
    *  personalization picks up the agent's voice. */
   personaPrompt?: string;
+  /** Persist the profile. Parent owns the dual-write strategy (soul +
+   *  cloud); the wizard just hands a finished payload over. */
+  onSave: (profile: UserProfile) => Promise<UserProfile>;
   /** Called after a successful save. Wizard stays mounted briefly so the
    *  fade-out can play; parent removes it from the tree afterwards. */
   onComplete: (profile: UserProfile) => void;
@@ -68,6 +70,7 @@ export function Wizard({
   firstRun,
   initial,
   personaPrompt,
+  onSave,
   onComplete,
   onChatResult,
   onCancel,
@@ -190,7 +193,7 @@ export function Wizard({
         schedule:        interests.schedule || null,
         notes:           interests.notes.trim() || null,
       };
-      const saved = await saveProfile(profile);
+      const saved = await onSave(profile);
       // Fire greeting first (slow), then unmount the wizard so the user
       // doesn't sit on a frozen Finish button while the LLM thinks.
       onComplete(saved);

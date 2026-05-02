@@ -42,4 +42,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
     rect: { x: number; y: number; w: number; h: number },
   ) => ipcRenderer.send('screenshot:complete', rect),
   cancelScreenshot: () => ipcRenderer.send('screenshot:cancel'),
+
+  // ----------------------------------------------------------------------
+  // Auth — loopback OAuth flow + safeStorage-backed token persistence.
+  // The renderer drives the UX (sign-in screen, status state); main
+  // owns the OS-level pieces (custom protocol, encrypted token file,
+  // shell.openExternal).
+  authOpenExternal: (url: string): Promise<boolean> =>
+    ipcRenderer.invoke('auth:open-external', url),
+  authSetToken: (token: string): Promise<boolean> =>
+    ipcRenderer.invoke('auth:set-token', token),
+  authGetToken: (): Promise<string | null> =>
+    ipcRenderer.invoke('auth:get-token'),
+  authClearToken: (): Promise<boolean> =>
+    ipcRenderer.invoke('auth:clear-token'),
+  /** Spin up the loopback HTTP server and resolve when the OAuth
+   *  provider hits it (or on error/timeout/cancel). The server only
+   *  accepts ONE request — caller is responsible for ordering the
+   *  call BEFORE openExternal so no callback can race the listener. */
+  authStartOAuthLoopback: (): Promise<{
+    code: string | null
+    state: string | null
+    error: string | null
+  }> => ipcRenderer.invoke('auth:start-oauth-loopback'),
+  /** Cancel a pending OAuth flow (closes the loopback server). */
+  authCancelOAuthLoopback: (): Promise<boolean> =>
+    ipcRenderer.invoke('auth:cancel-oauth-loopback'),
 });

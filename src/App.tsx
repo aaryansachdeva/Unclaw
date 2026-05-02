@@ -20,7 +20,20 @@ import { chatViaSoul, SoulChatAction, SoulChatResult } from './services/soulChat
 import { pollNextEscalation } from './services/escalation';
 import { listReminders } from './services/reminders';
 import { getStocks } from './services/stocks';
-import { fetchProfile, deleteProfile, type UserProfile } from './services/profile';
+import {
+  deleteProfile,
+  saveProfileEverywhere,
+  syncProfile,
+  type UserProfile,
+} from './services/profile';
+import {
+  loadStoredToken,
+  fetchCurrentUser,
+  signOut,
+  type AuthSession,
+  type AuthUser,
+} from './services/auth';
+import { SignInScreen } from './components/Auth/SignInScreen';
 import { Wizard } from './components/Onboarding/Wizard';
 import { personalityFor } from './personalities';
 import { AGENTS } from './types';
@@ -118,6 +131,13 @@ export function App() {
   // content; this is just the lightweight count/aggregate snapshot.
   const [remindersCount, setRemindersCount] = useState(0);
   const [stocksDayPct, setStocksDayPct] = useState<number | null>(null);
+
+  // Auth session — fetched at app start from safeStorage.
+  //   undefined: still resolving (don't render anything auth-dependent)
+  //   null:      no valid session, show SignInScreen
+  //   object:    signed in
+  const [authToken, setAuthToken] = useState<string | null | undefined>(undefined);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
 
   // User profile — fetched at app start. `null` means soul has no
   // profile yet, which triggers the onboarding wizard in firstRun mode.
@@ -499,37 +519,89 @@ export function App() {
     return () => { cancelled = true; };
   }, [refreshKey, connectionState]);
 
+  // Resume auth session on app start. Independent of stream state —
+  // the SignInScreen renders over the loading screen anyway, so the
+  // user can authenticate while the UnClaw Engine is still warming up.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const stored = await loadStoredToken();
+        if (cancelled) return;
+        if (!stored) {
+          setAuthToken(null);
+          setAuthUser(null);
+          return;
+        }
+        const user = await fetchCurrentUser(stored);
+        if (cancelled) return;
+        if (user) {
+          setAuthToken(stored);
+          setAuthUser(user);
+        } else {
+          setAuthToken(null);
+          setAuthUser(null);
+        }
+      } catch {
+        if (!cancelled) {
+          setAuthToken(null);
+          setAuthUser(null);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleSignedIn = useCallback((session: AuthSession) => {
+    setAuthToken(session.token);
+    setAuthUser(session.user);
+  }, []);
+
+  const handleSignOut = useCallback(async () => {
+    await signOut(authToken ?? null);
+    setAuthToken(null);
+    setAuthUser(null);
+    setProfile(undefined);
+    setWizardMode(null);
+    // Allow a fresh sync if the user signs back in this session.
+    profileSyncedRef.current = false;
+  }, [authToken]);
+
   // Fetch the user profile, but only once the stream is connected.
   // Null -> open the onboarding wizard in firstRun mode. Any non-null
   // profile lets us silently skip onboarding and feed the saved name
   // into the greeting / system prompts. Server-side rendering of the
   // profile into chat prompts happens automatically in soul, so we
   // don't have to thread profile values into the systemExtension here.
-  const profileFetchedRef = useRef(false);
+  const profileSyncedRef = useRef(false);
   useEffect(() => {
+    // Profile sync runs once we have BOTH a connected stream AND a
+    // signed-in user. The sync reconciles cloud (Worker) and local
+    // (soul) — cloud wins when present, soul migrates up when cloud
+    // is empty. Wizard fires only when both sides are empty.
     if (connectionState !== 'connected') return;
-    if (profileFetchedRef.current) return;
-    profileFetchedRef.current = true;
+    if (!authToken) return;
+    if (profileSyncedRef.current) return;
+    profileSyncedRef.current = true;
+
     let cancelled = false;
     void (async () => {
       try {
-        const p = await fetchProfile();
+        const p = await syncProfile(authToken);
         if (cancelled) return;
         setProfile(p);
         if (!p) setWizardMode('first');
       } catch (err) {
-        if (!cancelled) {
-          console.warn('[profile] fetch failed', err);
-          // Fail-soft: don't block the app on a profile fetch error.
-          // We treat it as "no profile" so the wizard opens; the user
-          // can retry from there.
-          setProfile(null);
-          setWizardMode('first');
-        }
+        if (cancelled) return;
+        console.warn('[profile] sync failed', err);
+        // Fail-soft: treat as "no profile" so the wizard opens. The
+        // user can re-enter their info; next sync will mirror it.
+        setProfile(null);
+        setWizardMode('first');
       }
     })();
     return () => { cancelled = true; };
-  }, [connectionState]);
+  }, [connectionState, authToken]);
 
   useEffect(() => {
     if (connectionState !== 'connected') return;
@@ -617,14 +689,22 @@ export function App() {
         personaName={persona.displayName}
         onClearMemory={handleClearMemory}
         showReconnecting={showReconnecting}
+        user={authUser}
+        onSignOut={() => { void handleSignOut(); }}
       />
 
+      {/* Sign-in screen. Mounted whenever auth has resolved to "no
+          session" — sits over the loading screen so the user can
+          authenticate while the UnClaw Engine is still warming up.
+          Renders on top of everything else (zIndex 60). */}
+      {authToken === null && (
+        <SignInScreen onSignedIn={handleSignedIn} />
+      )}
+
       {/* Everything below this point — greeting, widgets, sheet, status,
-          screenshots, input bar, wizard — is gated on the stream being
-          connected. Cold launch shows ONLY the StreamView's loading
-          screen + the Titlebar (window controls). No app chrome appears
-          before the agent does, and no requests fire against soul. */}
-      {isConnected && (
+          screenshots, input bar, wizard — is gated on BOTH a connected
+          stream AND a signed-in user. */}
+      {isConnected && authToken && (
         <>
       <Greeting userName={profile?.name || 'friend'} />
 
@@ -815,6 +895,7 @@ export function App() {
             firstRun={wizardMode === 'first'}
             initial={profile}
             personaPrompt={persona.prompt}
+            onSave={(p) => saveProfileEverywhere(p, authToken ?? null)}
             onChatResult={dispatchChatResult}
             onComplete={(saved) => {
               setProfile(saved);

@@ -1,10 +1,18 @@
-// User profile CRUD against soul's /profile endpoints. Backs the onboarding
-// wizard and any inline edits later. The server is the single source of
-// truth — we don't cache on disk in the renderer process.
+// User profile CRUD across two layers:
+//   * Soul (local FastAPI on 127.0.0.1:8765) — the LLM reads its system
+//     prompt from this every chat turn, so it has to be the local cache.
+//     No auth here; soul trusts the renderer.
+//   * UnClaw API (Cloudflare Worker) — the cross-device source of truth.
+//     Auth-gated by the user's JWT.
+//
+// Cloud is authoritative across devices; soul is authoritative for
+// the LLM read path. The reconciler (`syncProfile` below) keeps them
+// in step at sign-in and after every wizard save.
 
 import type { SoulChatResult } from './soulChat';
 
 const SOUL_URL = 'http://127.0.0.1:8765';
+const CLOUD_URL = 'https://unclaw-api.aryansachdeva1999.workers.dev';
 
 export type UserSchedule = 'early_bird' | 'night_owl' | 'mixed';
 
@@ -145,3 +153,116 @@ export const DEFAULT_VIBE = {
   vibe_directness: 35,
   vibe_verbosity:  35,
 } as const;
+
+// =====================================================================
+// Cloud (Worker) profile — auth-gated, cross-device source of truth.
+// =====================================================================
+
+/** GET /profile from the Worker. Returns null when no profile is saved
+ *  yet, or when the token has expired (caller should re-auth). */
+export async function fetchCloudProfile(token: string): Promise<UserProfile | null> {
+  const res = await fetch(`${CLOUD_URL}/profile`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) return null;
+  if (!res.ok) {
+    const err = await res.text().catch(() => res.statusText);
+    throw new Error(`cloud /profile GET ${res.status}: ${err.slice(0, 200)}`);
+  }
+  const data = (await res.json()) as { profile: UserProfile | null };
+  return data.profile;
+}
+
+/** PUT /profile on the Worker. Used by saveProfileEverywhere on the
+ *  wizard-save path AND by syncProfile during the soul→cloud
+ *  migration when a returning user signs in for the first time. */
+export async function pushCloudProfile(
+  token: string,
+  profile: UserProfile,
+): Promise<UserProfile> {
+  const res = await fetch(`${CLOUD_URL}/profile`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(profile),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => res.statusText);
+    throw new Error(`cloud /profile PUT ${res.status}: ${err.slice(0, 200)}`);
+  }
+  const data = (await res.json()) as { profile: UserProfile };
+  return data.profile;
+}
+
+// =====================================================================
+// Reconciliation — runs after sign-in to align cloud + soul.
+// =====================================================================
+
+/** Pull cloud + local profiles in parallel, decide which (if either)
+ *  is authoritative, mirror it to the other side, return the canonical
+ *  profile (or null when both sides are empty — wizard fires).
+ *
+ *  Rules:
+ *    * Cloud has data: it wins. Mirror to soul if soul is missing OR
+ *      out of date (different updated_at).
+ *    * Cloud empty, soul has data: this is a returning pre-cloud user
+ *      signing in for the first time. Push their existing local
+ *      profile up to the cloud as a one-shot migration.
+ *    * Both empty: return null. App will trigger the wizard.
+ */
+export async function syncProfile(token: string): Promise<UserProfile | null> {
+  const [cloud, local] = await Promise.all([
+    fetchCloudProfile(token).catch((err) => {
+      console.warn('[profile] cloud fetch failed during sync', err);
+      return null;
+    }),
+    fetchProfile().catch((err) => {
+      console.warn('[profile] local fetch failed during sync', err);
+      return null;
+    }),
+  ]);
+
+  if (cloud) {
+    if (!local || local.updated_at !== cloud.updated_at) {
+      try {
+        await saveProfile(cloud);
+      } catch (err) {
+        console.warn('[profile] mirror cloud→soul failed', err);
+      }
+    }
+    return cloud;
+  }
+
+  if (local) {
+    try {
+      await pushCloudProfile(token, local);
+    } catch (err) {
+      console.warn('[profile] migration soul→cloud failed', err);
+    }
+    return local;
+  }
+
+  return null;
+}
+
+/** Save a profile to soul (always) and push to cloud (best-effort
+ *  when a token is present). Used by the wizard's Finish button so a
+ *  single user action ends up in both layers. Cloud failure is
+ *  swallowed — soul is the read path that matters for the LLM, and
+ *  the next sync will re-mirror. */
+export async function saveProfileEverywhere(
+  profile: UserProfile,
+  token: string | null,
+): Promise<UserProfile> {
+  const saved = await saveProfile(profile);
+  if (token) {
+    try {
+      await pushCloudProfile(token, saved);
+    } catch (err) {
+      console.warn('[profile] cloud push failed (will retry on next sync)', err);
+    }
+  }
+  return saved;
+}

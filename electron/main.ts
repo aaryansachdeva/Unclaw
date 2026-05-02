@@ -4,6 +4,8 @@ import {
   screen,
   ipcMain,
   session,
+  shell,
+  safeStorage,
   Tray,
   Menu,
   nativeImage,
@@ -13,6 +15,8 @@ import {
   IpcMainEvent,
 } from 'electron';
 import path from 'path';
+import fs from 'fs';
+import { LOGO_BASE64 } from './oauthLogo';
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -22,8 +26,11 @@ let tray: Tray | null = null;
 // time; the shortcut is debounced via overlayWindow.isVisible().
 let pendingCapture: { image: Electron.NativeImage; display: Display } | null = null;
 
-const WINDOW_WIDTH = 420;
-const WINDOW_HEIGHT = 760;
+// Slightly larger and noticeably squarer than the original 420x760
+// rectangle — gives the wizard's bottom panel + the streamed face
+// enough room to breathe while still feeling like a sidekick window.
+const WINDOW_WIDTH = 600;
+const WINDOW_HEIGHT = 780;
 const EDGE_MARGIN = 16;
 
 const SCREENSHOT_SHORTCUT = 'Control+Shift+G';
@@ -410,7 +417,19 @@ function createWindow() {
     },
   });
 
-  mainWindow.setAlwaysOnTop(true, 'floating');
+  // 'floating' was getting overridden by other apps that use higher
+  // levels (full-screen video, screen-share frames, etc.). 'screen-saver'
+  // is the highest standard level and matches what UnClaw's competitor
+  // surface (popup widgets, voice assistants) typically uses to
+  // genuinely stay on top of everything. We set it once here and re-
+  // apply on focus events below as a Windows safety belt.
+  mainWindow.setAlwaysOnTop(true, 'screen-saver');
+  // visibleOnAllWorkspaces is mac/linux; harmless on Windows.
+  try {
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  } catch {
+    // Older Electron versions may not accept the second arg on every OS.
+  }
 
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -446,7 +465,397 @@ function createTray() {
 ipcMain.on('window:minimize', () => mainWindow?.minimize());
 ipcMain.on('window:close', () => mainWindow?.hide());
 ipcMain.on('window:toggle-pin', (_event, pinned: boolean) => {
-  mainWindow?.setAlwaysOnTop(pinned, 'floating');
+  // Same level as the createWindow setup — 'screen-saver' is the
+  // highest standard level and survives full-screen apps stealing
+  // focus. When unpinned we drop back to a normal window.
+  mainWindow?.setAlwaysOnTop(pinned, 'screen-saver');
+});
+
+// =====================================================================
+// Auth: loopback HTTP server OAuth + token storage
+// =====================================================================
+//
+// Sign-in flow for Google / Discord:
+//   1) Renderer calls `auth:start-oauth-loopback` which spins up a
+//      tiny http server on 127.0.0.1:47821 and returns a promise.
+//   2) Renderer calls `auth:open-external` with the provider's auth
+//      URL (redirect_uri = http://localhost:47821/oauth/callback).
+//   3) User authenticates in browser; provider redirects to that
+//      loopback URL with `?code=...&state=...`.
+//   4) The local server captures the request, returns a "you can
+//      close this tab" page, and resolves the IPC promise with
+//      {code, state, error}. Server immediately shuts down.
+//   5) Renderer verifies state matches what it generated, then POSTs
+//      to the Worker's /auth/google or /auth/discord endpoint to
+//      exchange the code for a JWT.
+//   6) Renderer saves the JWT via `auth:set-token` -> safeStorage
+//      writes an encrypted blob to `<userData>/auth.bin`.
+//
+// Loopback was picked over the older custom-URI-scheme deep-link
+// approach because Google's Desktop OAuth client type rejects
+// arbitrary custom schemes (only com.googleusercontent.apps.X:/...
+// and http://127.0.0.1 are allowed). Loopback works for both
+// providers with no console redirect-URI gymnastics on Google's side.
+
+const AUTH_TOKEN_FILE = 'auth.bin';
+const OAUTH_LOOPBACK_PORT = 47821;
+const OAUTH_LOOPBACK_PATH = '/oauth/callback';
+const OAUTH_TIMEOUT_MS = 3 * 60 * 1000;
+
+interface OAuthCallbackPayload {
+  code: string | null;
+  state: string | null;
+  error: string | null;
+}
+
+let oauthServer: import('http').Server | null = null;
+let oauthResolver: ((v: OAuthCallbackPayload) => void) | null = null;
+let oauthTimer: NodeJS.Timeout | null = null;
+
+function shutdownOAuthServer(): void {
+  if (oauthTimer) {
+    clearTimeout(oauthTimer);
+    oauthTimer = null;
+  }
+  if (oauthServer) {
+    try {
+      oauthServer.close();
+    } catch {
+      // ignore — server may already be closed
+    }
+    oauthServer = null;
+  }
+}
+
+// Browser-facing success page. The user's browser shows this for a
+// moment after the provider redirect lands; UnClaw's window pulls
+// itself to front behind it. Aesthetic mirrors the in-app SignInScreen
+// (frosted glass card, breathing logo, warm radial wash) so the
+// cross-app handoff feels like one continuous moment. The logo is
+// embedded as a base64 PNG in oauthLogo.ts so we never have to resolve
+// an asset path from inside the main process.
+const OAUTH_SUCCESS_HTML = `<!doctype html>
+<html lang="en"><head>
+  <meta charset="utf-8">
+  <title>Signed in to UnClaw</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body {
+      margin: 0; height: 100%; overflow: hidden;
+      color: #fafafa;
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont,
+        'Segoe UI', Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    /* Layered ambient background — a deep navy/black base, two warm
+       radial blooms (one accent-tinted, one cool slate) and a faint
+       grid-noise vignette so the page never looks like a flat black
+       sheet even when the card is small. */
+    body {
+      background:
+        radial-gradient(ellipse 70% 50% at 50% 40%, rgba(196, 68, 68, 0.08), transparent 70%),
+        radial-gradient(ellipse 80% 60% at 80% 80%, rgba(60, 80, 130, 0.10), transparent 70%),
+        radial-gradient(ellipse 60% 60% at 20% 80%, rgba(50, 70, 120, 0.06), transparent 70%),
+        radial-gradient(ellipse at 50% 0%, #16161e 0%, #08080b 60%);
+      display: flex; align-items: center; justify-content: center;
+      padding: 32px;
+    }
+    /* Soft grain — pure CSS, no asset. Adds organic texture to the
+       background washes. */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background-image:
+        radial-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+      background-size: 3px 3px;
+      pointer-events: none;
+      mix-blend-mode: screen;
+    }
+    .halo {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -55%);
+      width: 620px; height: 620px; border-radius: 50%;
+      background: radial-gradient(circle,
+        rgba(196, 68, 68, 0.20) 0%,
+        rgba(196, 68, 68, 0.05) 45%,
+        transparent 72%);
+      filter: blur(28px);
+      pointer-events: none;
+      animation: halo-pulse 6s ease-in-out infinite;
+    }
+    @keyframes halo-pulse {
+      0%, 100% { opacity: 0.85; transform: translate(-50%, -55%) scale(1); }
+      50%      { opacity: 1.0;  transform: translate(-50%, -55%) scale(1.04); }
+    }
+
+    .card {
+      position: relative;
+      width: min(420px, 100%);
+      padding: 40px 36px 32px;
+      text-align: center;
+      /* Glassy — same aesthetic as the in-app SignInScreen. */
+      background: rgba(14, 16, 26, 0.42);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      border-radius: 24px;
+      backdrop-filter: blur(36px) saturate(1.6);
+      -webkit-backdrop-filter: blur(36px) saturate(1.6);
+      box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.14) inset,
+        0 -1px 0 rgba(255, 255, 255, 0.04) inset,
+        1px 0 0 rgba(255, 255, 255, 0.05) inset,
+        -1px 0 0 rgba(255, 255, 255, 0.05) inset,
+        0 28px 80px rgba(0, 0, 0, 0.55),
+        0 10px 32px rgba(0, 0, 0, 0.35),
+        0 0 90px -16px rgba(196, 68, 68, 0.22);
+      animation: card-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    @keyframes card-rise {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Logo — real UnClaw mark, embedded base64. Breathes via a
+       drop-shadow keyframe instead of opacity so the alpha edge stays
+       crisp. */
+    .logo-wrap {
+      position: relative;
+      width: 132px; height: 132px;
+      margin: 4px auto 18px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .logo-wrap::before {
+      content: '';
+      position: absolute; inset: -16px;
+      border-radius: 50%;
+      background: radial-gradient(circle,
+        rgba(196, 68, 68, 0.24) 0%,
+        rgba(196, 68, 68, 0.06) 50%,
+        transparent 75%);
+      filter: blur(10px);
+      pointer-events: none;
+    }
+    .logo {
+      width: 132px; height: 132px;
+      object-fit: contain;
+      position: relative; z-index: 1;
+      animation: logo-breathe 3.2s ease-in-out infinite;
+    }
+    @keyframes logo-breathe {
+      0%, 100% { filter: drop-shadow(0 0 16px rgba(196, 68, 68, 0.28)); }
+      50%      { filter: drop-shadow(0 0 30px rgba(196, 68, 68, 0.46)); }
+    }
+
+    /* Inline accent rule above the headline — small, deliberate. */
+    .rule {
+      display: inline-block;
+      width: 22px; height: 2px; border-radius: 2px;
+      background: #c44444;
+      box-shadow: 0 0 8px rgba(196, 68, 68, 0.6);
+      margin-bottom: 14px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 24px; font-weight: 600;
+      letter-spacing: -0.022em;
+      color: #fafafa;
+    }
+    p {
+      margin: 0;
+      font-size: 14px; line-height: 1.55;
+      color: #b8b3ad;
+      max-width: 320px;
+      margin-left: auto; margin-right: auto;
+    }
+    .hint {
+      margin-top: 22px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 10.5px; letter-spacing: 0.10em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.36);
+      display: inline-flex; align-items: center; gap: 7px;
+    }
+    .pulse-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #c44444;
+      box-shadow: 0 0 6px rgba(196, 68, 68, 0.8);
+      animation: dot-pulse 2s ease-in-out infinite;
+    }
+    @keyframes dot-pulse {
+      0%, 100% { opacity: 0.6; }
+      50%      { opacity: 1.0; }
+    }
+  </style>
+</head><body>
+  <span class="halo"></span>
+  <div class="card">
+    <div class="logo-wrap">
+      <img class="logo" src="data:image/png;base64,${LOGO_BASE64}" alt="UnClaw">
+    </div>
+    <span class="rule"></span>
+    <h1>You're signed in</h1>
+    <p>You can close this tab and head back to UnClaw.</p>
+    <div class="hint">
+      <span class="pulse-dot"></span>
+      <span>Open in the background</span>
+    </div>
+  </div>
+</body></html>`;
+
+function tokenFilePath(): string {
+  return path.join(app.getPath('userData'), AUTH_TOKEN_FILE);
+}
+
+// Lazy-required so we don't pull http into the main bundle until needed.
+async function startOAuthLoopback(): Promise<OAuthCallbackPayload> {
+  // If a server is already running (user clicked sign-in twice), tear
+  // the previous one down and resolve its promise as cancelled.
+  if (oauthServer || oauthResolver) {
+    const prev = oauthResolver;
+    shutdownOAuthServer();
+    prev?.({ code: null, state: null, error: 'cancelled-by-newer-attempt' });
+  }
+
+  const http = await import('http');
+
+  return new Promise<OAuthCallbackPayload>((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      try {
+        const reqUrl = new URL(
+          req.url || '/',
+          `http://localhost:${OAUTH_LOOPBACK_PORT}`,
+        );
+        if (reqUrl.pathname !== OAUTH_LOOPBACK_PATH) {
+          res.writeHead(404, { 'Content-Type': 'text/plain' });
+          res.end('Not found');
+          return;
+        }
+        const code = reqUrl.searchParams.get('code');
+        const state = reqUrl.searchParams.get('state');
+        const error = reqUrl.searchParams.get('error');
+
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(OAUTH_SUCCESS_HTML);
+
+        const r = oauthResolver;
+        shutdownOAuthServer();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+        r?.({ code, state, error });
+      } catch (err) {
+        console.warn('[auth] oauth-loopback handler failed', err);
+        try {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('OAuth callback failed');
+        } catch {
+          // already-sent etc.
+        }
+        const r = oauthResolver;
+        shutdownOAuthServer();
+        r?.({ code: null, state: null, error: 'callback-handler-error' });
+      }
+    });
+
+    server.on('error', (err) => {
+      const r = oauthResolver;
+      shutdownOAuthServer();
+      // EADDRINUSE most likely — surface a clear message.
+      const msg =
+        (err as NodeJS.ErrnoException)?.code === 'EADDRINUSE'
+          ? `Port ${OAUTH_LOOPBACK_PORT} is in use — close any other UnClaw or sign-in tab and try again.`
+          : err.message || 'OAuth server failed';
+      if (r) {
+        r({ code: null, state: null, error: msg });
+      } else {
+        reject(err);
+      }
+    });
+
+    oauthServer = server;
+    oauthResolver = resolve;
+    oauthTimer = setTimeout(() => {
+      const r = oauthResolver;
+      shutdownOAuthServer();
+      r?.({ code: null, state: null, error: 'timeout' });
+    }, OAUTH_TIMEOUT_MS);
+
+    server.listen(OAUTH_LOOPBACK_PORT, '127.0.0.1');
+  });
+}
+
+ipcMain.handle('auth:start-oauth-loopback', async () => startOAuthLoopback());
+
+ipcMain.handle('auth:cancel-oauth-loopback', () => {
+  const r = oauthResolver;
+  shutdownOAuthServer();
+  r?.({ code: null, state: null, error: 'cancelled' });
+  return true;
+});
+
+// Open a URL in the user's default browser. Used by the renderer to
+// kick off the OAuth dance for Google / Discord.
+ipcMain.handle('auth:open-external', async (_event, url: string) => {
+  if (typeof url !== 'string') return false;
+  // Guard: only allow http(s) outbound.
+  if (!/^https?:\/\//i.test(url)) return false;
+  await shell.openExternal(url);
+  return true;
+});
+
+// Make sure the loopback server is closed if the app quits mid-flow.
+app.on('will-quit', () => {
+  shutdownOAuthServer();
+});
+
+// Persist the JWT in an encrypted file under userData. Returns true
+// on success, false if encryption isn't available on this platform
+// (Linux without a keyring) — in that case the renderer should fall
+// back to keeping the token in memory only.
+ipcMain.handle('auth:set-token', (_event, token: string) => {
+  if (typeof token !== 'string' || !token) return false;
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      const buf = safeStorage.encryptString(token);
+      fs.writeFileSync(tokenFilePath(), buf);
+    } else {
+      // Plaintext fallback. Acceptable on Linux-no-keyring; never
+      // hits Windows/macOS production.
+      fs.writeFileSync(tokenFilePath(), token, 'utf-8');
+    }
+    return true;
+  } catch (err) {
+    console.warn('[auth] set-token failed', err);
+    return false;
+  }
+});
+
+ipcMain.handle('auth:get-token', () => {
+  const p = tokenFilePath();
+  if (!fs.existsSync(p)) return null;
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      const buf = fs.readFileSync(p);
+      return safeStorage.decryptString(buf);
+    }
+    return fs.readFileSync(p, 'utf-8');
+  } catch (err) {
+    console.warn('[auth] get-token failed', err);
+    return null;
+  }
+});
+
+ipcMain.handle('auth:clear-token', () => {
+  const p = tokenFilePath();
+  try {
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+    return true;
+  } catch (err) {
+    console.warn('[auth] clear-token failed', err);
+    return false;
+  }
 });
 
 // IPC: renderer can also kick off a screenshot manually (e.g. a button).
