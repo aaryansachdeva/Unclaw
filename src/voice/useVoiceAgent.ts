@@ -7,7 +7,11 @@
 // All heavy logic lives in VoiceController; this file is just glue.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { VoiceController, type VoiceEvent } from './voiceController';
+import {
+  VoiceController,
+  type StreamingFeed,
+  type VoiceEvent,
+} from './voiceController';
 import type { EndpointerState } from './endpointer';
 
 export interface UseVoiceAgentOptions {
@@ -21,6 +25,12 @@ export interface UseVoiceAgentOptions {
   onBargeIn?: () => void;
   /** Called when an unrecoverable voice error happens (mic denied, etc.). */
   onError?: (msg: string) => void;
+  /** Optional streaming transcriber. When set, VoiceController routes
+   *  audio frames to it during speech and reads the final text from
+   *  finalize() instead of POSTing the whole utterance to Whisper.
+   *  Continuous voice mode wires this to the shared StreamingTranscriber
+   *  so the input bar can show partial words as they arrive. */
+  streaming?: StreamingFeed;
 }
 
 export interface VoiceAgentState {
@@ -54,17 +64,28 @@ export function useVoiceAgent(opts: UseVoiceAgentOptions) {
   const whisperPromptRef = useRef(opts.whisperPrompt);
   const onBargeInRef = useRef(opts.onBargeIn);
   const onErrorRef = useRef(opts.onError);
+  const streamingRef = useRef(opts.streaming);
   useEffect(() => {
     onTranscriptRef.current = opts.onTranscript;
     isAISpeakingRef.current = opts.isAISpeaking;
     whisperPromptRef.current = opts.whisperPrompt;
     onBargeInRef.current = opts.onBargeIn;
     onErrorRef.current = opts.onError;
+    streamingRef.current = opts.streaming;
   });
 
   const controller = useMemo(() => new VoiceController({
     isAISpeaking: () => isAISpeakingRef.current(),
     whisperPrompt: () => whisperPromptRef.current?.() ?? '',
+    // Indirection so a late-mounted streaming hook still wires up.
+    // VoiceController only checks `streaming` on the relevant code
+    // paths, so this proxy stays cheap.
+    streaming: {
+      startFeed: (mode) => streamingRef.current?.startFeed(mode) ?? Promise.resolve(),
+      pushFrame: (samples) => streamingRef.current?.pushFrame(samples),
+      finalize: () => streamingRef.current?.finalize() ?? Promise.resolve(''),
+      stop: () => streamingRef.current?.stop() ?? Promise.resolve(),
+    },
   }), []);
 
   // Subscribe to controller events and translate them to React state.

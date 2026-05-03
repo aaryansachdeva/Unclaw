@@ -19,6 +19,7 @@ import { IdentityStep, type IdentityValues } from './IdentityStep';
 import { VibeStep } from './VibeStep';
 import { InterestsStep, type InterestsValues } from './InterestsStep';
 import { WelcomeStep } from './WelcomeStep';
+import { ConnectionsStep } from './ConnectionsStep';
 import type { VibeValues } from './VibeStep';
 import {
   fetchOnboardingWelcome,
@@ -27,6 +28,12 @@ import {
   type UserProfile,
   type UserSchedule,
 } from '../../services/profile';
+import {
+  fetchApiKeys,
+  saveApiKeys,
+  DEFAULT_API_KEYS,
+  type ApiKeysProfile,
+} from '../../services/apiKeys';
 import type { SoulChatResult } from '../../services/soulChat';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
@@ -54,9 +61,9 @@ interface WizardProps {
   onCancel?: () => void;
 }
 
-type StepKey = 'welcome' | 'identity' | 'vibe' | 'interests';
-const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'identity', 'vibe', 'interests'];
-const EDIT_STEPS: StepKey[] = ['identity', 'vibe', 'interests'];
+type StepKey = 'welcome' | 'identity' | 'vibe' | 'interests' | 'connections';
+const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'identity', 'vibe', 'interests', 'connections'];
+const EDIT_STEPS: StepKey[] = ['identity', 'vibe', 'interests', 'connections'];
 
 function detectTimezone(): string {
   try {
@@ -100,6 +107,23 @@ export function Wizard({
     schedule:  (initial?.schedule as UserSchedule | undefined) ?? '',
     notes:     initial?.notes ?? '',
   }));
+
+  // BYOK profile — loaded from safeStorage once on mount. Independent of
+  // the user profile (lives in its own encrypted blob), so we don't
+  // serialize the keys through onSave; we persist them ourselves on
+  // Finish. Pure scaffolding for now: nothing in the chat path reads
+  // these yet.
+  const [apiKeys, setApiKeys] = useState<ApiKeysProfile>({ ...DEFAULT_API_KEYS });
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const loaded = await fetchApiKeys();
+      if (!cancelled) setApiKeys(loaded);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -194,6 +218,14 @@ export function Wizard({
         notes:           interests.notes.trim() || null,
       };
       const saved = await onSave(profile);
+      // Persist BYOK fields locally (best-effort, independent of the
+      // profile save). Failure here doesn't block onboarding — soul
+      // continues to use its own .env keys.
+      try {
+        await saveApiKeys(apiKeys);
+      } catch (keyErr) {
+        console.warn('[onboarding] api-key save failed', keyErr);
+      }
       // Fire greeting first (slow), then unmount the wizard so the user
       // doesn't sit on a frozen Finish button while the LLM thinks.
       onComplete(saved);
@@ -247,9 +279,12 @@ export function Wizard({
     if (step === 'vibe') {
       return <VibeStep values={vibe} onChange={setVibe} />;
     }
-    return <InterestsStep values={interests} onChange={setInterests} />;
+    if (step === 'interests') {
+      return <InterestsStep values={interests} onChange={setInterests} />;
+    }
+    return <ConnectionsStep values={apiKeys} onChange={setApiKeys} />;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, identity, vibe, interests]);
+  }, [step, identity, vibe, interests, apiKeys]);
 
   return (
     <motion.div

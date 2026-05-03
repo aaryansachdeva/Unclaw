@@ -4,7 +4,7 @@ import { X } from 'lucide-react';
 import { Titlebar } from './components/Titlebar';
 import { StreamView } from './components/StreamView';
 import { Greeting } from './components/Greeting';
-import { InputBar } from './components/InputBar';
+import { InputBar, type InputBarHandle } from './components/InputBar';
 import { WidgetRail } from './components/WidgetRail';
 import { SheetPanel } from './components/SheetPanel';
 import { RemindersPanel } from './components/Reminders';
@@ -16,6 +16,7 @@ import { useVideoRectPublisher } from './hooks/useVideoRectPublisher';
 import { useChatMemory } from './hooks/useChatMemory';
 import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
+import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
 import { chatViaSoul, SoulChatAction, SoulChatResult } from './services/soulChat';
 import { pollNextEscalation } from './services/escalation';
 import { listReminders } from './services/reminders';
@@ -168,6 +169,32 @@ export function App() {
 
   // Forward declaration for cross-references between voice and chat.
   const notifyAIFinishedRef = useRef<() => void>(() => {});
+
+  // Streaming Moonshine transcriber. One instance for the whole app;
+  // both push-to-talk (spacebar) and continuous voice mode (button)
+  // drive the same low-level transcriber. They're mutually exclusive
+  // — only one mode can be active at a time, enforced by the start
+  // calls below.
+  const streaming = useStreamingTranscriber();
+
+  // Ref to the InputBar's imperative handle — used to drop the final
+  // text from a push-to-talk session into the textarea so the user
+  // can review and edit before sending.
+  const inputBarRef = useRef<InputBarHandle | null>(null);
+
+  // Push-to-talk state. Distinct from `streaming.isActive` because
+  // the continuous voice button also flips streaming.isActive on,
+  // and we only want the spacebar release to inject text into the
+  // textarea (continuous mode auto-sends instead).
+  const pushHeldRef = useRef(false);
+  // Snapshot of the textarea's content at the moment voice activated.
+  // Every streaming partial overwrites the textarea with
+  //   `voiceBaselineRef.current + sep + committed + tentative`
+  // so the unified surface always shows: existing-typed-text + the
+  // currently-streaming voice text. On finalize/stop, baseline is
+  // promoted to the new total so a subsequent activation appends
+  // cleanly past the just-finalized text.
+  const voiceBaselineRef = useRef<string>('');
 
   // Holds the currently-running escalation poll interval (if any) so we
   // can clear it from anywhere — useEffect cleanup, escalation done, etc.
@@ -325,6 +352,13 @@ export function App() {
   // attachment until the user sends their next message, which carries
   // it to soul and routes the request to the vision-capable escalation
   // model.
+  //
+  // After staging the image we also focus the input bar so the user
+  // can immediately type a prompt about the screenshot. The window
+  // itself is already pulled to front by main.ts (mainWindow.show +
+  // focus); this completes the gesture by landing the caret in the
+  // textarea. requestAnimationFrame defers one tick so React has
+  // committed the re-render with the new chip before the focus call.
   useEffect(() => {
     if (!window.electronAPI?.onScreenshotCaptured) return;
     return window.electronAPI.onScreenshotCaptured((payload) => {
@@ -335,8 +369,12 @@ export function App() {
         width: payload.width,
         height: payload.height,
       }]);
+      requestAnimationFrame(() => {
+        inputBarRef.current?.focus();
+      });
     });
   }, []);
+
 
   // Same staging as Ctrl+Shift+G screenshots, but for clipboard paste
   // inside the input bar. InputBar normalizes the image to PNG before
@@ -456,6 +494,17 @@ export function App() {
     },
     isAISpeaking: () => isAISpeakingRef.current,
     whisperPrompt: () => `Conversation with ${persona.displayName}.`,
+    // Continuous voice mode pipes through the same Moonshine streaming
+    // transcriber as push-to-talk, so the input bar shows partial
+    // words while the user speaks. VoiceController owns the mic + VAD;
+    // it just routes the audio into `streaming` and reads the final
+    // text from finalize() on endpoint detection.
+    streaming: {
+      startFeed: streaming.startFeed,
+      pushFrame: streaming.pushFrame,
+      finalize: streaming.finalize,
+      stop: streaming.stop,
+    },
     onBargeIn: () => {
       // Stage 1: tentative interruption — we've heard ~256 ms of
       // confident user speech while the AI is talking. Mute audio
@@ -641,6 +690,181 @@ export function App() {
   // the banner on top of the logo while the socket is still warming up.
   const showReconnecting = connectionState !== 'connected'
     && connectionState !== 'connecting';
+
+  // Push-to-talk: hold spacebar -> stream voice -> release -> the
+  // dictated text stays in the textarea past wherever the user was.
+  //
+  // Activation contexts:
+  //   * Outside any text field: voice activates immediately on the
+  //     first non-repeat keydown.
+  //   * Inside a text field (textarea/input): the first few spaces
+  //     type normally so a SINGLE-press space remains a literal space.
+  //     Once the OS auto-repeat hits LONG_HOLD_REPEATS, voice
+  //     activates AND we strip the run of trailing spaces the user
+  //     just typed (so they don't end up in the prompt).
+  //
+  // Behavior:
+  //   * Voice DOES NOT swap the textarea for a separate view. The
+  //     textarea remains the surface; partial transcriptions drive
+  //     setText() on every update so words appear past the user's
+  //     baseline content (snapshot at activation time).
+  //   * Successive activations APPEND naturally — baseline gets
+  //     promoted on each finalize so the next press starts from the
+  //     end of what was just dictated.
+  //   * Window focus is required: an out-of-focus app won't grab
+  //     spacebar (the listener wouldn't fire then anyway, but we
+  //     belt-and-suspender it with document.hasFocus()).
+  //   * Disabled while the continuous-voice button is on — it owns
+  //     the mic and runs its own activation loop.
+  useEffect(() => {
+    if (!isConnected || !authToken) return undefined;
+
+    const LONG_HOLD_REPEATS = 8;     // ~250 ms at typical 30 Hz auto-repeat
+    let repeatCount = 0;
+
+    const isTextTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      return target.isContentEditable;
+    };
+
+    const startVoice = (fromTextField: boolean) => {
+      if (pushHeldRef.current) return;
+      if (voice.isListening) return;
+      pushHeldRef.current = true;
+      // Strip the run of literal spaces the OS auto-repeated into the
+      // textarea while we were detecting the hold. Critical: do it
+      // SYNCHRONOUSLY by reading the text now, computing the stripped
+      // version, AND mirroring it into the textarea — if we just call
+      // a strip method on the InputBar the React setMessage is async
+      // and getText() in the next line still returns the un-stripped
+      // value. That bug was leaving 8+ trailing spaces in the
+      // baseline, which then survived the next finalize.
+      let baseline = inputBarRef.current?.getText() ?? '';
+      if (fromTextField) {
+        const stripped = baseline.replace(/[ \t]+$/u, '');
+        if (stripped !== baseline) {
+          inputBarRef.current?.setText(stripped);
+          baseline = stripped;
+        }
+      }
+      voiceBaselineRef.current = baseline;
+      void streaming.start('push').catch((err) => {
+        pushHeldRef.current = false;
+        console.warn('[push-to-talk] start failed', err);
+      });
+    };
+
+    const onDown = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // Only act when the app actually has OS-level focus. Without
+      // this guard, OS-level keystroke routing in Electron windows
+      // can occasionally fire keydown for background windows on
+      // some configurations.
+      if (!document.hasFocus()) return;
+
+      const inText = isTextTarget(e.target);
+
+      if (e.repeat) {
+        repeatCount += 1;
+        if (inText && !pushHeldRef.current && repeatCount >= LONG_HOLD_REPEATS) {
+          e.preventDefault();
+          startVoice(true);
+          return;
+        }
+        if (pushHeldRef.current) {
+          // Hold continues — swallow further auto-repeat spaces.
+          e.preventDefault();
+        }
+        return;
+      }
+
+      // Initial keydown (no repeat yet).
+      repeatCount = 0;
+      if (inText) {
+        // Let the first space type normally. Voice activation
+        // requires the user to keep holding past LONG_HOLD_REPEATS.
+        return;
+      }
+      // Outside text fields: activate immediately.
+      e.preventDefault();
+      startVoice(false);
+    };
+
+    const onUp = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      repeatCount = 0;
+      if (!pushHeldRef.current) return;
+      pushHeldRef.current = false;
+      e.preventDefault();
+      void (async () => {
+        const baseline = voiceBaselineRef.current;
+        const promote = (text: string) => {
+          const trimmed = text.trim();
+          const sep =
+            baseline.length > 0 && trimmed.length > 0 && !baseline.endsWith(' ')
+              ? ' '
+              : '';
+          const next = trimmed ? `${baseline}${sep}${trimmed}` : baseline;
+          inputBarRef.current?.setText(next);
+          voiceBaselineRef.current = next;
+        };
+        try {
+          const finalText = await streaming.finalize();
+          await streaming.stop();
+          promote(finalText);
+        } catch (err) {
+          // Network died, server crashed, etc. Salvage whatever was
+          // last successfully partial-transcribed so the user keeps
+          // their words instead of having the textarea snap back to
+          // the pre-voice baseline.
+          const salvaged = streaming.committed.trim();
+          console.warn(
+            `[push-to-talk] finalize failed; salvaged ${salvaged.length} chars`,
+            err,
+          );
+          promote(salvaged);
+          await streaming.stop().catch(() => undefined);
+        } finally {
+          inputBarRef.current?.focus();
+        }
+      })();
+    };
+
+    window.addEventListener('keydown', onDown);
+    window.addEventListener('keyup', onUp);
+    return () => {
+      window.removeEventListener('keydown', onDown);
+      window.removeEventListener('keyup', onUp);
+    };
+  }, [isConnected, authToken, streaming, voice.isListening]);
+
+  // Drive the textarea live as streaming partials arrive. ONLY the
+  // committed portion lands in the textarea — tentative text gets
+  // rendered as a light-gray overlay sitting on top of the textarea
+  // (handled by InputBar via the voiceTentative prop). This way the
+  // unconfirmed words have a clear visual distinction from the
+  // committed text without requiring a separate live-transcript view.
+  // Effect deps don't include tentative — that re-renders InputBar
+  // directly through its prop, no need to call setText for it.
+  useEffect(() => {
+    if (!streaming.isActive) return;
+    const baseline = voiceBaselineRef.current;
+    // trimStart on the committed string — defensive: tokenizer
+    // decoders sometimes emit a leading whitespace that survives the
+    // server-side .strip() (e.g. NBSP). Stripping client-side too
+    // ensures the textarea never starts with whitespace.
+    const c = streaming.committed.trim().replace(/^\s+/u, '');
+    if (!c) {
+      inputBarRef.current?.setText(baseline);
+      return;
+    }
+    const sep =
+      baseline.length > 0 && !baseline.endsWith(' ') ? ' ' : '';
+    inputBarRef.current?.setText(`${baseline}${sep}${c}`);
+  }, [streaming.isActive, streaming.committed]);
 
   // Active sheet content. App owns the routing so the SheetPanel
   // doesn't need to know about the data layer.
@@ -848,6 +1072,7 @@ export function App() {
         >
           <div style={{ pointerEvents: 'auto' }}>
             <InputBar
+              ref={inputBarRef}
               personaName={persona.displayName}
               isSending={isSending}
               disabled={!isConnected}
@@ -873,6 +1098,12 @@ export function App() {
                 isTranscribing: voice.isTranscribing,
                 toggle: () => { void voice.toggle(); },
               }}
+              voiceActive={streaming.isActive}
+              voiceTentative={
+                streaming.isActive
+                  ? streaming.tentative.trim().replace(/^\s+/u, '')
+                  : ''
+              }
               onPrevPersona={handlePrevPersona}
               onNextPersona={handleNextPersona}
               personaDisabled={!isConnected}

@@ -107,7 +107,7 @@ export function InterestsStep({ values, onChange }: Props) {
         <span
           style={{
             fontSize: 11,
-            color: 'var(--text-ghost)',
+            color: 'var(--text-secondary)',
             letterSpacing: '0.06em',
             textTransform: 'uppercase',
           }}
@@ -165,7 +165,7 @@ export function InterestsStep({ values, onChange }: Props) {
         <span
           style={{
             fontSize: 11,
-            color: 'var(--text-ghost)',
+            color: 'var(--text-secondary)',
             letterSpacing: '0.06em',
             textTransform: 'uppercase',
           }}
@@ -229,7 +229,7 @@ export function InterestsStep({ values, onChange }: Props) {
           <span
             style={{
               fontSize: 11,
-              color: 'var(--text-ghost)',
+              color: 'var(--text-secondary)',
               letterSpacing: '0.06em',
               textTransform: 'uppercase',
             }}
@@ -240,7 +240,7 @@ export function InterestsStep({ values, onChange }: Props) {
             <span
               style={{
                 fontSize: 10.5,
-                color: charsLeft < 0 ? 'var(--danger)' : 'var(--text-ghost)',
+                color: charsLeft < 0 ? 'var(--danger)' : 'var(--text-secondary)',
                 letterSpacing: '0.04em',
                 fontVariantNumeric: 'tabular-nums',
               }}

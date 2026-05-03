@@ -858,6 +858,65 @@ ipcMain.handle('auth:clear-token', () => {
   }
 });
 
+// =====================================================================
+// API keys (BYOK) — local-only persistence via safeStorage.
+// =====================================================================
+//
+// Pure scaffolding for now: the renderer collects provider/model/key
+// fields in the onboarding wizard, hands the whole object over here,
+// and we encrypt-and-write to <userData>/apiKeys.bin. No cloud sync,
+// no soul wiring — soul keeps using its own .env keys until we wire
+// these through to the chat path. The "sync across devices" toggle
+// is stored alongside the keys but is non-functional UI for now.
+
+const API_KEYS_FILE = 'apiKeys.bin';
+
+function apiKeysFilePath(): string {
+  return path.join(app.getPath('userData'), API_KEYS_FILE);
+}
+
+ipcMain.handle('apiKeys:get', () => {
+  const p = apiKeysFilePath();
+  if (!fs.existsSync(p)) return null;
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      const buf = fs.readFileSync(p);
+      return safeStorage.decryptString(buf);
+    }
+    return fs.readFileSync(p, 'utf-8');
+  } catch (err) {
+    console.warn('[apiKeys] get failed', err);
+    return null;
+  }
+});
+
+ipcMain.handle('apiKeys:set', (_event, payload: string) => {
+  if (typeof payload !== 'string') return false;
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      const buf = safeStorage.encryptString(payload);
+      fs.writeFileSync(apiKeysFilePath(), buf);
+    } else {
+      fs.writeFileSync(apiKeysFilePath(), payload, 'utf-8');
+    }
+    return true;
+  } catch (err) {
+    console.warn('[apiKeys] set failed', err);
+    return false;
+  }
+});
+
+ipcMain.handle('apiKeys:clear', () => {
+  const p = apiKeysFilePath();
+  try {
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+    return true;
+  } catch (err) {
+    console.warn('[apiKeys] clear failed', err);
+    return false;
+  }
+});
+
 // IPC: renderer can also kick off a screenshot manually (e.g. a button).
 ipcMain.on('screenshot:trigger', () => {
   void triggerScreenshot();

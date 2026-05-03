@@ -8,9 +8,11 @@
 // `/kiss`, `/hello`, `/clear` all work from the input.
 
 import {
+  forwardRef,
   KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useRef,
   useState,
 } from 'react';
@@ -75,6 +77,21 @@ interface InputBarProps {
    *  the temporary reset button next to the pencil. */
   onResetProfile: () => void;
   voice: InputVoiceState;
+  /** When true, the input bar shows its voice-active visual state
+   *  (accent border + halo) and disables manual editing of the
+   *  textarea. The textarea content is driven imperatively by
+   *  App.tsx (`setText`) on every streaming partial — so words land
+   *  directly in the same surface the user types into, no separate
+   *  view. */
+  voiceActive?: boolean;
+  /** Unconfirmed model output — what voice has heard but the
+   *  LocalAgreement-2 algorithm hasn't promoted to committed yet.
+   *  Renders as a light-gray overlay sitting on top of the
+   *  textarea, positioned right after the textarea's actual content
+   *  via an invisible spacer that mirrors `message`. Gives the user
+   *  immediate visual feedback while words are still firming up,
+   *  without polluting the textarea's editable content. */
+  voiceTentative?: string;
   /** Persona switcher — chevron-prev / chevron-next, inline in row 2. */
   onPrevPersona: () => void;
   onNextPersona: () => void;
@@ -87,7 +104,24 @@ interface InputBarProps {
   onPasteImage?: (img: { base64: string; width: number; height: number }) => void;
 }
 
-export function InputBar({
+/** Imperative API for the parent — used by App.tsx to drive the
+ *  textarea content during voice push-to-talk. The textarea is the
+ *  one canonical surface; voice mode just streams characters into it
+ *  past whatever the user already typed. */
+export interface InputBarHandle {
+  /** Read the textarea's current content. Used to snapshot the
+   *  "baseline" text immediately before voice activates so partial
+   *  voice updates can rebuild "baseline + voice-portion" without
+   *  ever clobbering the user's typed content. */
+  getText(): string;
+  /** Replace the textarea content. Triggers auto-grow + placeholder
+   *  pause via the existing `message` effects. */
+  setText(text: string): void;
+  /** Move keyboard focus to the textarea. */
+  focus(): void;
+}
+
+export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function InputBar({
   personaName,
   isSending,
   disabled,
@@ -99,17 +133,50 @@ export function InputBar({
   onOpenOnboarding,
   onResetProfile,
   voice,
+  voiceActive = false,
+  voiceTentative = '',
   onPrevPersona,
   onNextPersona,
   personaDisabled = false,
   onPasteImage,
-}: InputBarProps) {
+}, forwardedRef) {
   const reduce = useReducedMotion() ?? false;
   const [message, setMessage] = useState('');
   const [isFocused, setIsFocused] = useState(false);
   const [pulse, setPulse] = useState<'none' | 'submit' | 'sweep'>('none');
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const wasSendingRef = useRef(false);
+  // Mirror of `message` in a ref — `getText()` needs to expose the
+  // latest value synchronously, and React state setters don't.
+  const messageRef = useRef('');
+  messageRef.current = message;
+
+  // Imperative API — App.tsx drives textarea content during voice.
+  // Voice activation flow:
+  //   1. App calls getText() to snapshot the baseline (and to
+  //      compute the stripped baseline for long-press-in-textarea
+  //      activations — App does the strip itself synchronously to
+  //      avoid the React-state-update race that would otherwise
+  //      let trailing spaces survive into the next utterance).
+  //   2. App calls setText() with whatever the textarea should show
+  //      (committed text only — tentative renders inline via the
+  //      mirror overlay above, driven by the voiceTentative prop).
+  //   3. focus() returns keyboard focus to the textarea so the user
+  //      can edit immediately after a voice session.
+  useImperativeHandle(forwardedRef, () => ({
+    getText: () => messageRef.current,
+    setText: (text: string) => {
+      setMessage(text);
+    },
+    focus: () => {
+      textareaRef.current?.focus();
+      const el = textareaRef.current;
+      if (el) {
+        const len = el.value.length;
+        el.setSelectionRange(len, len);
+      }
+    },
+  }), []);
 
   // Cycling placeholder (typewriter).
   const [currentPrompt, setCurrentPrompt] = useState('');
@@ -163,12 +230,15 @@ export function InputBar({
     }
   }, [message, isSending, cyclePlaceholder]);
 
-  // Auto-grow the textarea up to ~3 lines.
+  // Auto-grow the textarea up to ~10 lines. Tall enough to handle
+  // dictated multi-sentence prompts comfortably, capped so the bar
+  // never eats the whole window. Beyond the cap we let the textarea
+  // scroll internally.
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = '22px';
-    el.style.height = `${Math.min(el.scrollHeight, 110)}px`;
+    el.style.height = `${Math.min(el.scrollHeight, 260)}px`;
   }, [message]);
 
   // Fire the AI-response sweep when isSending flips off.
@@ -335,15 +405,22 @@ export function InputBar({
   const canSend = hasText || hasAttachments;
 
   // Border tint reflects the pulse state; submit + sweep both warm it
-  // briefly to the accent so the user sees acknowledgement.
-  const surfaceBorder =
-    pulse === 'submit'
+  // briefly to the accent so the user sees acknowledgement. Voice
+  // active overrides everything else with a saturated accent so
+  // the user has unambiguous feedback that they're being heard.
+  const surfaceBorder = voiceActive
+    ? 'var(--accent)'
+    : pulse === 'submit'
       ? 'var(--accent-strong)'
       : pulse === 'sweep'
         ? 'var(--accent-strong)'
         : isFocused
           ? 'var(--glass-border-focus)'
           : 'var(--glass-border)';
+
+  const surfaceBoxShadow = voiceActive
+    ? '0 1px 0 rgba(255,255,255,0.10) inset, 0 8px 28px -8px rgba(0,0,0,0.40), 0 0 24px -4px rgba(196, 68, 68, 0.45)'
+    : '0 1px 0 rgba(255,255,255,0.10) inset, 0 8px 28px -8px rgba(0,0,0,0.40)';
 
   return (
     <motion.div
@@ -363,9 +440,9 @@ export function InputBar({
         backdropFilter: 'blur(32px) saturate(1.4)',
         WebkitBackdropFilter: 'blur(32px) saturate(1.4)',
         border: `1px solid ${surfaceBorder}`,
-        boxShadow: '0 1px 0 rgba(255,255,255,0.10) inset, 0 8px 28px -8px rgba(0,0,0,0.40)',
+        boxShadow: surfaceBoxShadow,
         transition:
-          'background 0.25s var(--ease-out-quart), border-color 0.25s var(--ease-out-quart)',
+          'background 0.25s var(--ease-out-quart), border-color 0.25s var(--ease-out-quart), box-shadow 0.25s var(--ease-out-quart)',
         overflow: 'hidden',
       }}
     >
@@ -405,37 +482,97 @@ export function InputBar({
           minHeight: 64,
         }}
       >
-        {/* Row 1: textarea, full width */}
+        {/* Row 1: textarea (the surface, always). When voiceActive,
+            it goes read-only and App.tsx drives content via the
+            imperative setText handle — words land directly in the
+            same field the user types into, no separate view, no
+            swap, no flash. */}
         <div
           style={{
             position: 'relative',
             minHeight: 22,
             display: 'flex',
-            alignItems: 'center',
+            alignItems: 'flex-start',
+            width: '100%',
           }}
         >
+          {/* Visible mirror overlay. Renders the textarea's committed
+              text PLUS any voice tentative text inline-merged in
+              light gray. Sits BEHIND the textarea (z-index < textarea)
+              and shares font/line-height/padding so its wrapping
+              matches the textarea's exactly — when the user types or
+              voice commits, the textarea's transparent characters
+              occupy the same columns as the mirror's visible ones,
+              so the cursor caret lands in the right spot. */}
+          <div
+            aria-hidden
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              pointerEvents: 'none',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              overflow: 'hidden',
+              fontSize: 14,
+              lineHeight: '22px',
+              fontWeight: 400,
+              letterSpacing: '0.01em',
+              fontFamily: 'inherit',
+              color: 'var(--text-primary)',
+              opacity: disabled ? 0.45 : 1,
+              userSelect: 'none',
+              zIndex: 1,
+            }}
+          >
+            {message}
+            {voiceActive && voiceTentative && (
+              <>
+                {message && !message.endsWith(' ') ? ' ' : ''}
+                <span style={{ color: 'rgba(255, 255, 255, 0.40)' }}>
+                  {voiceTentative}
+                </span>
+              </>
+            )}
+            {/* Trailing newline so a textarea ending with '\n' (the
+                user pressed Shift+Enter on a fresh line) still creates
+                a visible blank line in the mirror. */}
+            {message.endsWith('\n') ? '​' : ''}
+          </div>
+
           <textarea
             ref={textareaRef}
             value={message}
-            onChange={(e) => setMessage(e.target.value)}
+            onChange={(e) => {
+              if (voiceActive) return;
+              setMessage(e.target.value);
+            }}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
             disabled={disabled}
+            readOnly={voiceActive}
             rows={1}
             aria-label="Message input"
             style={{
+              position: 'relative',
+              zIndex: 2,
               display: 'block',
               width: '100%',
               background: 'transparent',
               border: 'none',
               outline: 'none',
               resize: 'none',
-              overflow: 'hidden',
+              overflow: 'auto',
               fontSize: 14,
               lineHeight: '22px',
-              color: 'var(--text-primary)',
+              // Text itself transparent — the mirror above renders
+              // visible characters. caretColor keeps the cursor
+              // visible so typing/IME/selection still feel native.
+              color: 'transparent',
               caretColor: 'var(--accent)',
               opacity: disabled ? 0.45 : 1,
               fontFamily: 'inherit',
@@ -445,7 +582,7 @@ export function InputBar({
               margin: 0,
             }}
           />
-          {!message && !isSending && (
+          {!message && !isSending && !voiceActive && (
             <div
               aria-hidden
               style={{
@@ -671,7 +808,7 @@ export function InputBar({
       />
     </motion.div>
   );
-}
+});
 
 // ---------------------------------------------------------------------
 // Inline chevron used by the agent switcher (row 2 of the input bar)

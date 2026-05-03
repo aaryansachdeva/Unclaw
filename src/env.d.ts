@@ -40,6 +40,14 @@ interface ElectronAPI {
   }>;
   /** Cancel a pending loopback OAuth flow. */
   authCancelOAuthLoopback: () => Promise<boolean>;
+
+  // API keys (BYOK) — local-only safeStorage. JSON string in/out.
+  /** Read the persisted JSON blob, or null if none. */
+  apiKeysGet: () => Promise<string | null>;
+  /** Persist the JSON blob via OS-encrypted storage. */
+  apiKeysSet: (payload: string) => Promise<boolean>;
+  /** Wipe the persisted blob. */
+  apiKeysClear: () => Promise<boolean>;
 }
 
 interface Window {

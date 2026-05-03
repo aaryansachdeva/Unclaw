@@ -242,7 +242,7 @@ export function Slider({
           display: 'flex',
           justifyContent: 'space-between',
           fontSize: 10.5,
-          color: 'var(--text-ghost)',
+          color: 'var(--text-secondary)',
           letterSpacing: '0.08em',
           textTransform: 'uppercase',
         }}

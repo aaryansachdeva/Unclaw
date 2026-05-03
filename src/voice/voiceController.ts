@@ -43,11 +43,27 @@ export type VoiceEvent =
 
 export type VoiceListener = (ev: VoiceEvent) => void;
 
+/** Subset of StreamingTranscriber's API that VoiceController needs.
+ *  Defined as a structural interface so this module doesn't import
+ *  the streaming client (keeps the dependency direction clean). */
+export interface StreamingFeed {
+  startFeed(mode: 'continuous' | 'push'): Promise<void>;
+  pushFrame(samples: Float32Array): void;
+  finalize(): Promise<string>;
+  stop(): Promise<void>;
+}
+
 export interface VoiceControllerOptions {
   /** Hook that returns whether AI is currently producing audio. */
   isAISpeaking: () => boolean;
   /** Optional persona / vocabulary hint to seed Whisper. */
   whisperPrompt?: () => string;
+  /** When provided, VoiceController routes every audio frame to this
+   *  streaming transcriber while the user is speaking, and reads the
+   *  final transcription from `finalize()` instead of calling Whisper.
+   *  Returns the live committed/tentative text via the transcriber's
+   *  own event stream (subscribed by the React layer). */
+  streaming?: StreamingFeed;
 }
 
 export class VoiceController {
@@ -93,6 +109,13 @@ export class VoiceController {
 
   // Barge-in tracking when AI is talking.
   private bargeInFrames = 0;
+
+  // Streaming-feed lifecycle. The streaming WS opens lazily at the
+  // start of each utterance and closes after finalize. Tracking the
+  // open promise + active flag keeps frame pushes from racing the
+  // handshake and from leaking after a stop.
+  private streamingOpen = false;
+  private streamingOpenPromise: Promise<void> | null = null;
 
   private running = false;
 
@@ -227,12 +250,19 @@ export class VoiceController {
     }
   }
 
-  /** Stop mic + worklet. Cancels any in-flight Whisper request. */
+  /** Stop mic + worklet. Cancels any in-flight transcription. */
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
     this.finalAbort?.abort();
     this.finalAbort = null;
+    // Tear down any open streaming session — the user toggled voice
+    // off mid-utterance.
+    if (this.streamingOpen && this.opts.streaming) {
+      this.streamingOpen = false;
+      this.streamingOpenPromise = null;
+      try { await this.opts.streaming.stop(); } catch { /* nothing */ }
+    }
     await this.cleanup();
   }
 
@@ -307,8 +337,34 @@ export class VoiceController {
     // `silenceTimer` only while trailing — the hook resets the
     // countdown UI on any transition out of trailing.
     if (snap.state !== this.prevState) {
+      const wasState = this.prevState;
       this.prevState = snap.state;
       this.emit({ kind: 'state', state: snap.state });
+
+      // Open the streaming feed at the moment the user starts
+      // speaking. We open ONCE per utterance and close in handleEnded
+      // (after finalize). 'armed' is the first non-idle state — it
+      // means VAD has seen sustained speech onset.
+      if (this.opts.streaming
+          && wasState === 'idle'
+          && (snap.state === 'armed' || snap.state === 'speech')
+          && !this.streamingOpen) {
+        this.streamingOpen = true;
+        this.streamingOpenPromise = this.opts.streaming
+          .startFeed('continuous')
+          .catch((err) => {
+            this.streamingOpen = false;
+            this.streamingOpenPromise = null;
+            console.warn('[voice] streaming startFeed failed', err);
+          });
+      }
+    }
+
+    // While the streaming WS is open, push every frame through it.
+    // pushFrame() is a no-op until the WS handshake completes, so
+    // we don't need to await the open promise on the hot path.
+    if (this.opts.streaming && this.streamingOpen) {
+      this.opts.streaming.pushFrame(samples);
     }
 
     if (snap.state === 'trailing') {
@@ -419,40 +475,64 @@ export class VoiceController {
     const ourId = ++this.inFlightTranscriptionId;
     this.emit({ kind: 'transcribing', pending: true });
 
-    // Single transcription request, fired now that the user has actually
-    // stopped speaking. We used to speculatively fire a second one ~1 s
-    // into the utterance and reuse it here on a length match — removed
-    // because the cost doubled per turn for a small wall-time win.
-    let result: TranscriptionResult | null = null;
-    // If a previous request is still in flight (rapid back-to-back
-    // utterances), abort it — its result would be filtered out by the
-    // inFlightTranscriptionId check anyway, but cancelling saves bytes
-    // and frees the proxy connection sooner.
-    this.finalAbort?.abort();
-    const ac = new AbortController();
-    this.finalAbort = ac;
+    let finalText = '';
+    let totalMs = 0;
     const fireId = ++this.finalFireCounter;
     console.info(
       `[stt] FINAL #${fireId}  audio=${audioSec.toFixed(2)}s (${audio.length} samples)`,
     );
     const t0 = performance.now();
-    try {
-      result = await transcribe(audio, {
-        signal: ac.signal,
-        prompt: this.opts.whisperPrompt?.() ?? '',
-      });
-      const wall = (performance.now() - t0).toFixed(0);
-      console.info(
-        `[stt] FINAL #${fireId} resp  ` +
-        `wall=${wall}ms  proxy=${result.proxyMs ?? '?'}ms  ` +
-        `text="${result.text}"  rejection=${result.rejection ?? '-'}`,
-      );
-    } catch (err) {
-      if (!ac.signal.aborted) {
-        console.error(`[stt] FINAL #${fireId} failed:`, err);
-        this.emit({ kind: 'error', message: `transcribe failed: ${err}` });
+
+    if (this.opts.streaming) {
+      // Streaming Moonshine path. Audio frames have already been
+      // pushed to the WS as they arrived; here we just request the
+      // final transcription and close the streaming session.
+      try {
+        // Wait for the open handshake in case finalize lands while
+        // the WS is still connecting (very fast utterances).
+        if (this.streamingOpenPromise) {
+          await this.streamingOpenPromise;
+        }
+        finalText = await this.opts.streaming.finalize();
+        totalMs = performance.now() - t0;
+        console.info(
+          `[stt] FINAL #${fireId} resp (moonshine)  ` +
+          `wall=${totalMs.toFixed(0)}ms  text="${finalText}"`,
+        );
+      } catch (err) {
+        console.error(`[stt] FINAL #${fireId} streaming finalize failed:`, err);
+        this.emit({ kind: 'error', message: `streaming finalize failed: ${err}` });
+      } finally {
+        try { await this.opts.streaming.stop(); } catch { /* nothing */ }
+        this.streamingOpen = false;
+        this.streamingOpenPromise = null;
       }
-      result = null;
+    } else {
+      // Legacy Whisper-batch path. Kept as a fallback when no
+      // streaming hook is wired (mostly local dev / tests).
+      let result: TranscriptionResult | null = null;
+      this.finalAbort?.abort();
+      const ac = new AbortController();
+      this.finalAbort = ac;
+      try {
+        result = await transcribe(audio, {
+          signal: ac.signal,
+          prompt: this.opts.whisperPrompt?.() ?? '',
+        });
+        totalMs = performance.now() - t0;
+        console.info(
+          `[stt] FINAL #${fireId} resp (whisper)  ` +
+          `wall=${totalMs.toFixed(0)}ms  proxy=${result.proxyMs ?? '?'}ms  ` +
+          `text="${result.text}"  rejection=${result.rejection ?? '-'}`,
+        );
+        finalText = result.text;
+      } catch (err) {
+        if (!ac.signal.aborted) {
+          console.error(`[stt] FINAL #${fireId} failed:`, err);
+          this.emit({ kind: 'error', message: `transcribe failed: ${err}` });
+        }
+        finalText = '';
+      }
     }
 
     this.emit({ kind: 'transcribing', pending: false });
@@ -463,10 +543,14 @@ export class VoiceController {
     this.lastTurnEndedAtMs = now;
 
     if (this.inFlightTranscriptionId !== ourId) return;
-    if (!result) return;
-    const text = result.text.trim();
+    const text = finalText.trim();
     if (!text) return;
-    this.emit({ kind: 'transcript', text, durationS: result.durationS, totalMs: result.totalMs });
+    this.emit({
+      kind: 'transcript',
+      text,
+      durationS: audio.length / SAMPLE_RATE,
+      totalMs,
+    });
   }
 
   // -------------------------------------------------------------------

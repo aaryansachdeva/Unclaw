@@ -46,115 +46,137 @@ function applyBlur(el: HTMLElement) {
   el.style.boxShadow = 'none';
 }
 
-/** Curated fallback if `Intl.supportedValuesOf` isn't available on the
- *  runtime. Covers the common timezones; any saved value not in the
- *  list still works (we splice it in below). */
-const TZ_FALLBACK = [
-  'UTC',
-  'Pacific/Auckland', 'Australia/Sydney', 'Australia/Melbourne',
-  'Asia/Tokyo', 'Asia/Seoul', 'Asia/Shanghai', 'Asia/Hong_Kong',
-  'Asia/Singapore', 'Asia/Bangkok', 'Asia/Kolkata', 'Asia/Dubai',
-  'Europe/Athens', 'Europe/Berlin', 'Europe/Rome', 'Europe/Madrid',
-  'Europe/Paris', 'Europe/Amsterdam', 'Europe/London', 'Europe/Lisbon',
-  'America/Sao_Paulo', 'America/Argentina/Buenos_Aires',
-  'America/New_York', 'America/Toronto', 'America/Chicago',
-  'America/Mexico_City', 'America/Denver', 'America/Phoenix',
-  'America/Los_Angeles', 'America/Vancouver', 'America/Anchorage',
-  'Pacific/Honolulu',
+/** Curated timezone catalog mirroring Kintone's public list — the labels
+ *  group nearby cities under one entry instead of surfacing every IANA
+ *  id, which keeps the dropdown navigable. Stored value is the IANA id;
+ *  display string is the static "(UTC±HH:MM) Region" label as Kintone
+ *  publishes it. The label's offset is the standard-time offset, not
+ *  the live DST-adjusted value — that matches Kintone's catalog and
+ *  avoids labels that drift twice a year. */
+const TZ_CATALOG: Array<{ id: string; label: string }> = [
+  { id: 'Etc/GMT+12',                  label: '(UTC-12:00) International Date Line West' },
+  { id: 'Etc/GMT+11',                  label: '(UTC-11:00) Coordinated Universal Time-11' },
+  { id: 'Pacific/Honolulu',            label: '(UTC-10:00) Hawaii' },
+  { id: 'America/Anchorage',           label: '(UTC-09:00) Alaska' },
+  { id: 'America/Santa_Isabel',        label: '(UTC-08:00) Baja California' },
+  { id: 'America/Los_Angeles',         label: '(UTC-08:00) Pacific Time (US and Canada)' },
+  { id: 'America/Phoenix',             label: '(UTC-07:00) Arizona' },
+  { id: 'America/Chihuahua',           label: '(UTC-07:00) Chihuahua, La Paz, Mazatlan' },
+  { id: 'America/Denver',              label: '(UTC-07:00) Mountain Time (US and Canada)' },
+  { id: 'America/Guatemala',           label: '(UTC-06:00) Central America' },
+  { id: 'America/Chicago',             label: '(UTC-06:00) Central Time (US and Canada)' },
+  { id: 'America/Mexico_City',         label: '(UTC-06:00) Guadalajara, Mexico City, Monterey' },
+  { id: 'America/Regina',              label: '(UTC-06:00) Saskatchewan' },
+  { id: 'America/Bogota',              label: '(UTC-05:00) Bogota, Lima, Quito' },
+  { id: 'America/New_York',            label: '(UTC-05:00) Eastern Time (US and Canada)' },
+  { id: 'America/Indiana/Indianapolis', label: '(UTC-05:00) Indiana (East)' },
+  { id: 'America/Caracas',             label: '(UTC-04:30) Caracas' },
+  { id: 'America/Asuncion',            label: '(UTC-04:00) Asuncion' },
+  { id: 'America/Halifax',             label: '(UTC-04:00) Atlantic Time (Canada)' },
+  { id: 'America/Cuiaba',              label: '(UTC-04:00) Cuiaba' },
+  { id: 'America/La_Paz',              label: '(UTC-04:00) Georgetown, La Paz, Manaus, San Juan' },
+  { id: 'America/Santiago',            label: '(UTC-04:00) Santiago' },
+  { id: 'America/St_Johns',            label: '(UTC-03:30) Newfoundland' },
+  { id: 'America/Sao_Paulo',           label: '(UTC-03:00) Brasilia' },
+  { id: 'America/Argentina/Buenos_Aires', label: '(UTC-03:00) Buenos Aires' },
+  { id: 'America/Cayenne',             label: '(UTC-03:00) Cayenne, Fortaleza' },
+  { id: 'America/Godthab',             label: '(UTC-03:00) Greenland' },
+  { id: 'America/Montevideo',          label: '(UTC-03:00) Montevideo' },
+  { id: 'Etc/GMT+2',                   label: '(UTC-02:00) Coordinated Universal Time-2' },
+  { id: 'Atlantic/Azores',             label: '(UTC-01:00) Azores' },
+  { id: 'Atlantic/Cape_Verde',         label: '(UTC-01:00) Cape Verde' },
+  { id: 'Africa/Casablanca',           label: '(UTC+00:00) Casablanca' },
+  { id: 'Etc/GMT',                     label: '(UTC+00:00) Coordinated Universal Time' },
+  { id: 'Europe/London',               label: '(UTC+00:00) Dublin, Edinburgh, Lisbon, London' },
+  { id: 'Atlantic/Reykjavik',          label: '(UTC+00:00) Monrovia, Reykjavik' },
+  { id: 'Europe/Berlin',               label: '(UTC+01:00) Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna' },
+  { id: 'Europe/Budapest',             label: '(UTC+01:00) Belgrade, Bratislava, Budapest, Ljubljana, Prague' },
+  { id: 'Europe/Paris',                label: '(UTC+01:00) Brussels, Copenhagen, Madrid, Paris' },
+  { id: 'Europe/Warsaw',               label: '(UTC+01:00) Sarajevo, Skopje, Warsaw, Zagreb' },
+  { id: 'Africa/Lagos',                label: '(UTC+01:00) West Central Africa' },
+  { id: 'Africa/Windhoek',             label: '(UTC+01:00) Windhoek' },
+  { id: 'Asia/Amman',                  label: '(UTC+02:00) Amman' },
+  { id: 'Europe/Istanbul',             label: '(UTC+02:00) Athens, Bucharest, Istanbul' },
+  { id: 'Asia/Beirut',                 label: '(UTC+02:00) Beirut' },
+  { id: 'Africa/Cairo',                label: '(UTC+02:00) Cairo' },
+  { id: 'Asia/Damascus',               label: '(UTC+02:00) Damascus' },
+  { id: 'Africa/Johannesburg',         label: '(UTC+02:00) Harare, Pretoria' },
+  { id: 'Europe/Kiev',                 label: '(UTC+02:00) Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius' },
+  { id: 'Asia/Jerusalem',              label: '(UTC+02:00) Jerusalem' },
+  { id: 'Asia/Baghdad',                label: '(UTC+03:00) Baghdad' },
+  { id: 'Asia/Riyadh',                 label: '(UTC+03:00) Kuwait, Riyadh' },
+  { id: 'Europe/Minsk',                label: '(UTC+03:00) Minsk' },
+  { id: 'Africa/Nairobi',              label: '(UTC+03:00) Nairobi' },
+  { id: 'Asia/Tehran',                 label: '(UTC+03:30) Tehran' },
+  { id: 'Asia/Dubai',                  label: '(UTC+04:00) Abu Dhabi, Muscat' },
+  { id: 'Asia/Baku',                   label: '(UTC+04:00) Baku' },
+  { id: 'Europe/Moscow',               label: '(UTC+04:00) Moscow, St. Petersburg, Volgograd' },
+  { id: 'Indian/Mauritius',            label: '(UTC+04:00) Port Louis' },
+  { id: 'Asia/Tbilisi',                label: '(UTC+04:00) Tbilisi' },
+  { id: 'Asia/Yerevan',                label: '(UTC+04:00) Yerevan' },
+  { id: 'Asia/Kabul',                  label: '(UTC+04:30) Kabul' },
+  { id: 'Asia/Karachi',                label: '(UTC+05:00) Islamabad, Karachi' },
+  { id: 'Asia/Tashkent',               label: '(UTC+05:00) Tashkent' },
+  { id: 'Asia/Kolkata',                label: '(UTC+05:30) Chennai, Kolkata, Mumbai, New Delhi' },
+  { id: 'Asia/Colombo',                label: '(UTC+05:30) Sri Jayewardenepura Kotte' },
+  { id: 'Asia/Kathmandu',              label: '(UTC+05:45) Kathmandu' },
+  { id: 'Asia/Almaty',                 label: '(UTC+06:00) Astana' },
+  { id: 'Asia/Dhaka',                  label: '(UTC+06:00) Dhaka' },
+  { id: 'Asia/Yekaterinburg',          label: '(UTC+06:00) Yekaterinburg' },
+  { id: 'Asia/Yangon',                 label: '(UTC+06:30) Yangon' },
+  { id: 'Asia/Bangkok',                label: '(UTC+07:00) Bangkok, Hanoi, Jakarta' },
+  { id: 'Asia/Novosibirsk',            label: '(UTC+07:00) Novosibirsk' },
+  { id: 'Asia/Shanghai',               label: '(UTC+08:00) Beijing, Chongqing, Hong Kong, Urumqi' },
+  { id: 'Asia/Krasnoyarsk',            label: '(UTC+08:00) Krasnoyarsk' },
+  { id: 'Asia/Singapore',              label: '(UTC+08:00) Kuala Lumpur, Singapore' },
+  { id: 'Australia/Perth',             label: '(UTC+08:00) Perth' },
+  { id: 'Asia/Taipei',                 label: '(UTC+08:00) Taipei' },
+  { id: 'Asia/Ulaanbaatar',            label: '(UTC+08:00) Ulaanbaatar' },
+  { id: 'Asia/Irkutsk',                label: '(UTC+09:00) Irkutsk' },
+  { id: 'Asia/Tokyo',                  label: '(UTC+09:00) Osaka, Sapporo, Tokyo' },
+  { id: 'Asia/Seoul',                  label: '(UTC+09:00) Seoul' },
+  { id: 'Australia/Adelaide',          label: '(UTC+09:30) Adelaide' },
+  { id: 'Australia/Darwin',            label: '(UTC+09:30) Darwin' },
+  { id: 'Australia/Brisbane',          label: '(UTC+10:00) Brisbane' },
+  { id: 'Australia/Sydney',            label: '(UTC+10:00) Canberra, Melbourne, Sydney' },
+  { id: 'Pacific/Port_Moresby',        label: '(UTC+10:00) Guam, Port Moresby' },
+  { id: 'Australia/Hobart',            label: '(UTC+10:00) Hobart' },
+  { id: 'Asia/Yakutsk',                label: '(UTC+10:00) Yakutsk' },
+  { id: 'Pacific/Guadalcanal',         label: '(UTC+11:00) Solomon Islands, New Caledonia' },
+  { id: 'Asia/Vladivostok',            label: '(UTC+11:00) Vladivostok' },
+  { id: 'Pacific/Auckland',            label: '(UTC+12:00) Auckland, Wellington' },
+  { id: 'Etc/GMT-12',                  label: '(UTC+12:00) Coordinated Universal Time+12' },
+  { id: 'Pacific/Fiji',                label: '(UTC+12:00) Fiji, Marshall Islands' },
+  { id: 'Asia/Magadan',                label: '(UTC+12:00) Magadan' },
+  { id: 'Pacific/Tongatapu',           label: "(UTC+13:00) Nuku'alofa" },
+  { id: 'Pacific/Apia',                label: '(UTC+13:00) Samoa' },
 ];
 
-function getAllTimezones(): string[] {
-  try {
-    const intl = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] });
-    if (typeof intl.supportedValuesOf === 'function') {
-      return intl.supportedValuesOf('timeZone');
-    }
-  } catch {
-    // ignore
-  }
-  return TZ_FALLBACK;
-}
-
-/** Read the current GMT offset (in minutes) for an IANA timezone using
- *  Intl.DateTimeFormat. Returns 0 on parse failure so we degrade
- *  gracefully rather than crash. */
-function getOffsetMinutes(tz: string, now: Date): number {
-  try {
-    const fmt = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      timeZoneName: 'longOffset',
-    });
-    const parts = fmt.formatToParts(now);
-    const tzPart = parts.find((p) => p.type === 'timeZoneName');
-    if (!tzPart) return 0;
-    // Values like "GMT-08:00", "GMT+05:30", or just "GMT" for UTC.
-    const m = /GMT([+-])(\d{2}):(\d{2})/.exec(tzPart.value);
-    if (!m) return 0;
-    const sign = m[1] === '-' ? -1 : 1;
-    const h = parseInt(m[2], 10);
-    const min = parseInt(m[3], 10);
-    return sign * (h * 60 + min);
-  } catch {
-    return 0;
-  }
-}
-
-function formatOffset(mins: number): string {
-  const sign = mins < 0 ? '-' : '+';
-  const abs = Math.abs(mins);
-  const h = Math.floor(abs / 60);
-  const m = abs % 60;
-  return `GMT${sign}${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-}
-
-/** Pull the human-friendly city out of an IANA id. "America/Los_Angeles"
- *  -> "Los Angeles". Multi-segment ids ("America/Argentina/Buenos_Aires")
- *  use the LAST segment plus the SECOND-to-last as a region hint. */
-function formatTzCity(tz: string): string {
-  if (tz === 'UTC' || tz === 'GMT') return tz;
+/** Fallback label for any IANA id we don't have in the catalog (e.g. a
+ *  legacy saved value). Best-effort — uses the last city segment with
+ *  underscores replaced. */
+function fallbackLabel(tz: string): string {
   const segs = tz.split('/');
-  if (segs.length === 1) return segs[0].replace(/_/g, ' ');
-  const city = segs[segs.length - 1].replace(/_/g, ' ');
-  // For nested zones like America/Argentina/Buenos_Aires, surface
-  // the parent so users can disambiguate from siblings.
-  if (segs.length >= 3) {
-    const parent = segs[segs.length - 2].replace(/_/g, ' ');
-    return `${city}, ${parent}`;
-  }
-  return city;
+  return segs[segs.length - 1].replace(/_/g, ' ') || tz;
 }
 
 interface TzOption {
   tz: string;
   label: string;
-  offsetMinutes: number;
 }
 
 export function IdentityStep({ values, onChange, onAdvance }: Props) {
   const tzOptions: TzOption[] = useMemo(() => {
-    const list = getAllTimezones().slice();
-    // Splice in any saved value that isn't in the list (legacy profiles).
-    if (values.timezone && !list.includes(values.timezone)) {
-      list.unshift(values.timezone);
+    const opts: TzOption[] = TZ_CATALOG.map((entry) => ({
+      tz: entry.id,
+      label: entry.label,
+    }));
+    // Legacy compat: surface any saved value that isn't in the catalog
+    // at the top so the user can still see what they had selected.
+    if (values.timezone && !TZ_CATALOG.some((e) => e.id === values.timezone)) {
+      opts.unshift({ tz: values.timezone, label: fallbackLabel(values.timezone) });
     }
-    const now = new Date();
-    return list
-      .map<TzOption>((tz) => {
-        const offsetMinutes = getOffsetMinutes(tz, now);
-        return {
-          tz,
-          offsetMinutes,
-          label: `(${formatOffset(offsetMinutes)}) ${formatTzCity(tz)}`,
-        };
-      })
-      .sort((a, b) => {
-        // Primary sort by offset, secondary by label so cities at the
-        // same offset come out alphabetically.
-        if (a.offsetMinutes !== b.offsetMinutes) {
-          return a.offsetMinutes - b.offsetMinutes;
-        }
-        return a.label.localeCompare(b.label);
-      });
+    return opts;
   }, [values.timezone]);
 
   const onNameKey = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -274,7 +296,7 @@ function FieldLabel({
       <span
         style={{
           fontSize: 11,
-          color: 'var(--text-ghost)',
+          color: 'var(--text-secondary)',
           letterSpacing: '0.06em',
           textTransform: 'uppercase',
         }}

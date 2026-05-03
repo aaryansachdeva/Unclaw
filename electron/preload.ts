@@ -68,4 +68,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Cancel a pending OAuth flow (closes the loopback server). */
   authCancelOAuthLoopback: (): Promise<boolean> =>
     ipcRenderer.invoke('auth:cancel-oauth-loopback'),
+
+  // ----------------------------------------------------------------------
+  // API keys — BYOK (Bring Your Own Keys). Local-only safeStorage blob;
+  // the renderer JSON-encodes the full ApiKeysProfile and hands it across
+  // as a single string. No cloud sync, no soul wiring yet — scaffolding.
+  apiKeysGet: (): Promise<string | null> =>
+    ipcRenderer.invoke('apiKeys:get'),
+  apiKeysSet: (payload: string): Promise<boolean> =>
+    ipcRenderer.invoke('apiKeys:set', payload),
+  apiKeysClear: (): Promise<boolean> =>
+    ipcRenderer.invoke('apiKeys:clear'),
 });
