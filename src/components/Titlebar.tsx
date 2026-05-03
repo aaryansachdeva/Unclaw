@@ -25,6 +25,11 @@ interface TitlebarProps {
   user?: TitlebarUser | null;
   /** Triggered from the profile menu's "Sign out" row. */
   onSignOut?: () => void;
+  /** Width of the workspace area in pixels — i.e. window width minus
+   *  any open chat pane. Used to keep the UNCLAW wordmark centered
+   *  over the visible stream view rather than the whole window. When
+   *  omitted, the wordmark falls back to its old flex-centered slot. */
+  workspaceWidth?: number;
 }
 
 function userInitials(user: TitlebarUser): string {
@@ -46,6 +51,7 @@ export function Titlebar({
   showReconnecting = false,
   user = null,
   onSignOut,
+  workspaceWidth,
 }: TitlebarProps) {
   const reduce = useReducedMotion() ?? false;
   const [pinned, setPinned] = useState(true);
@@ -232,17 +238,45 @@ export function Titlebar({
             </AnimatePresence>
           </div>
 
-          {/* Wordmark — stays as the chrome's identity. */}
-          <span
-            style={{
-              fontSize: 11,
-              fontWeight: 600,
-              letterSpacing: '0.18em',
-              color: 'rgba(255,255,255,0.4)',
-            }}
-          >
-            UNCLAW
-          </span>
+          {/* Wordmark — pinned absolutely to the WORKSPACE center
+              (not the window center) so it stays visually centered
+              over the streamed face even when the chat pane opens
+              and the workspace shrinks. Falls back to the original
+              centered flex slot when workspaceWidth isn't provided. */}
+          {workspaceWidth !== undefined ? (
+            <span
+              aria-hidden="false"
+              style={{
+                position: 'absolute',
+                // Vertically aligned with the gear / right-cluster
+                // buttons. Titlebar padding is 12px top + ~26px
+                // button height, so the row's center sits at y≈25.
+                top: 25,
+                left: workspaceWidth / 2,
+                transform: 'translate(-50%, -50%)',
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: '0.18em',
+                color: 'rgba(255,255,255,0.4)',
+                pointerEvents: 'none',
+                whiteSpace: 'nowrap',
+                transition: 'left 0.32s cubic-bezier(0.16, 1, 0.3, 1)',
+              }}
+            >
+              UNCLAW
+            </span>
+          ) : (
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: '0.18em',
+                color: 'rgba(255,255,255,0.4)',
+              }}
+            >
+              UNCLAW
+            </span>
+          )}
 
           <div
             className="flex items-center"

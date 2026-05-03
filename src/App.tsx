@@ -5,6 +5,7 @@ import { Titlebar } from './components/Titlebar';
 import { StreamView } from './components/StreamView';
 import { Greeting } from './components/Greeting';
 import { InputBar, type InputBarHandle } from './components/InputBar';
+import { ChatPane, ChatPaneHeader } from './components/ChatPane';
 import { WidgetRail } from './components/WidgetRail';
 import { SheetPanel } from './components/SheetPanel';
 import { RemindersPanel } from './components/Reminders';
@@ -13,7 +14,7 @@ import { NewsPanel } from './components/News';
 import { WeatherPanel } from './components/Weather';
 import { usePixelStreaming } from './hooks/usePixelStreaming';
 import { useVideoRectPublisher } from './hooks/useVideoRectPublisher';
-import { useChatMemory } from './hooks/useChatMemory';
+import { useChatMemory, type Turn } from './hooks/useChatMemory';
 import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
@@ -114,6 +115,107 @@ export function App() {
   // others. The dock and the sheet both subscribe to this state.
   const [activeWidget, setActiveWidget] = useState<SheetKey | null>(null);
 
+  // Chat history side-pane. When true, the gray utility pane slides in
+  // from the right and the workspace wrapper's right anchor animates
+  // inward — physically pushing the streamed face in, rather than
+  // overlaying it. The InputBar (with its status pills + screenshot
+  // strip) ALSO slides into the pane region so the user can keep
+  // typing while reading history. Toggled from the InputBar's expand
+  // button. Closed by default; the pane is opt-in.
+  const [chatPaneOpen, setChatPaneOpen] = useState(false);
+
+  // Window width — drives the InputBar wrapper's animated left anchor
+  // (it slides between the workspace bottom and the chat-pane bottom
+  // as a single mounted unit so typing/voice state is never reset).
+  // Tracked via ResizeObserver so it stays correct even when the user
+  // drags the Electron window edge.
+  const [winWidth, setWinWidth] = useState<number>(() =>
+    typeof window !== 'undefined' ? window.innerWidth : 600,
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onResize = () => setWinWidth(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width;
+      if (typeof w === 'number') setWinWidth(w);
+    });
+    ro.observe(document.documentElement);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      ro.disconnect();
+    };
+  }, []);
+
+  // Pane width — 50% of the window by default, but the user can
+  // override by dragging the resize handle on the pane's left edge.
+  // `userPaneWidth` is null until they drag, then sticks at whatever
+  // pixel value they landed on. Persisted to localStorage so the
+  // chosen split survives reloads.
+  const [userPaneWidth, setUserPaneWidth] = useState<number | null>(() => {
+    if (typeof localStorage === 'undefined') return null;
+    const v = localStorage.getItem('unclaw.chatPaneWidth');
+    return v ? Number(v) || null : null;
+  });
+  // Floor 280 so the pane is always readable; ceiling at winWidth-280
+  // so the workspace (stream + input) never disappears entirely.
+  const chatPaneWidth = Math.round(
+    Math.min(
+      Math.max(280, winWidth - 280),
+      Math.max(280, userPaneWidth ?? winWidth * 0.5),
+    ),
+  );
+
+  // Tool-usage tracking — accumulates labels arriving from the
+  // escalation status stream during one round, then snapshots them
+  // onto the assistant turn that closes the round. Map is keyed by
+  // the assistant turn's ts; ChatPane renders a small "via …" chip
+  // row under matching messages. Ephemeral by design — reload loses
+  // tool history but the chat itself persists.
+  const [toolsByTurn, setToolsByTurn] = useState<Map<number, string[]>>(
+    () => new Map(),
+  );
+  const pendingToolsRef = useRef<string[]>([]);
+
+  // Resize handler — owns a pointermove/pointerup pair on the document
+  // so dragging continues even when the cursor leaves the 6px handle
+  // strip. Clamped via the same min/max as chatPaneWidth above so the
+  // workspace can't be reduced below 280px. Persists to localStorage
+  // so the chosen split survives reloads.
+  const handlePaneResizeStart = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    const onMove = (ev: PointerEvent) => {
+      // Pane is right-anchored, so width = (winWidth - cursorX).
+      const next = Math.round(
+        Math.min(
+          Math.max(280, window.innerWidth - 280),
+          Math.max(280, window.innerWidth - ev.clientX),
+        ),
+      );
+      setUserPaneWidth(next);
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      // Persist the final width AFTER the drag ends so we don't write
+      // localStorage on every pixel of motion.
+      try {
+        const v = userPaneWidthRef.current;
+        if (typeof v === 'number') {
+          localStorage.setItem('unclaw.chatPaneWidth', String(v));
+        }
+      } catch {
+        // Ignore — quota / private browsing.
+      }
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+  }, []);
+  // Mirror userPaneWidth into a ref so the persist-on-up callback
+  // captured at drag-start time can see the latest value.
+  const userPaneWidthRef = useRef<number | null>(userPaneWidth);
+  userPaneWidthRef.current = userPaneWidth;
+
   // Refs to each widget icon so SheetPanel can restore focus on close.
   const reminderRef = useRef<HTMLButtonElement | null>(null);
   const stocksRef = useRef<HTMLButtonElement | null>(null);
@@ -149,6 +251,17 @@ export function App() {
   // 'edit' = user reopened to tweak; cancel returns to chat.
   // null = wizard closed.
   const [wizardMode, setWizardMode] = useState<'first' | 'edit' | null>(null);
+
+  // Close the chat pane whenever the onboarding wizard opens (any
+  // mode — first-run auto-mount, edit via the pencil, or reset).
+  // The wizard occupies the same bottom slot as the InputBar and
+  // expects the workspace to be full-width; leaving the pane open
+  // would crowd both. Placed here (after wizardMode is declared and
+  // after setChatPaneOpen exists higher up) to avoid the TDZ error
+  // we hit when the effect was hoisted nearer the chat-pane state.
+  useEffect(() => {
+    if (wizardMode) setChatPaneOpen(false);
+  }, [wizardMode]);
 
   const persona = personalityFor(AGENTS[currentAgentIndex].name);
   const memory = useChatMemory(persona.id);
@@ -230,8 +343,12 @@ export function App() {
    *  the speaking-finished timer for the voice barge-in gate. Used both
    *  for the primary /chat response AND for each polled escalation step. */
   const dispatchChatResult = useCallback((result: SoulChatResult) => {
+    let addedTurn: Turn | null = null;
     if (result.response) {
-      memory.add('assistant', result.response);
+      // memory.add returns the created Turn (with its generated ts)
+      // so callers can correlate side-data (e.g. tools-used labels)
+      // with the assistant turn that just landed.
+      addedTurn = memory.add('assistant', result.response);
       // Cache the latest response so a barge-in can pass it as
       // "what I was just saying" context to the LLM.
       lastResponseRef.current = result.response;
@@ -268,6 +385,7 @@ export function App() {
       isAISpeakingRef.current = false;
       notifyAIFinishedRef.current();
     }, Math.round(speakSec * 1000));
+    return addedTurn;
   }, [pixelStreaming, memory]);
 
   /** Start a 1.2s poll loop against /escalation/{id}/next. Each polled
@@ -297,6 +415,14 @@ export function App() {
     };
 
     const pushStatus = (text: string) => {
+      // Accumulate into pendingToolsRef so the chat pane can render a
+      // "via …" chip row under the assistant turn that closes this
+      // escalation. Dedupe consecutive identical labels to avoid
+      // spamming the chip row when a tool emits the same status more
+      // than once during one operation.
+      if (pendingToolsRef.current[pendingToolsRef.current.length - 1] !== text) {
+        pendingToolsRef.current.push(text);
+      }
       setStatusHistory(prev => {
         if (prev.length > 0 && prev[prev.length - 1].text === text) return prev;
         statusIdRef.current += 1;
@@ -321,7 +447,21 @@ export function App() {
           pushStatus(step.status);
         }
         if (step.result) {
-          dispatchChatResult(step.result);
+          const addedTurn = dispatchChatResult(step.result);
+          // Snapshot pending tools onto the FINAL assistant turn that
+          // closes this escalation. Narration turns mid-flight don't
+          // get the snapshot — they're just the model's progress
+          // updates, not the resolved answer. The "final" trigger:
+          // server says no more results queued (`!step.more`).
+          if (addedTurn && !step.more && pendingToolsRef.current.length > 0) {
+            const labels = pendingToolsRef.current.slice();
+            pendingToolsRef.current = [];
+            setToolsByTurn((prev) => {
+              const next = new Map(prev);
+              next.set(addedTurn.ts, labels);
+              return next;
+            });
+          }
         }
         if (!step.more && !step.result) {
           stop();
@@ -415,6 +555,9 @@ export function App() {
     }
     setEscalating(false);
     setStatusHistory([]);
+    // Drop any half-collected tool labels from the cancelled escalation
+    // — they can't be attributed to a final assistant turn now.
+    pendingToolsRef.current = [];
     isAISpeakingRef.current = false;
 
     // If a barge-in fired and resulted in this send, un-mute audio
@@ -904,26 +1047,26 @@ export function App() {
 
   return (
     <div className="relative flex-1 min-h-0 overflow-hidden">
+      {/* Workspace — everything that should physically shrink when the
+          chat pane opens. The `right` value animates from 0 →
+          chatPaneWidth so StreamView, the input bar, and every
+          right-anchored floating element move inward together. The
+          Titlebar + SignInScreen + ChatPane sit OUTSIDE this wrapper
+          so they keep their full-window framing. */}
+      <div
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          bottom: 0,
+          right: chatPaneOpen ? chatPaneWidth : 0,
+          transition: 'right 0.32s cubic-bezier(0.16, 1, 0.3, 1)',
+        }}
+      >
       <StreamView
         videoParentRef={videoParentRef}
         connectionState={connectionState}
       />
-      <Titlebar
-        memoryCount={memory.turns.length}
-        personaName={persona.displayName}
-        onClearMemory={handleClearMemory}
-        showReconnecting={showReconnecting}
-        user={authUser}
-        onSignOut={() => { void handleSignOut(); }}
-      />
-
-      {/* Sign-in screen. Mounted whenever auth has resolved to "no
-          session" — sits over the loading screen so the user can
-          authenticate while the UnClaw Engine is still warming up.
-          Renders on top of everything else (zIndex 60). */}
-      {authToken === null && (
-        <SignInScreen onSignedIn={handleSignedIn} />
-      )}
 
       {/* Everything below this point — greeting, widgets, sheet, status,
           screenshots, input bar, wizard — is gated on BOTH a connected
@@ -948,170 +1091,12 @@ export function App() {
         {sheetContent}
       </SheetPanel>
 
-      {/* Escalation status — stacked text-only labels streaming the
-          current activity ("thinking", "navigating", "looking at the
-          page", etc.) just above the input bar. Newest sits at the
-          bottom in full opacity; the prior one floats above at half
-          opacity. When a third arrives the oldest exits upward.
-          `layout` slides the prior label up smoothly as the new one
-          enters from below. */}
-      <div
-        style={{
-          position: 'absolute',
-          left: 32,
-          // Sits above the screenshot-thumbnail anchor (122) so the
-          // two never overlap. When the thumbnail row is present the
-          // status floats higher to clear the chips.
-          bottom: attachedImages.length > 0 ? 220 : 122,
-          zIndex: 31,
-          pointerEvents: 'none',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 4,
-          alignItems: 'flex-start',
-          transition: 'bottom 0.28s cubic-bezier(0.16, 1, 0.3, 1)',
-        }}
-      >
-        <AnimatePresence initial={false}>
-          {escalating && statusHistory.map((s, i) => {
-            const isNewest = i === statusHistory.length - 1;
-            return (
-              <motion.span
-                key={s.id}
-                layout
-                initial={{ opacity: 0, y: 10, filter: 'blur(3px)' }}
-                animate={{
-                  opacity: isNewest ? 0.95 : 0.42,
-                  y: 0,
-                  filter: 'blur(0px)',
-                }}
-                exit={{ opacity: 0, y: -10, filter: 'blur(3px)' }}
-                transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-                style={{
-                  fontSize: 14,
-                  fontWeight: 500,
-                  fontStyle: 'italic',
-                  letterSpacing: '0.01em',
-                  color: 'var(--text-secondary)',
-                  textShadow: '0 1px 3px rgba(0, 0, 0, 0.6)',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {s.text}
-              </motion.span>
-            );
-          })}
-        </AnimatePresence>
-      </div>
-
-      {/* Pending screenshot stack — shown when the user has captured
-          one or more images via Ctrl+Shift+G. Each chip animates in
-          from below with a tiny stagger; hovering reveals an × per
-          chip. The whole row sits directly above the input bar.
-          On send, the entire stack rides along with the message. */}
-      {attachedImages.length > 0 && (
-        <div
-          style={{
-            position: 'absolute',
-            left: 32,
-            right: 32,
-            bottom: 122,
-            zIndex: 32,
-            pointerEvents: 'auto',
-            display: 'flex',
-            flexDirection: 'row',
-            flexWrap: 'wrap',
-            gap: 8,
-            alignItems: 'flex-end',
-          }}
-        >
-          <AnimatePresence initial={false}>
-            {attachedImages.map((img) => (
-              <motion.div
-                key={img.id}
-                layout
-                initial={{ opacity: 0, y: 10, scale: 0.94 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 8, scale: 0.94 }}
-                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-              >
-                <ScreenshotThumbnail
-                  base64={img.base64}
-                  onDismiss={() =>
-                    setAttachedImages((prev) =>
-                      prev.filter((x) => x.id !== img.id))
-                  }
-                />
-              </motion.div>
-            ))}
-          </AnimatePresence>
-        </div>
-      )}
-
-      {/* Bottom dock — single InputBar pill with the AgentSwitcher
-          inlined in its second row (matches the old project layout).
-          Absolute-positioned so SheetPanel can never displace it.
-          Hidden while the onboarding wizard is open: the wizard
-          OCCUPIES this same anchor (left:16, right:16, bottom:16),
-          so the input bar would visually fight it. We also gate on
-          `profile !== undefined` so the bar doesn't flash before the
-          first profile fetch resolves. */}
-      {profile !== undefined && !wizardMode && (
-        <motion.div
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-          style={{
-            position: 'absolute',
-            left: 16,
-            right: 16,
-            bottom: 16,
-            zIndex: 30,
-            pointerEvents: 'none',
-          }}
-        >
-          <div style={{ pointerEvents: 'auto' }}>
-            <InputBar
-              ref={inputBarRef}
-              personaName={persona.displayName}
-              isSending={isSending}
-              disabled={!isConnected}
-              hasAttachments={attachedImages.length > 0}
-              onSendMessage={handleSendMessage}
-              onOpenSheet={handleToggleWidget}
-              onDispatchAnimation={dispatchAnimation}
-              onClearMemory={handleClearMemory}
-              onOpenOnboarding={() => setWizardMode('edit')}
-              onResetProfile={() => {
-                void deleteProfile()
-                  .catch((err) => console.warn('[profile] delete failed', err))
-                  .finally(() => {
-                    setProfile(null);
-                    setWizardMode('first');
-                  });
-              }}
-              voice={{
-                active: voice.isListening,
-                disabled: isSending,
-                vadLevel: voice.vadLevel,
-                isUserSpeaking: voice.isUserSpeaking,
-                isTranscribing: voice.isTranscribing,
-                toggle: () => { void voice.toggle(); },
-              }}
-              voiceActive={streaming.isActive}
-              voiceTentative={
-                streaming.isActive
-                  ? streaming.tentative.trim().replace(/^\s+/u, '')
-                  : ''
-              }
-              onPrevPersona={handlePrevPersona}
-              onNextPersona={handleNextPersona}
-              personaDisabled={!isConnected}
-              onPasteImage={handlePasteImage}
-            />
-          </div>
-        </motion.div>
-      )}
+      {/* Status pills, attached screenshots, and the InputBar all
+          moved out of this conditional — they now live in the
+          App-level "dock layer" container below, which slides between
+          the workspace bottom and the chat-pane bottom as a single
+          unit (so the user can keep typing while reading history,
+          without losing textarea focus or in-flight voice state). */}
 
       {/* Onboarding wizard. Mounted on first launch (no profile) and
           on demand via the pencil icon / /onboard slash command. The
@@ -1137,6 +1122,262 @@ export function App() {
         )}
       </AnimatePresence>
         </>
+      )}
+      </div>{/* /workspace wrapper */}
+
+      {/* Dock layer — single sliding container for the InputBar, the
+          escalation status pills, and the attached-screenshot strip.
+          When the chat pane is closed, the layer spans the full window
+          (left:0, right:0) so the bar sits at the workspace bottom.
+          When the pane opens, the layer slides over to the pane region
+          via its `left` value, taking all three children with it as
+          one unit. The InputBar is mounted exactly once across both
+          states, so typing/voice/textarea-focus state survives toggles.
+          Z-index 38 sits above the chat pane (35) so the bar reads
+          on top of the gray pane surface, and below the titlebar (50). */}
+      {isConnected && authToken && (
+        <div
+          style={{
+            position: 'absolute',
+            left: chatPaneOpen ? Math.max(0, winWidth - chatPaneWidth) : 0,
+            right: 0,
+            top: 0,
+            bottom: 0,
+            zIndex: 38,
+            pointerEvents: 'none',
+            transition: 'left 0.32s cubic-bezier(0.16, 1, 0.3, 1)',
+          }}
+        >
+          {/* Escalation status — stacked text-only labels streaming the
+              current activity ("thinking", "navigating", etc.) just
+              above the input bar. Newest at bottom in full opacity;
+              prior at half opacity; oldest exits upward. */}
+          <div
+            style={{
+              position: 'absolute',
+              left: 32,
+              // Sits above the screenshot-thumbnail anchor (122) so
+              // the two never overlap; floats higher when the chip
+              // row is present.
+              bottom: attachedImages.length > 0 ? 220 : 122,
+              zIndex: 31,
+              pointerEvents: 'none',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+              alignItems: 'flex-start',
+              transition: 'bottom 0.28s cubic-bezier(0.16, 1, 0.3, 1)',
+            }}
+          >
+            <AnimatePresence initial={false}>
+              {!chatPaneOpen && escalating && statusHistory.map((s, i) => {
+                const isNewest = i === statusHistory.length - 1;
+                return (
+                  <motion.span
+                    key={s.id}
+                    layout
+                    initial={{ opacity: 0, y: 10, filter: 'blur(3px)' }}
+                    animate={{
+                      opacity: isNewest ? 0.95 : 0.42,
+                      y: 0,
+                      filter: 'blur(0px)',
+                    }}
+                    exit={{ opacity: 0, y: -10, filter: 'blur(3px)' }}
+                    transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+                    style={{
+                      fontSize: 14,
+                      fontWeight: 500,
+                      fontStyle: 'italic',
+                      letterSpacing: '0.01em',
+                      color: 'var(--text-secondary)',
+                      textShadow: '0 1px 3px rgba(0, 0, 0, 0.6)',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {s.text}
+                  </motion.span>
+                );
+              })}
+            </AnimatePresence>
+          </div>
+
+          {/* Pending screenshot stack — chips above the bar, animate
+              in from below, hover reveals × per chip, full row rides
+              along on send. */}
+          {attachedImages.length > 0 && (
+            <div
+              style={{
+                position: 'absolute',
+                left: 32,
+                right: 32,
+                bottom: 122,
+                zIndex: 32,
+                pointerEvents: 'auto',
+                display: 'flex',
+                flexDirection: 'row',
+                flexWrap: 'wrap',
+                gap: 8,
+                alignItems: 'flex-end',
+              }}
+            >
+              <AnimatePresence initial={false}>
+                {attachedImages.map((img) => (
+                  <motion.div
+                    key={img.id}
+                    layout
+                    initial={{ opacity: 0, y: 10, scale: 0.94 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 8, scale: 0.94 }}
+                    transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <ScreenshotThumbnail
+                      base64={img.base64}
+                      onDismiss={() =>
+                        setAttachedImages((prev) =>
+                          prev.filter((x) => x.id !== img.id))
+                      }
+                    />
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+            </div>
+          )}
+
+          {/* InputBar — single-mount, slides with the parent dock
+              layer between workspace bottom and chat-pane bottom.
+              Hidden during the wizard since the wizard occupies this
+              same anchor. Gated on profile so it doesn't flash before
+              the first profile fetch resolves. */}
+          {profile !== undefined && !wizardMode && (
+            <motion.div
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+              style={{
+                position: 'absolute',
+                left: 16,
+                right: 16,
+                bottom: 16,
+                zIndex: 30,
+                pointerEvents: 'none',
+              }}
+            >
+              <div style={{ pointerEvents: 'auto' }}>
+                <InputBar
+                  ref={inputBarRef}
+                  personaName={persona.displayName}
+                  isSending={isSending}
+                  disabled={!isConnected}
+                  hasAttachments={attachedImages.length > 0}
+                  onSendMessage={handleSendMessage}
+                  onOpenSheet={handleToggleWidget}
+                  onDispatchAnimation={dispatchAnimation}
+                  onClearMemory={handleClearMemory}
+                  onOpenOnboarding={() => setWizardMode('edit')}
+                  onResetProfile={() => {
+                    void deleteProfile()
+                      .catch((err) => console.warn('[profile] delete failed', err))
+                      .finally(() => {
+                        setProfile(null);
+                        setWizardMode('first');
+                      });
+                  }}
+                  voice={{
+                    active: voice.isListening,
+                    disabled: isSending,
+                    vadLevel: voice.vadLevel,
+                    isUserSpeaking: voice.isUserSpeaking,
+                    isTranscribing: voice.isTranscribing,
+                    toggle: () => { void voice.toggle(); },
+                  }}
+                  voiceActive={streaming.isActive}
+                  voiceTentative={
+                    streaming.isActive
+                      ? streaming.tentative.trim().replace(/^\s+/u, '')
+                      : ''
+                  }
+                  onPrevPersona={handlePrevPersona}
+                  onNextPersona={handleNextPersona}
+                  personaDisabled={!isConnected}
+                  onPasteImage={handlePasteImage}
+                  chatPaneOpen={chatPaneOpen}
+                  onToggleChatPane={() => setChatPaneOpen((o) => !o)}
+                />
+              </div>
+            </motion.div>
+          )}
+        </div>
+      )}
+
+      {/* Titlebar — full window width, OUTSIDE the workspace wrapper so
+          the window chrome stays edge-to-edge even with the chat pane
+          open. Z-index 50 keeps it above both workspace and pane. */}
+      <Titlebar
+        memoryCount={memory.turns.length}
+        personaName={persona.displayName}
+        onClearMemory={handleClearMemory}
+        showReconnecting={showReconnecting}
+        user={authUser}
+        onSignOut={() => { void handleSignOut(); }}
+        // Workspace = the visible stream area. UNCLAW wordmark stays
+        // centered over THIS region, not the whole window, so it
+        // remains visually centered on the streamed face when the
+        // chat pane shrinks the workspace.
+        workspaceWidth={chatPaneOpen ? winWidth - chatPaneWidth : winWidth}
+      />
+
+      {/* Sign-in screen. Mounted whenever auth has resolved to "no
+          session" — sits over the loading screen so the user can
+          authenticate while the UnClaw Engine is still warming up.
+          Renders on top of everything else (zIndex 60). */}
+      {authToken === null && (
+        <SignInScreen onSignedIn={handleSignedIn} />
+      )}
+
+      {/* Chat history side pane — slides in from the right; the
+          workspace wrapper above shrinks in unison so the stream is
+          physically pushed in, not overlaid. Only mounted once
+          authed + connected; conversation history comes from the
+          per-persona localStorage memory. */}
+      {isConnected && authToken && (
+        <ChatPane
+          open={chatPaneOpen}
+          turns={memory.turns}
+          personaName={persona.displayName}
+          width={chatPaneWidth}
+          toolsByTurn={toolsByTurn}
+          onResizeStart={handlePaneResizeStart}
+        />
+      )}
+
+      {/* Chat pane header — rendered as a SIBLING of <ChatPane>, NOT
+          inside it, so its z-index isn't trapped inside the pane's
+          z-35 stacking context. At z-60 it stacks above the Titlebar
+          (z-50), and the WebkitAppRegion: 'no-drag' on the wrapper
+          keeps the close button reachable through the titlebar's
+          drag region overlay. The wrapper's `right: 140` leaves
+          room for the existing titlebar window controls (AS / pin /
+          minimize / close-window). */}
+      {isConnected && authToken && chatPaneOpen && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 18,
+            right: 140,
+            // Left edge of the pane region + 16 = where the header sits.
+            left: Math.max(0, winWidth - chatPaneWidth) + 16,
+            zIndex: 60,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 14,
+            WebkitAppRegion: 'no-drag',
+          } as React.CSSProperties}
+        >
+          <ChatPaneHeader
+            personaName={persona.displayName}
+            onClose={() => setChatPaneOpen(false)}
+          />
+        </div>
       )}
     </div>
   );

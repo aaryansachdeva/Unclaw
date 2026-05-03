@@ -54,8 +54,11 @@ function saveToStorage(personaId: string, turns: Turn[]): void {
 export interface ChatMemoryAPI {
   /** Current turn array (newest at end). */
   turns: Turn[];
-  /** Append a turn and persist. */
-  add: (role: 'user' | 'assistant', content: string) => void;
+  /** Append a turn and persist. Returns the created turn (with its
+   *  generated ts) so callers can correlate side data — e.g. attaching
+   *  tool-usage labels to the assistant turn that just landed. Returns
+   *  null when content was empty after trim. */
+  add: (role: 'user' | 'assistant', content: string) => Turn | null;
   /**
    * Return the last `limit` turns in the schema soul/Groq expect:
    * `[{role, content}, ...]`. Used for the `history` field of /chat.
@@ -87,12 +90,13 @@ export function useChatMemory(personaId: string): ChatMemoryAPI {
 
   const add = useCallback<ChatMemoryAPI['add']>((role, content) => {
     const trimmed = content.trim();
-    if (!trimmed) return;
+    if (!trimmed) return null;
     const turn: Turn = { role, content: trimmed, ts: Date.now() };
     const next = [...turnsRef.current, turn].slice(-MAX_TURNS);
     turnsRef.current = next;
     setTurns(next);
     saveToStorage(personaId, next);
+    return turn;
   }, [personaId]);
 
   const getHistory = useCallback<ChatMemoryAPI['getHistory']>((limit = DEFAULT_HISTORY_WINDOW) => {

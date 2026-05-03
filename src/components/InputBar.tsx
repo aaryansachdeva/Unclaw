@@ -23,6 +23,7 @@ import {
 } from 'framer-motion';
 import {
   Plus, ArrowRight, ChevronLeft, ChevronRight, Pencil, RotateCcw,
+  PanelRightOpen, PanelRightClose,
 } from 'lucide-react';
 
 import { SheetKey } from '../hooks/useSheet';
@@ -102,6 +103,12 @@ interface InputBarProps {
    *  prefix), and reported with its natural dimensions so it can be
    *  attached alongside Ctrl+Shift+G screenshots. */
   onPasteImage?: (img: { base64: string; width: number; height: number }) => void;
+  /** Whether the chat-history side pane is currently open. Drives the
+   *  expand button's icon (PanelRightOpen ↔ PanelRightClose). */
+  chatPaneOpen?: boolean;
+  /** Toggle the chat-history side pane. Pane lives in App.tsx; the
+   *  input bar just exposes the affordance. */
+  onToggleChatPane?: () => void;
 }
 
 /** Imperative API for the parent — used by App.tsx to drive the
@@ -139,6 +146,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onNextPersona,
   personaDisabled = false,
   onPasteImage,
+  chatPaneOpen = false,
+  onToggleChatPane,
 }, forwardedRef) {
   const reduce = useReducedMotion() ?? false;
   const [message, setMessage] = useState('');
@@ -738,6 +747,50 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
           >
             <RotateCcw size={12} strokeWidth={2.2} />
           </button>
+
+          {/* Chat-pane expand toggle. Opens the gray history pane on
+              the right side, which physically pushes the stream in.
+              Icon flips between open/close based on pane state. */}
+          {onToggleChatPane && (
+            <button
+              type="button"
+              onClick={onToggleChatPane}
+              aria-label={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
+              aria-pressed={chatPaneOpen}
+              title={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
+              style={{
+                flexShrink: 0,
+                width: 22,
+                height: 22,
+                borderRadius: 6,
+                background: chatPaneOpen ? 'var(--glass-bg-hover)' : 'transparent',
+                border: 'none',
+                color: chatPaneOpen ? 'var(--text-primary)' : 'var(--text-ghost)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                transition: 'all 0.15s var(--ease-out-quart)',
+              }}
+              onMouseEnter={(e) => {
+                if (chatPaneOpen) return;
+                e.currentTarget.style.background = 'var(--glass-bg-hover)';
+                e.currentTarget.style.color = 'var(--text-primary)';
+              }}
+              onMouseLeave={(e) => {
+                if (chatPaneOpen) return;
+                e.currentTarget.style.background = 'transparent';
+                e.currentTarget.style.color = 'var(--text-ghost)';
+              }}
+            >
+              {chatPaneOpen ? (
+                <PanelRightClose size={12} strokeWidth={2.2} />
+              ) : (
+                <PanelRightOpen size={12} strokeWidth={2.2} />
+              )}
+            </button>
+          )}
 
           {/* Spacer */}
           <div style={{ flex: 1 }} />
