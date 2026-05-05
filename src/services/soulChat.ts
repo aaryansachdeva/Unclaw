@@ -33,9 +33,9 @@ export interface SoulChatOptions {
 /** Function-call result emitted when the LLM picks one of soul's tools.
  *  See `_GROQ_TOOLS` in soul_exe_server.py for the canonical list. */
 export interface SoulChatAction {
-  /** Tool name. Action tools: 'give_a_kiss' | 'do_dance' | 'say_hello'.
-   *  Reminder tools: 'create_event_reminder' | 'update_reminder' |
-   *  'delete_reminder' | 'mark_reminder_complete'. */
+  /** Tool name. Action tools: 'give_a_kiss' | 'do_dance' | 'say_hello' |
+   *  'react_as_star_wars_fan'. Reminder tools: 'create_event_reminder' |
+   *  'update_reminder' | 'delete_reminder' | 'mark_reminder_complete'. */
   name: string;
   /** Decoded JSON arguments. Always includes a `response` string used as
    *  the spoken reply; reminder tools include id / fields too. */

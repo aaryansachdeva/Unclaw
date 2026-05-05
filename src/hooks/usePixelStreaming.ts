@@ -72,6 +72,32 @@ export function usePixelStreaming({
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
       }
+      // Localhost optimization: ask the receiver to render frames as soon
+      // as decoded with no jitter buffer. Default Chromium playout delay is
+      // 50-200ms (designed to absorb network jitter); on loopback there's no
+      // jitter so the buffer is pure latency. Reaching the underlying
+      // RTCPeerConnection requires accessing private SDK state, hence the
+      // any-cast — the path is stable in PS5.6 and verified in the lib.
+      try {
+        const pc: RTCPeerConnection | undefined =
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (ps as any)._webRtcController?.peerConnectionController?.peerConnection;
+        if (pc) {
+          for (const recv of pc.getReceivers()) {
+            if (recv.track?.kind === 'video') {
+              // playoutDelayHint is the modern (2022+) standard property.
+              // 0 = "render with minimum delay possible".
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (recv as any).playoutDelayHint = 0;
+            }
+          }
+        }
+      } catch (err) {
+        // Don't break the connection if the SDK internals shifted —
+        // the latency hint is a nice-to-have, not load-bearing.
+        // eslint-disable-next-line no-console
+        console.warn('[usePixelStreaming] playoutDelayHint apply failed:', err);
+      }
     });
     ps.addEventListener('webRtcDisconnected', () => {
       setConnectionState('connecting');

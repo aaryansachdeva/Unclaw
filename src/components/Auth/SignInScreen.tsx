@@ -6,8 +6,9 @@
 import { useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { Mail, AlertCircle, ArrowLeft } from 'lucide-react';
-import logoUrl from '../../assets/logo.png';
+import logoUrl from '../../assets/logo_lg.png';
 import { HyperspaceBackground } from './HyperspaceBackground';
+import { TypewriterTitle } from './TypewriterTitle';
 import {
   signInWithGoogle,
   signInWithDiscord,
@@ -68,55 +69,122 @@ export function SignInScreen({ onSignedIn }: Props) {
     >
       <HyperspaceBackground />
 
-      {/* Subtle corner vignette only — keeps the card's edge clean
-          without dimming the streak field across the bulk of the
-          screen. The trails are the show now; the card is a
-          transparent island in the middle. */}
+      {/* CSS-rendered light washes BEHIND the card — these exist
+          purely to give `backdrop-filter` visible source content to
+          lens. Chromium's backdrop-filter does NOT reliably sample
+          WebGL canvas content from the hyperspace layer, so without
+          these washes the card was blurring the parent's solid
+          `var(--bg-void)` (#050506) and reading as a flat tinted
+          panel rather than glass. With these radial blooms in the
+          backdrop, the blur picks up real color and the lensing
+          becomes visible.
+          Sized large + heavily blurred so they read as ambient glow,
+          not visible discs. */}
+      <span
+        aria-hidden
+        style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          width: 720,
+          height: 720,
+          transform: 'translate(-50%, -50%)',
+          background:
+            'radial-gradient(circle, rgba(196, 68, 68, 0.28) 0%, rgba(196, 68, 68, 0.08) 35%, transparent 65%)',
+          // No `filter: blur(...)` — radial-gradient is already
+          // soft-edged. Adding a CSS filter promotes the span to its
+          // own compositor layer AND dims the average alpha further,
+          // both of which weaken its presence as backdrop-filter
+          // source content for the card.
+          pointerEvents: 'none',
+          zIndex: 0,
+        }}
+      />
+      <span
+        aria-hidden
+        style={{
+          position: 'absolute',
+          top: '38%',
+          left: '32%',
+          width: 540,
+          height: 540,
+          transform: 'translate(-50%, -50%)',
+          background:
+            'radial-gradient(circle, rgba(80, 110, 180, 0.22) 0%, rgba(80, 110, 180, 0.06) 40%, transparent 70%)',
+          pointerEvents: 'none',
+          zIndex: 0,
+        }}
+      />
+      <span
+        aria-hidden
+        style={{
+          position: 'absolute',
+          top: '62%',
+          left: '68%',
+          width: 480,
+          height: 480,
+          transform: 'translate(-50%, -50%)',
+          background:
+            'radial-gradient(circle, rgba(120, 80, 160, 0.18) 0%, rgba(120, 80, 160, 0.04) 45%, transparent 70%)',
+          pointerEvents: 'none',
+          zIndex: 0,
+        }}
+      />
+
+      {/* Subtle corner vignette — darkens the screen edges so the
+          washes feel anchored at the center. */}
       <span
         aria-hidden
         style={{
           position: 'absolute',
           inset: 0,
           background:
-            'radial-gradient(ellipse at 50% 45%, transparent 0%, transparent 55%, rgba(5, 5, 6, 0.45) 100%)',
+            'radial-gradient(ellipse at 50% 45%, transparent 0%, transparent 55%, rgba(5, 5, 6, 0.55) 100%)',
           pointerEvents: 'none',
           zIndex: 0,
         }}
       />
 
-      <motion.div
-        initial={reduce ? { opacity: 1, y: 0 } : { opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{
-          duration: reduce ? 0 : 0.5,
-          delay: reduce ? 0 : 0.05,
-          ease: EASE_OUT_EXPO,
-        }}
+      <div
+        // Pure regular div. NO entrance animation — CSS `animation`
+        // promotes the element to a compositor layer and even with
+        // opacity-only keyframes Electron's compositor has been
+        // observed to break backdrop-filter sampling intermittently.
+        // Eliminating the animation removes one variable; if
+        // backdrop-filter still doesn't visibly transmit detail,
+        // the issue is environmental (Chromium GPU on this build).
         style={{
           position: 'relative',
-          zIndex: 1,
           width: 'min(400px, 100%)',
-          // Even more transparent — the card now reads as a real
-          // sheet of glass with the streak field flowing visibly
-          // behind the form fields. Strong saturate + crisp blur
-          // does the lensing work so colors behind don't smear.
-          background: 'rgba(14, 16, 26, 0.24)',
-          backdropFilter: 'blur(36px) saturate(1.8)',
-          WebkitBackdropFilter: 'blur(36px) saturate(1.8)',
-          border: '1px solid rgba(255, 255, 255, 0.13)',
+          // Glassy recipe — refactored for actual see-through:
+          //   1. Single very-low white tint (0.04) so the card body
+          //      doesn't compete with what's behind it. The gradient
+          //      tint we had before pushed the top toward opaque even
+          //      with a working backdrop-filter.
+          //   2. blur(14px) — far less than 48px. At 48px the
+          //      hyperspace streaks smear into uniform color and the
+          //      result LOOKS like a solid tinted card even when
+          //      backdrop-filter is correctly applied. 14px keeps
+          //      streak shapes recognizable as ambient detail behind
+          //      the glass.
+          //   3. Modest saturate (1.4) + tiny brightness lift (1.08)
+          //      so the lensed colors stay alive without glowing.
+          background: 'rgba(255, 255, 255, 0.04)',
+          backdropFilter: 'blur(14px) saturate(1.4) brightness(1.08)',
+          WebkitBackdropFilter: 'blur(14px) saturate(1.4) brightness(1.08)',
+          border: '1px solid rgba(255, 255, 255, 0.14)',
           borderRadius: 24,
           padding: '36px 30px 30px',
-          // Glass-edge highlight stack: a punchy top-edge inset
-          // (catches "light"), softer left/right inset for body
-          // dimension, faint accent halo + the usual drop shadows.
+          // Glass-edge highlights — softened from the previous heavy
+          // frame so the body of the card reads as glass, not as a
+          // bright-edged plate. Top inset alone (lit edge) is enough
+          // for the glass illusion at this transparency level.
           boxShadow: [
-            '0 1px 0 rgba(255, 255, 255, 0.16) inset',
+            '0 1px 0 rgba(255, 255, 255, 0.18) inset',
             '0 -1px 0 rgba(255, 255, 255, 0.04) inset',
-            '1px 0 0 rgba(255, 255, 255, 0.05) inset',
-            '-1px 0 0 rgba(255, 255, 255, 0.05) inset',
-            '0 24px 80px rgba(0, 0, 0, 0.50)',
-            '0 8px 32px rgba(0, 0, 0, 0.30)',
-            '0 0 70px -10px rgba(196, 68, 68, 0.20)',
+            '0 18px 60px rgba(0, 0, 0, 0.45)',
+            '0 6px 24px rgba(0, 0, 0, 0.25)',
+            '0 0 70px -10px rgba(196, 68, 68, 0.22)',
           ].join(', '),
           display: 'flex',
           flexDirection: 'column',
@@ -168,6 +236,9 @@ export function SignInScreen({ onSignedIn }: Props) {
             }}
           />
         </div>
+
+        {/* Typewriter brand title — sits directly under the logo. */}
+        <TypewriterTitle />
 
         {/* Animated mode body */}
         <div style={{ width: '100%' }}>
@@ -257,21 +328,7 @@ export function SignInScreen({ onSignedIn }: Props) {
             <span style={{ lineHeight: 1.4 }}>{error}</span>
           </div>
         )}
-      </motion.div>
-
-      <div
-        style={{
-          position: 'relative',
-          zIndex: 1,
-          marginTop: 18,
-          fontSize: 11,
-          color: 'var(--text-ghost)',
-          letterSpacing: '0.04em',
-          textTransform: 'uppercase',
-        }}
-      >
-        UnClaw Engine · cloud profile
-      </div>
+      </div>{/* /glass card */}
     </div>
   );
 }

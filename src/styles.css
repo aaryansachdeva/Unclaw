@@ -194,6 +194,28 @@ textarea {
   background-clip: padding-box;
 }
 
+/* Sign-in card entrance — opacity-only fade. CRITICAL: must NOT
+   animate transform. The card has `backdrop-filter`, and Chromium
+   goes flat (samples nothing) on any element whose ancestor chain
+   has a non-identity transform. Using a CSS keyframe instead of
+   framer-motion guarantees the inline transform is never written
+   in the first place. */
+@keyframes signin-card-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.signin-card-entrance {
+  animation: signin-card-fade-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.05s both;
+}
+
+/* Terminal-style caret blink for the sign-in TypewriterTitle. Uses
+   `steps(2, start)` so the blink is hard on/off (terminal feel) not
+   a smooth fade. */
+@keyframes typewriter-caret-blink {
+  0%, 50%   { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

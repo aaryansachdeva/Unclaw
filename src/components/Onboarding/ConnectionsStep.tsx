@@ -100,7 +100,7 @@ export function ConnectionsStep({ values, onChange }: Props) {
       <div style={{ width: 180, flexShrink: 0, paddingTop: 2 }}>
         <StepHeader
           title="Bring your own keys."
-          subtitle="Optional. Stored encrypted on this device — wire your own model and voice if you want."
+          subtitle="Optional. Stored encrypted on this device. Wire your own model and voice if you want."
         />
       </div>
 
@@ -145,7 +145,7 @@ export function ConnectionsStep({ values, onChange }: Props) {
             >
               {models.map((m) => (
                 <option key={m.id} value={m.id} style={{ background: 'var(--bg-elevated)' }}>
-                  {m.hint ? `${m.label} — ${m.hint}` : m.label}
+                  {m.hint ? `${m.label} · ${m.hint}` : m.label}
                 </option>
               ))}
             </SelectField>
@@ -187,7 +187,7 @@ export function ConnectionsStep({ values, onChange }: Props) {
           helper={
             groundingActive
               ? 'Lets Gemini cite live web results. Free up to 500 grounded requests/day.'
-              : 'Gemini-only — pick Gemini above to enable. Adds live web citations to answers.'
+              : 'Gemini-only. Pick Gemini above to enable. Adds live web citations to answers.'
           }
           dimWhen={!groundingActive}
         />

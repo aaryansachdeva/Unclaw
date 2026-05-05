@@ -89,7 +89,7 @@ export function InterestsStep({ values, onChange }: Props) {
       <div style={{ width: 180, flexShrink: 0, paddingTop: 2 }}>
         <StepHeader
           title="What's on your mind?"
-          subtitle="All optional — anything you share helps me sound more like me."
+          subtitle="All optional. Anything you share helps me sound more like me."
         />
       </div>
 

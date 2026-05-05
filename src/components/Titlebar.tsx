@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { Pin, PinOff, Settings, Eraser, LogOut } from 'lucide-react';
+import { Pin, PinOff, LogOut } from 'lucide-react';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -11,17 +11,12 @@ interface TitlebarUser {
 }
 
 interface TitlebarProps {
-  /** Memory turn count — 0 hides the gear's clear-memory row entirely. */
-  memoryCount?: number;
-  /** Display name of the active persona ("Grace" / "Mark"). */
-  personaName?: string;
-  /** Clear conversation memory; called after the user confirms. */
-  onClearMemory?: () => void;
   /** When true, the chrome shows a "Reconnecting…" banner under the
    *  bar — used while the pixel stream is dropped. */
   showReconnecting?: boolean;
-  /** Signed-in user. When set, the profile avatar shows on the right
-   *  side and clicking it opens a small menu with email + Sign out. */
+  /** Signed-in user. When set, the profile avatar shows on the LEFT
+   *  side (where the gear used to be) and clicking it opens a small
+   *  menu with email + Sign out. */
   user?: TitlebarUser | null;
   /** Triggered from the profile menu's "Sign out" row. */
   onSignOut?: () => void;
@@ -45,9 +40,6 @@ function userDisplayName(user: TitlebarUser): string {
 }
 
 export function Titlebar({
-  memoryCount = 0,
-  personaName,
-  onClearMemory,
   showReconnecting = false,
   user = null,
   onSignOut,
@@ -55,9 +47,7 @@ export function Titlebar({
 }: TitlebarProps) {
   const reduce = useReducedMotion() ?? false;
   const [pinned, setPinned] = useState(true);
-  const [gearOpen, setGearOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  const gearWrapRef = useRef<HTMLDivElement | null>(null);
   const profileWrapRef = useRef<HTMLDivElement | null>(null);
 
   const handlePin = () => {
@@ -66,23 +56,18 @@ export function Titlebar({
     window.electronAPI?.togglePin(next);
   };
 
-  // Single click-outside handler for both popovers — keeps DOM listener
-  // count predictable as more menus get added later.
+  // Click-outside handler for the profile popover.
   useEffect(() => {
-    if (!gearOpen && !profileOpen) return undefined;
+    if (!profileOpen) return undefined;
     const onPointer = (e: MouseEvent) => {
       const target = e.target instanceof Node ? e.target : null;
       if (!target) return;
-      if (gearOpen && gearWrapRef.current && !gearWrapRef.current.contains(target)) {
-        setGearOpen(false);
-      }
       if (profileOpen && profileWrapRef.current && !profileWrapRef.current.contains(target)) {
         setProfileOpen(false);
       }
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      setGearOpen(false);
       setProfileOpen(false);
     };
     document.addEventListener('mousedown', onPointer);
@@ -91,7 +76,7 @@ export function Titlebar({
       document.removeEventListener('mousedown', onPointer);
       document.removeEventListener('keydown', onKey);
     };
-  }, [gearOpen, profileOpen]);
+  }, [profileOpen]);
 
   return (
     <>
@@ -107,84 +92,148 @@ export function Titlebar({
         } as React.CSSProperties}
       >
         <div className="flex items-center justify-between">
-          {/* Left side — gear (settings/memory). The wordmark moves
-              into the center of the bar so the gear feels mirrored
-              with the right-side window controls. */}
-          <div
-            ref={gearWrapRef}
-            style={{
-              position: 'relative',
-              WebkitAppRegion: 'no-drag',
-            } as React.CSSProperties}
-          >
-            <motion.button
-              type="button"
-              whileTap={reduce ? undefined : { scale: 0.88 }}
-              onClick={() => setGearOpen(o => !o)}
-              aria-label="Settings"
-              aria-expanded={gearOpen}
-              title="Settings"
-              className="glass-btn"
+          {/* Left side — profile cluster (was on the right; gear was
+              here previously). Bigger now so it reads as a primary
+              identity affordance, not a chrome button. The dropdown
+              opens DOWN-LEFT so it sits below the avatar without
+              clipping the window's left edge. */}
+          {user ? (
+            <div
+              ref={profileWrapRef}
               style={{
-                width: 26,
-                height: 26,
-                borderRadius: 8,
-                background: gearOpen ? 'rgba(255,255,255,0.14)' : 'rgba(255,255,255,0.06)',
-                color: gearOpen ? 'var(--text-primary)' : 'var(--text-secondary)',
-                transition: 'background 180ms var(--ease-out-quart), color 180ms var(--ease-out-quart)',
-              }}
-              onMouseEnter={e => {
-                if (gearOpen) return;
-                e.currentTarget.style.background = 'rgba(255,255,255,0.10)';
-                e.currentTarget.style.color = 'var(--text-primary)';
-              }}
-              onMouseLeave={e => {
-                if (gearOpen) return;
-                e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
-                e.currentTarget.style.color = 'var(--text-secondary)';
-              }}
+                position: 'relative',
+                WebkitAppRegion: 'no-drag',
+              } as React.CSSProperties}
             >
-              <Settings size={14} strokeWidth={2} />
-            </motion.button>
+              <motion.button
+                type="button"
+                whileTap={reduce ? undefined : { scale: 0.92 }}
+                onClick={() => setProfileOpen((o) => !o)}
+                aria-label="Profile menu"
+                aria-expanded={profileOpen}
+                title={userDisplayName(user)}
+                className="glass-btn"
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: '50%',
+                  background: profileOpen
+                    ? 'rgba(255, 255, 255, 0.14)'
+                    : 'rgba(255, 255, 255, 0.06)',
+                  border: '1px solid rgba(255, 255, 255, 0.10)',
+                  color: 'var(--text-primary)',
+                  overflow: 'hidden',
+                  transition: 'background 180ms var(--ease-out-quart)',
+                  padding: 0,
+                }}
+                onMouseEnter={(e) => {
+                  if (profileOpen) return;
+                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.10)';
+                }}
+                onMouseLeave={(e) => {
+                  if (profileOpen) return;
+                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+                }}
+              >
+                {user.avatar_url ? (
+                  <img
+                    src={user.avatar_url}
+                    alt=""
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'cover',
+                      borderRadius: '50%',
+                      display: 'block',
+                    }}
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <span
+                    aria-hidden
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 700,
+                      letterSpacing: '0.02em',
+                      color: 'var(--text-primary)',
+                    }}
+                  >
+                    {userInitials(user)}
+                  </span>
+                )}
+              </motion.button>
 
-            <AnimatePresence>
-              {gearOpen && (
-                <motion.div
-                  key="gear-popover"
-                  role="menu"
-                  initial={reduce ? { opacity: 1, y: 0 } : { opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
-                  transition={{ duration: 0.18, ease: EASE_OUT_EXPO }}
-                  style={{
-                    position: 'absolute',
-                    top: 32,
-                    left: 0,
-                    minWidth: 220,
-                    padding: 6,
-                    borderRadius: 12,
-                    background: 'var(--glass-bg-panel)',
-                    backdropFilter: 'var(--glass-blur)',
-                    WebkitBackdropFilter: 'var(--glass-blur)',
-                    border: '1px solid var(--glass-border-focus)',
-                    boxShadow: [
-                      '0 1px 0 rgba(255,255,255,0.06) inset',
-                      '0 12px 28px -8px rgba(0,0,0,0.45)',
-                    ].join(', '),
-                  }}
-                >
-                  {memoryCount > 0 ? (
+              <AnimatePresence>
+                {profileOpen && (
+                  <motion.div
+                    key="profile-popover"
+                    role="menu"
+                    initial={reduce ? { opacity: 1, y: 0 } : { opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
+                    transition={{ duration: 0.18, ease: EASE_OUT_EXPO }}
+                    style={{
+                      position: 'absolute',
+                      top: 42,
+                      // Anchored LEFT now that the avatar lives on the
+                      // left side of the chrome.
+                      left: 0,
+                      minWidth: 240,
+                      padding: 6,
+                      borderRadius: 12,
+                      background: 'var(--glass-bg-panel)',
+                      backdropFilter: 'var(--glass-blur)',
+                      WebkitBackdropFilter: 'var(--glass-blur)',
+                      border: '1px solid var(--glass-border-focus)',
+                      boxShadow: [
+                        '0 1px 0 rgba(255,255,255,0.06) inset',
+                        '0 12px 28px -8px rgba(0,0,0,0.45)',
+                      ].join(', '),
+                    }}
+                  >
+                    <div
+                      style={{
+                        padding: '10px 12px 8px',
+                        borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
+                        marginBottom: 4,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 2,
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 600,
+                          color: 'var(--text-primary)',
+                          letterSpacing: '-0.01em',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {userDisplayName(user)}
+                      </span>
+                      {user.name && (
+                        <span
+                          style={{
+                            fontSize: 11.5,
+                            color: 'var(--text-secondary)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {user.email}
+                        </span>
+                      )}
+                    </div>
                     <button
                       type="button"
                       role="menuitem"
                       onClick={() => {
-                        const ok = window.confirm(
-                          personaName
-                            ? `Clear conversation history with ${personaName}?`
-                            : 'Clear conversation history?',
-                        );
-                        if (ok) onClearMemory?.();
-                        setGearOpen(false);
+                        setProfileOpen(false);
+                        onSignOut?.();
                       }}
                       style={{
                         display: 'flex',
@@ -204,39 +253,25 @@ export function Titlebar({
                         letterSpacing: '-0.01em',
                         transition: 'background 120ms var(--ease-out-quart)',
                       }}
-                      onMouseEnter={e => {
-                        e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
                       }}
-                      onMouseLeave={e => {
+                      onMouseLeave={(e) => {
                         e.currentTarget.style.background = 'transparent';
                       }}
                     >
-                      <Eraser size={14} strokeWidth={2} color="var(--text-secondary)" />
-                      <span style={{ flex: 1 }}>Clear conversation</span>
-                      <span style={{
-                        fontSize: 11,
-                        fontWeight: 600,
-                        color: 'var(--text-secondary)',
-                        fontVariantNumeric: 'tabular-nums',
-                      }}>
-                        {memoryCount}
-                      </span>
+                      <LogOut size={14} strokeWidth={2} color="var(--text-secondary)" />
+                      <span>Sign out</span>
                     </button>
-                  ) : (
-                    <div
-                      style={{
-                        padding: '8px 10px',
-                        fontSize: 12,
-                        color: 'var(--text-secondary)',
-                      }}
-                    >
-                      Nothing to clear yet.
-                    </div>
-                  )}
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          ) : (
+            // Spacer when signed-out, so the wordmark layout stays
+            // balanced (the right cluster still anchors at right).
+            <div style={{ width: 36, height: 36 }} />
+          )}
 
           {/* Wordmark — pinned absolutely to the WORKSPACE center
               (not the window center) so it stays visually centered
@@ -282,172 +317,8 @@ export function Titlebar({
             className="flex items-center"
             style={{ WebkitAppRegion: 'no-drag', gap: 4 } as React.CSSProperties}
           >
-            {/* Profile menu — visible only when signed in. Sits to the
-                left of the window controls so it reads as "you" rather
-                than as part of the OS chrome cluster. */}
-            {user && (
-              <div ref={profileWrapRef} style={{ position: 'relative', marginRight: 6 }}>
-                <motion.button
-                  type="button"
-                  whileTap={reduce ? undefined : { scale: 0.92 }}
-                  onClick={() => setProfileOpen((o) => !o)}
-                  aria-label="Profile menu"
-                  aria-expanded={profileOpen}
-                  title={userDisplayName(user)}
-                  className="glass-btn"
-                  style={{
-                    width: 26,
-                    height: 26,
-                    borderRadius: '50%',
-                    background: profileOpen
-                      ? 'rgba(255, 255, 255, 0.14)'
-                      : 'rgba(255, 255, 255, 0.06)',
-                    border: '1px solid rgba(255, 255, 255, 0.10)',
-                    color: 'var(--text-primary)',
-                    overflow: 'hidden',
-                    transition: 'background 180ms var(--ease-out-quart)',
-                    padding: 0,
-                  }}
-                  onMouseEnter={(e) => {
-                    if (profileOpen) return;
-                    e.currentTarget.style.background = 'rgba(255, 255, 255, 0.10)';
-                  }}
-                  onMouseLeave={(e) => {
-                    if (profileOpen) return;
-                    e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
-                  }}
-                >
-                  {user.avatar_url ? (
-                    <img
-                      src={user.avatar_url}
-                      alt=""
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        objectFit: 'cover',
-                        borderRadius: '50%',
-                        display: 'block',
-                      }}
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <span
-                      aria-hidden
-                      style={{
-                        fontSize: 10.5,
-                        fontWeight: 700,
-                        letterSpacing: '0.02em',
-                        color: 'var(--text-primary)',
-                      }}
-                    >
-                      {userInitials(user)}
-                    </span>
-                  )}
-                </motion.button>
-
-                <AnimatePresence>
-                  {profileOpen && (
-                    <motion.div
-                      key="profile-popover"
-                      role="menu"
-                      initial={reduce ? { opacity: 1, y: 0 } : { opacity: 0, y: 4 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
-                      transition={{ duration: 0.18, ease: EASE_OUT_EXPO }}
-                      style={{
-                        position: 'absolute',
-                        top: 32,
-                        right: 0,
-                        minWidth: 240,
-                        padding: 6,
-                        borderRadius: 12,
-                        background: 'var(--glass-bg-panel)',
-                        backdropFilter: 'var(--glass-blur)',
-                        WebkitBackdropFilter: 'var(--glass-blur)',
-                        border: '1px solid var(--glass-border-focus)',
-                        boxShadow: [
-                          '0 1px 0 rgba(255,255,255,0.06) inset',
-                          '0 12px 28px -8px rgba(0,0,0,0.45)',
-                        ].join(', '),
-                      }}
-                    >
-                      <div
-                        style={{
-                          padding: '10px 12px 8px',
-                          borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
-                          marginBottom: 4,
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 2,
-                        }}
-                      >
-                        <span
-                          style={{
-                            fontSize: 13,
-                            fontWeight: 600,
-                            color: 'var(--text-primary)',
-                            letterSpacing: '-0.01em',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {userDisplayName(user)}
-                        </span>
-                        {user.name && (
-                          <span
-                            style={{
-                              fontSize: 11.5,
-                              color: 'var(--text-secondary)',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            {user.email}
-                          </span>
-                        )}
-                      </div>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={() => {
-                          setProfileOpen(false);
-                          onSignOut?.();
-                        }}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 10,
-                          width: '100%',
-                          padding: '8px 10px',
-                          borderRadius: 8,
-                          background: 'transparent',
-                          border: 'none',
-                          cursor: 'pointer',
-                          textAlign: 'left',
-                          color: 'var(--text-primary)',
-                          fontFamily: 'inherit',
-                          fontSize: 13,
-                          fontWeight: 500,
-                          letterSpacing: '-0.01em',
-                          transition: 'background 120ms var(--ease-out-quart)',
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.background = 'transparent';
-                        }}
-                      >
-                        <LogOut size={14} strokeWidth={2} color="var(--text-secondary)" />
-                        <span>Sign out</span>
-                      </button>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            )}
+            {/* Profile cluster moved to the LEFT (above). Right side
+                only carries OS-style window controls now. */}
 
             {([
               { action: handlePin, label: pinned ? 'Unpin from top' : 'Pin to top', icon: 'pin' as const },
@@ -474,14 +345,13 @@ export function Titlebar({
                   borderRadius: 8,
                   background:
                     icon === 'pin' && pinned
-                      ? 'var(--accent-glow)'
+                      ? 'rgba(255, 255, 255, 0.18)'
                       : 'rgba(255,255,255,0.06)',
                   transition: 'background 180ms var(--ease-out-quart)',
                 }}
                 onMouseEnter={e => {
                   if (icon === 'pin' && pinned) {
-                    e.currentTarget.style.background =
-                      'color-mix(in srgb, var(--accent) 22%, transparent)';
+                    e.currentTarget.style.background = 'rgba(255, 255, 255, 0.26)';
                     return;
                   }
                   e.currentTarget.style.background = icon === 'close'
@@ -491,12 +361,12 @@ export function Titlebar({
                 onMouseLeave={e => {
                   e.currentTarget.style.background =
                     icon === 'pin' && pinned
-                      ? 'var(--accent-glow)'
+                      ? 'rgba(255, 255, 255, 0.18)'
                       : 'rgba(255,255,255,0.06)';
                 }}
               >
                 {icon === 'pin' && (pinned
-                  ? <Pin size={14} color="var(--accent)" strokeWidth={2.2} />
+                  ? <Pin size={14} color="#ffffff" strokeWidth={2.2} />
                   : <PinOff size={14} color="var(--text-secondary)" strokeWidth={2} />
                 )}
                 {icon === 'min' && (

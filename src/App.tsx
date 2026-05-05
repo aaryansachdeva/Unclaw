@@ -21,6 +21,7 @@ import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
 import { chatViaSoul, SoulChatAction, SoulChatResult } from './services/soulChat';
 import { pollNextEscalation } from './services/escalation';
 import { listReminders } from './services/reminders';
+import { expressFace } from './services/express';
 import { getStocks } from './services/stocks';
 import {
   deleteProfile,
@@ -60,7 +61,10 @@ function dispatchActionToUE(
   action: SoulChatAction,
   speechText: string,
 ): void {
-  const eventType = action.name === 'do_dance' ? 'doDance' : action.name;
+  const eventType =
+    action.name === 'do_dance' ? 'doDance' :
+    action.name === 'react_as_star_wars_fan' ? 'doSWIdle' :
+    action.name;
   ps.emitUIInteraction({
     EventType: eventType,
     SendData: true,
@@ -166,16 +170,21 @@ export function App() {
     ),
   );
 
-  // Tool-usage tracking — accumulates labels arriving from the
-  // escalation status stream during one round, then snapshots them
-  // onto the assistant turn that closes the round. Map is keyed by
-  // the assistant turn's ts; ChatPane renders a small "via …" chip
-  // row under matching messages. Ephemeral by design — reload loses
-  // tool history but the chat itself persists.
-  const [toolsByTurn, setToolsByTurn] = useState<Map<number, string[]>>(
-    () => new Map(),
-  );
-  const pendingToolsRef = useRef<string[]>([]);
+  // Unified tool-event timeline. Each tool the escalation uses lands
+  // here as its own timestamped item; ChatPane merges these with the
+  // chat turns by ts and renders each tool as its own row in the
+  // conversation stack at the moment it was called. Ephemeral
+  // (in-memory only, reset across reloads) — chat memory itself
+  // persists, but tool annotations don't.
+  const [toolEvents, setToolEvents] = useState<Array<{
+    id: number;
+    ts: number;
+    label: string;
+  }>>([]);
+  const toolEventIdRef = useRef(0);
+  // Tracks the LAST label appended so consecutive identical statuses
+  // ("thinking" → "thinking") don't spam the timeline with duplicates.
+  const lastToolLabelRef = useRef<string>('');
 
   // Resize handler — owns a pointermove/pointerup pair on the document
   // so dragging continues even when the cursor leaves the 6px handle
@@ -358,7 +367,8 @@ export function App() {
     const actionName = action?.name;
     const isAnimAction = actionName === 'give_a_kiss'
       || actionName === 'do_dance'
-      || actionName === 'say_hello';
+      || actionName === 'say_hello'
+      || actionName === 'react_as_star_wars_fan';
 
     if (pixelStreaming) {
       pixelStreaming.emitUIInteraction({
@@ -404,6 +414,15 @@ export function App() {
     setEscalating(true);
     statusIdRef.current += 1;
     setStatusHistory([{ id: statusIdRef.current, text: 'thinking' }]);
+    // Seed the timeline with a "thinking" tool event so the user
+    // sees the model's first beat of activity in the chat stack.
+    toolEventIdRef.current += 1;
+    setToolEvents((prev) => [...prev, {
+      id: toolEventIdRef.current,
+      ts: Date.now(),
+      label: 'thinking',
+    }]);
+    lastToolLabelRef.current = 'thinking';
 
     const stop = () => {
       if (escalationIntervalRef.current !== null) {
@@ -412,17 +431,34 @@ export function App() {
       }
       setEscalating(false);
       setStatusHistory([]);
+      // Tool events are KEPT — they're now part of the conversation
+      // history at the timestamps they happened, interleaved with
+      // user/assistant turns by the chat pane.
     };
 
     const pushStatus = (text: string) => {
-      // Accumulate into pendingToolsRef so the chat pane can render a
-      // "via …" chip row under the assistant turn that closes this
-      // escalation. Dedupe consecutive identical labels to avoid
-      // spamming the chip row when a tool emits the same status more
-      // than once during one operation.
-      if (pendingToolsRef.current[pendingToolsRef.current.length - 1] !== text) {
-        pendingToolsRef.current.push(text);
+      // Dedupe consecutive identical labels — a tool emitting the
+      // same status twice in a row shouldn't render twice.
+      if (lastToolLabelRef.current === text) {
+        // Still update the floating-pill stack since it has its own
+        // "newest only" behavior.
+        setStatusHistory(prev => {
+          if (prev.length > 0 && prev[prev.length - 1].text === text) return prev;
+          statusIdRef.current += 1;
+          const next = [...prev, { id: statusIdRef.current, text }];
+          return next.slice(-2);
+        });
+        return;
       }
+      lastToolLabelRef.current = text;
+      // Append to the unified timeline so the chat pane can render
+      // the tool as its own row at this moment in the conversation.
+      toolEventIdRef.current += 1;
+      setToolEvents((prev) => [...prev, {
+        id: toolEventIdRef.current,
+        ts: Date.now(),
+        label: text,
+      }]);
       setStatusHistory(prev => {
         if (prev.length > 0 && prev[prev.length - 1].text === text) return prev;
         statusIdRef.current += 1;
@@ -453,15 +489,15 @@ export function App() {
           // get the snapshot — they're just the model's progress
           // updates, not the resolved answer. The "final" trigger:
           // server says no more results queued (`!step.more`).
-          if (addedTurn && !step.more && pendingToolsRef.current.length > 0) {
-            const labels = pendingToolsRef.current.slice();
-            pendingToolsRef.current = [];
-            setToolsByTurn((prev) => {
-              const next = new Map(prev);
-              next.set(addedTurn.ts, labels);
-              return next;
-            });
-          }
+          // Tool events are already in the timeline at their original
+          // timestamps; nothing to migrate when the final lands.
+          // NOTE: don't reset lastToolLabelRef here — the soul polling
+          // queue can drain a trailing duplicate status AFTER the
+          // final result (different items on different ticks). With
+          // the ref reset, that duplicate bypasses the dedup and
+          // shows up as a second identical tool row. The next
+          // escalation's startEscalationPolling seeds the ref to
+          // 'thinking' anyway, so there's no need to clear it now.
         }
         if (!step.more && !step.result) {
           stop();
@@ -532,6 +568,39 @@ export function App() {
     [],
   );
 
+  // /express slash command — fires a Text2Face-only probe with the
+  // emotion as the mood prompt. Bypasses LLM, TTS, and LipSync; UE
+  // just plays the resulting face animation. We emit the same
+  // respond_with_mood_server UE event the regular chat path uses
+  // (UE polls /result/{id} for the arkit_raw) but with an empty
+  // Response field since there's no speech to attribute to anyone,
+  // and we DON'T add anything to chat memory because /express is a
+  // probe, not a conversation turn.
+  const handleExpress = useCallback(async (emotion: string) => {
+    if (!pixelStreaming) return;
+    try {
+      const result = await expressFace(emotion);
+      pixelStreaming.emitUIInteraction({
+        EventType: 'respond_with_mood_server',
+        JobId: result.id,
+        Mood: result.mood,
+        Response: toBase64(''),
+        Behavior: result.behavior ?? '',
+        Timestamp: new Date().toISOString(),
+      });
+      // Gate /idle while the face plays, same pattern as the chat
+      // result path.
+      isAISpeakingRef.current = true;
+      const speakSec = result.duration ?? 3;
+      window.setTimeout(() => {
+        isAISpeakingRef.current = false;
+        notifyAIFinishedRef.current();
+      }, Math.round(speakSec * 1000));
+    } catch (err) {
+      console.warn('[express] failed', err);
+    }
+  }, [pixelStreaming]);
+
   const handleSendMessage = useCallback(async (message: string) => {
     if (isSending) return;
 
@@ -555,9 +624,11 @@ export function App() {
     }
     setEscalating(false);
     setStatusHistory([]);
-    // Drop any half-collected tool labels from the cancelled escalation
-    // — they can't be attributed to a final assistant turn now.
-    pendingToolsRef.current = [];
+    // Reset the dedupe ref. Tool events that already landed in the
+    // timeline stay there at their original timestamps; cancelling
+    // an escalation mid-flight just means the answer never arrives,
+    // not that the visible activity should be erased.
+    lastToolLabelRef.current = '';
     isAISpeakingRef.current = false;
 
     // If a barge-in fired and resulted in this send, un-mute audio
@@ -586,7 +657,7 @@ export function App() {
     // input as a follow-up/correction. Composed AFTER the persona
     // prompt so the persona voice still leads.
     const systemExt = interruptedText
-      ? `${persona.prompt}\n\n[INTERRUPTION CONTEXT] You were just speaking when the user interrupted you. The text you were in the middle of saying was: "${interruptedText.slice(0, 600)}". The user may have only heard part of it. Respond to what they're saying NOW — don't simply repeat what you already said. If their new message is a follow-up question, a correction, or a tangent, address it directly and naturally.`
+      ? `${persona.prompt}\n\n[INTERRUPTION CONTEXT] You were just speaking when the user interrupted you. The text you were in the middle of saying was: "${interruptedText.slice(0, 600)}". The user may have only heard part of it. Respond to what they're saying NOW. Don't simply repeat what you already said. If their new message is a follow-up question, a correction, or a tangent, address it directly and naturally.`
       : persona.prompt;
 
     try {
@@ -617,10 +688,13 @@ export function App() {
   // descriptor to the dock so it can fire `/dance`, `/kiss`, `/hello`
   // without round-tripping through the LLM.
   const dispatchAnimation = useCallback((
-    name: 'give_a_kiss' | 'do_dance' | 'say_hello',
+    name: 'give_a_kiss' | 'do_dance' | 'say_hello' | 'react_as_star_wars_fan',
   ) => {
     if (!pixelStreaming) return;
-    const eventType = name === 'do_dance' ? 'doDance' : name;
+    const eventType =
+      name === 'do_dance' ? 'doDance' :
+      name === 'react_as_star_wars_fan' ? 'doSWIdle' :
+      name;
     pixelStreaming.emitUIInteraction({
       EventType: eventType,
       SendData: true,
@@ -1282,6 +1356,7 @@ export function App() {
                         setWizardMode('first');
                       });
                   }}
+                  onExpress={handleExpress}
                   voice={{
                     active: voice.isListening,
                     disabled: isSending,
@@ -1313,9 +1388,6 @@ export function App() {
           the window chrome stays edge-to-edge even with the chat pane
           open. Z-index 50 keeps it above both workspace and pane. */}
       <Titlebar
-        memoryCount={memory.turns.length}
-        personaName={persona.displayName}
-        onClearMemory={handleClearMemory}
         showReconnecting={showReconnecting}
         user={authUser}
         onSignOut={() => { void handleSignOut(); }}
@@ -1345,7 +1417,8 @@ export function App() {
           turns={memory.turns}
           personaName={persona.displayName}
           width={chatPaneWidth}
-          toolsByTurn={toolsByTurn}
+          toolEvents={toolEvents}
+          escalating={escalating}
           onResizeStart={handlePaneResizeStart}
         />
       )}

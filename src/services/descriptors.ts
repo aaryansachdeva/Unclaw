@@ -90,6 +90,15 @@ export async function sendDescriptor(
       };
       break;
 
+    case 'react_as_star_wars_fan':
+      descriptor = {
+        EventType: 'doSWIdle',
+        SendData: true,
+        Response: toBase64(message),
+        Timestamp: new Date().toISOString(),
+      };
+      break;
+
     default:
       // Generic fallback
       descriptor = {

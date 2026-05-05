@@ -18,7 +18,7 @@ const QUOTES: { text: string; author: string }[] = [
   { text: 'The only way to do great work is to love what you do.', author: 'Steve Jobs' },
   { text: 'Simplicity is the ultimate sophistication.', author: 'Leonardo da Vinci' },
   { text: 'Make it work, make it right, make it fast.', author: 'Kent Beck' },
-  { text: 'The future is already here — it’s just not evenly distributed.', author: 'William Gibson' },
+  { text: 'The future is already here, it’s just not evenly distributed.', author: 'William Gibson' },
 ];
 
 interface GreetingProps {
@@ -118,7 +118,7 @@ export function Greeting({ userName = 'friend' }: GreetingProps) {
             maxWidth: 360,
           }}
         >
-          “{quote.text}” <span style={{ opacity: 0.7 }}>— {quote.author}</span>
+          “{quote.text}” <span style={{ opacity: 0.7 }}>· {quote.author}</span>
         </motion.p>
       </AnimatePresence>
     </motion.div>

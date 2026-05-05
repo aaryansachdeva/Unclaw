@@ -141,18 +141,18 @@ function RailIcon({
           padding: reveal ? '0 12px 0 12px' : 0,
           borderRadius: 19,
           background: active
-            ? 'var(--accent-dim)'
+            ? 'rgba(255, 255, 255, 0.18)'
             : surfaceOn
               ? 'var(--glass-bg-hover)'
               : 'transparent',
           border: `1px solid ${
             active
-              ? 'var(--accent-strong)'
+              ? 'rgba(255, 255, 255, 0.35)'
               : surfaceOn
                 ? 'var(--glass-border-focus)'
                 : 'transparent'
           }`,
-          color: active ? 'var(--accent)' : 'var(--text-primary)',
+          color: active ? '#ffffff' : 'var(--text-primary)',
           backdropFilter: surfaceOn ? 'var(--glass-blur)' : 'none',
           WebkitBackdropFilter: surfaceOn ? 'var(--glass-blur)' : 'none',
           boxShadow: surfaceOn

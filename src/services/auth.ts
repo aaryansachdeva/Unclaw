@@ -177,7 +177,7 @@ async function runOAuthFlow(
     throw new AuthError('Sign-in failed: no authorization code returned');
   }
   if (payload.state !== state) {
-    throw new AuthError('Sign-in state mismatch — please try again');
+    throw new AuthError('Sign-in state mismatch. Please try again');
   }
 
   const session = await jsonPost<AuthSuccessResponse>(workerPath, {

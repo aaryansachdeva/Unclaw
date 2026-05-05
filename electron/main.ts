@@ -391,6 +391,16 @@ ipcMain.on('screenshot:cancel', () => {
 
 // ---------------------------------------------------------------------
 
+// Single shared NativeImage for the brand. Reused for the BrowserWindow
+// icon, the Tray, and macOS dock. Sourced from `resources/icon.png` —
+// the OAuth success page still uses LOGO_BASE64 separately because it
+// renders inside the user's external browser and can't read local
+// files. `__dirname` at runtime is `<project>/dist/electron/`, so
+// `../../resources/icon.png` resolves to `<project>/resources/icon.png`.
+const APP_ICON = nativeImage.createFromPath(
+  path.join(__dirname, '../../resources/icon.png'),
+);
+
 function createWindow() {
   const primaryDisplay = screen.getPrimaryDisplay();
   const { width: screenW, height: screenH } = primaryDisplay.workAreaSize;
@@ -410,6 +420,9 @@ function createWindow() {
     skipTaskbar: false,
     minWidth: 320,
     minHeight: 480,
+    // Window icon (taskbar / Alt-Tab / titlebar). Without this Electron
+    // falls back to its default React-style icon.
+    icon: APP_ICON,
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
@@ -443,8 +456,13 @@ function createWindow() {
 }
 
 function createTray() {
-  const icon = nativeImage.createEmpty();
-  tray = new Tray(icon);
+  // Resize down for the system tray — Windows expects 16×16 (or 32×32
+  // on hi-DPI). The full 256×256 brand image renders too large and
+  // sometimes refuses to display at all on Win32. resize() returns a
+  // new NativeImage; the source APP_ICON is untouched and stays
+  // available at full res for the BrowserWindow.
+  const trayIcon = APP_ICON.resize({ width: 16, height: 16 });
+  tray = new Tray(trayIcon);
   tray.setToolTip('UnClaw');
   tray.setContextMenu(
     Menu.buildFromTemplate([
@@ -698,7 +716,7 @@ const OAUTH_SUCCESS_HTML = `<!doctype html>
     <p>You can close this tab and head back to UnClaw.</p>
     <div class="hint">
       <span class="pulse-dot"></span>
-      <span>Open in the background</span>
+      <span>UnClaw is signed in</span>
     </div>
   </div>
 </body></html>`;
@@ -765,7 +783,7 @@ async function startOAuthLoopback(): Promise<OAuthCallbackPayload> {
       // EADDRINUSE most likely — surface a clear message.
       const msg =
         (err as NodeJS.ErrnoException)?.code === 'EADDRINUSE'
-          ? `Port ${OAUTH_LOOPBACK_PORT} is in use — close any other UnClaw or sign-in tab and try again.`
+          ? `Port ${OAUTH_LOOPBACK_PORT} is in use. Close any other UnClaw or sign-in tab and try again.`
           : err.message || 'OAuth server failed';
       if (r) {
         r({ code: null, state: null, error: msg });
@@ -923,6 +941,13 @@ ipcMain.on('screenshot:trigger', () => {
 });
 
 app.whenReady().then(() => {
+  // macOS dock icon — the BrowserWindow `icon` prop only affects the
+  // window/taskbar on Win/Linux; the dock is its own surface. No-op
+  // on Win/Linux because `app.dock` is undefined there.
+  if (process.platform === 'darwin' && app.dock) {
+    app.dock.setIcon(APP_ICON);
+  }
+
   session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
     const allowed = ['media', 'audioCapture', 'mediaKeySystem'];
     cb(allowed.includes(permission));

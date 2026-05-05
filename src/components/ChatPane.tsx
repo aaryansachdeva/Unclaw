@@ -14,6 +14,12 @@ import type { Turn } from '../hooks/useChatMemory';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
+interface ToolEvent {
+  id: number;
+  ts: number;
+  label: string;
+}
+
 interface ChatPaneProps {
   open: boolean;
   turns: Turn[];
@@ -21,11 +27,16 @@ interface ChatPaneProps {
   /** Pixel width — driven by the parent so the pane can be a
    *  percentage of the window. Falls back to 360 if not provided. */
   width?: number;
-  /** Map of assistant-turn timestamp → list of tool labels used to
-   *  produce that reply (e.g. ["searching the web", "updating a
-   *  reminder"]). Rendered as a small subdued chip row under the
-   *  matching assistant message. */
-  toolsByTurn?: Map<number, string[]>;
+  /** Tool events emitted by escalation, each with the timestamp it
+   *  fired at. Merged with `turns` by ts and rendered as their own
+   *  rows in the chat stack at the moment they happened, so the
+   *  conversation reads chronologically: user turn → tool → tool →
+   *  assistant turn → tool → final assistant turn, etc. */
+  toolEvents?: ToolEvent[];
+  /** True while an escalation is running. Drives the pulsing dot
+   *  next to the LATEST tool row so the user can tell the model
+   *  is still working between calls. */
+  escalating?: boolean;
   /** Called when the user begins dragging the resize handle on the
    *  pane's left edge. App.tsx owns the width state. */
   onResizeStart?: (e: React.PointerEvent) => void;
@@ -36,7 +47,8 @@ export function ChatPane({
   turns,
   personaName,
   width = 360,
-  toolsByTurn,
+  toolEvents,
+  escalating,
   onResizeStart,
 }: ChatPaneProps) {
   // Header is rendered by App.tsx as a sibling (not inside this
@@ -53,26 +65,66 @@ export function ChatPane({
   // No time-gap markers — pure list of turns, simplest possible read.
 
   // Bottom-pin behavior: detect on every scroll, auto-jump on new turn.
+  // Threshold 80px (not 12) accounts for the scroll container's 150px
+  // bottom padding — the user's perceived "bottom" sits above the true
+  // scrollHeight by the height of the floating input bar's overlap.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = () => {
       const dist = el.scrollHeight - (el.scrollTop + el.clientHeight);
-      pinnedToBottomRef.current = dist < 12;
+      pinnedToBottomRef.current = dist < 80;
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
   }, []);
 
-  // Jump to bottom when the pane opens AND when new turns arrive while
-  // pinned. Layout effect so the DOM is committed first.
+  // Jump to bottom when the pane opens, when new turns arrive, AND when
+  // a new tool event lands. Two extra rules:
+  //   1. If the newest turn is from the user, ALWAYS scroll — they just
+  //      hit send and expect to see their own message regardless of
+  //      whether they were technically "pinned".
+  //   2. Defer the scroll one rAF tick. Framer-motion's `layout` prop
+  //      on ToolEventRow + AnimatePresence can leave the scroll container
+  //      with a transient scrollHeight on the same tick the new item
+  //      mounts, which the browser sometimes clamps — manifesting as a
+  //      jump-to-top. rAF lets layout settle before we snap.
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
-    if (open && pinnedToBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
+    if (!el || !open) return;
+    const newest = turns.length > 0 ? turns[turns.length - 1] : null;
+    const userJustSent = newest && newest.role === 'user';
+    if (!userJustSent && !pinnedToBottomRef.current) return;
+    const r = requestAnimationFrame(() => {
+      const cur = scrollRef.current;
+      if (cur) cur.scrollTop = cur.scrollHeight;
+    });
+    return () => cancelAnimationFrame(r);
+  }, [open, turns.length, toolEvents?.length]);
+
+  // Merge turns + tool events into a single chronological timeline
+  // sorted by timestamp. Each entry carries enough info for the
+  // renderer to dispatch on kind. Done in useMemo so re-render is
+  // cheap when neither array changed.
+  type Item =
+    | { kind: 'turn'; turn: Turn; ts: number }
+    | { kind: 'tool'; event: ToolEvent; ts: number };
+  const items = useMemo<Item[]>(() => {
+    const all: Item[] = [];
+    for (const t of turns) all.push({ kind: 'turn', turn: t, ts: t.ts });
+    if (toolEvents) {
+      for (const e of toolEvents) all.push({ kind: 'tool', event: e, ts: e.ts });
     }
-  }, [open, turns.length]);
+    all.sort((a, b) => a.ts - b.ts);
+    return all;
+  }, [turns, toolEvents]);
+
+  // The most-recent tool event gets a pulsing dot when escalation is
+  // still running (signals "still working between calls").
+  const latestToolId = useMemo<number | null>(() => {
+    if (!toolEvents || toolEvents.length === 0) return null;
+    return toolEvents[toolEvents.length - 1].id;
+  }, [toolEvents]);
 
   return (
     <AnimatePresence>
@@ -184,34 +236,49 @@ export function ChatPane({
               scrollbarGutter: 'stable both-edges',
             }}
           >
-            {turns.length === 0 ? (
+            {items.length === 0 ? (
               <EmptyState personaName={personaName} />
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column' }}>
-                {turns.map((t, i) => {
-                  // Tighter spacing on user→assistant follow-ups
-                  // (the reply); looser before a new user turn that
-                  // starts a fresh exchange.
-                  const prev = turns[i - 1];
-                  const tightTop =
-                    prev && prev.role === 'user' && t.role === 'assistant';
-                  const looseTop =
-                    prev && prev.role === 'assistant' && t.role === 'user';
-                  return (
-                    <MessageRow
-                      key={`${t.ts}-${i}`}
-                      turn={t}
-                      tools={
-                        t.role === 'assistant' && toolsByTurn
-                          ? toolsByTurn.get(t.ts) ?? null
-                          : null
-                      }
-                      marginTop={
-                        i === 0 ? 0 : tightTop ? 6 : looseTop ? 14 : 10
-                      }
-                    />
-                  );
-                })}
+                <AnimatePresence initial={false}>
+                  {items.map((it, i) => {
+                    const prev = items[i - 1];
+                    if (it.kind === 'tool') {
+                      // Tool event — its own row in the stack at the
+                      // moment it fired. Pulsing dot only on the most
+                      // recent one while escalation is still running.
+                      return (
+                        <ToolEventRow
+                          key={`tool-${it.event.id}`}
+                          label={it.event.label}
+                          live={!!escalating && it.event.id === latestToolId}
+                          marginTop={i === 0 ? 0 : 6}
+                        />
+                      );
+                    }
+                    // Spacing rule: tighter on user→assistant
+                    // follow-ups, looser before a new user turn.
+                    const t = it.turn;
+                    const prevIsUser =
+                      prev && prev.kind === 'turn' && prev.turn.role === 'user';
+                    const prevIsAssistant =
+                      prev && prev.kind === 'turn' && prev.turn.role === 'assistant';
+                    const prevIsTool = prev && prev.kind === 'tool';
+                    const tightTop =
+                      (prevIsUser && t.role === 'assistant')
+                      || (prevIsTool && t.role === 'assistant');
+                    const looseTop = prevIsAssistant && t.role === 'user';
+                    return (
+                      <MessageRow
+                        key={`turn-${t.ts}`}
+                        turn={t}
+                        marginTop={
+                          i === 0 ? 0 : tightTop ? 6 : looseTop ? 14 : 10
+                        }
+                      />
+                    );
+                  })}
+                </AnimatePresence>
               </div>
             )}
           </div>
@@ -329,11 +396,9 @@ export function ChatPaneHeader({
 function MessageRow({
   turn,
   marginTop,
-  tools,
 }: {
   turn: Turn;
   marginTop: number;
-  tools: string[] | null;
 }) {
   if (turn.role === 'user') {
     return (
@@ -370,80 +435,69 @@ function MessageRow({
 
   // Assistant: plain left-aligned text, no bubble, no stripe. The
   // user-bubble alignment (right) vs assistant text-flush-left is
-  // enough directional contrast on its own — adding a colored stripe
-  // read too loud against the gray pane.
+  // enough directional contrast on its own.
   return (
-    <div style={{ marginTop }}>
-      <div
-        style={{
-          color: 'var(--text-primary)',
-          fontSize: 13,
-          lineHeight: 1.5,
-          letterSpacing: '-0.003em',
-          wordBreak: 'break-word',
-          whiteSpace: 'pre-wrap',
-        }}
-      >
-        {turn.content}
-      </div>
-      {tools && tools.length > 0 && (
-        <ToolUsedRow tools={tools} />
-      )}
+    <div
+      style={{
+        marginTop,
+        color: 'var(--text-primary)',
+        fontSize: 13,
+        lineHeight: 1.5,
+        letterSpacing: '-0.003em',
+        wordBreak: 'break-word',
+        whiteSpace: 'pre-wrap',
+      }}
+    >
+      {turn.content}
     </div>
   );
 }
 
-// Compact "via …" line under an assistant message listing the tools
-// the escalation loop used to produce it. Subdued style — metadata,
-// not first-class content. Dedupes consecutive identical labels so a
-// re-poll that emits the same status twice doesn't show a duplicate
-// chip.
-function ToolUsedRow({ tools }: { tools: string[] }) {
-  const dedup: string[] = [];
-  for (const t of tools) {
-    if (dedup[dedup.length - 1] !== t) dedup.push(t);
-  }
+// One tool event in the chat stack. Plain italic text, no chip, no
+// dot. Reads as quiet metadata in the conversation flow. While the
+// tool is the most recent AND escalation is still running, the text
+// pulses softly so the user can tell which step is currently active.
+// Past tool events sit static at a low opacity.
+function ToolEventRow({
+  label,
+  live,
+  marginTop,
+}: {
+  label: string;
+  live: boolean;
+  marginTop: number;
+}) {
   return (
-    <div
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 3 }}
+      animate={
+        live
+          ? { opacity: [0.55, 0.95, 0.55], y: 0 }
+          : { opacity: 0.62, y: 0 }
+      }
+      transition={
+        live
+          ? {
+              opacity: { duration: 1.6, repeat: Infinity, ease: 'easeInOut' },
+              y: { duration: 0.22, ease: [0.16, 1, 0.3, 1] },
+            }
+          : { duration: 0.22, ease: [0.16, 1, 0.3, 1] }
+      }
       style={{
-        marginTop: 6,
-        display: 'flex',
-        flexWrap: 'wrap',
-        gap: 4,
-        alignItems: 'center',
+        marginTop,
+        fontSize: 12,
+        fontStyle: 'italic',
+        color: 'var(--text-secondary)',
+        letterSpacing: '0.005em',
+        // Tiny left inset so tool rows visually nest under the
+        // assistant turns above them rather than competing for the
+        // same starting edge.
+        paddingLeft: 4,
       }}
     >
-      <span
-        aria-hidden
-        style={{
-          fontSize: 9,
-          color: 'var(--text-ghost)',
-          letterSpacing: '0.10em',
-          textTransform: 'uppercase',
-          marginRight: 2,
-        }}
-      >
-        via
-      </span>
-      {dedup.map((t, i) => (
-        <span
-          key={`${i}-${t}`}
-          style={{
-            fontSize: 10.5,
-            color: 'var(--text-secondary)',
-            background: 'rgba(255, 255, 255, 0.04)',
-            border: '1px solid rgba(255, 255, 255, 0.05)',
-            borderRadius: 999,
-            padding: '2px 8px',
-            letterSpacing: '0.005em',
-            whiteSpace: 'nowrap',
-            fontVariantNumeric: 'tabular-nums',
-          }}
-        >
-          {t}
-        </span>
-      ))}
-    </div>
+      {label}
+    </motion.div>
   );
 }
 
@@ -495,7 +549,7 @@ function EmptyState({ personaName }: { personaName: string }) {
           maxWidth: 200,
         }}
       >
-        Say something to {personaName} — your conversation will appear here.
+        Say something to {personaName}, your conversation will appear here.
       </div>
     </div>
   );

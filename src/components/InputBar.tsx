@@ -13,6 +13,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -23,7 +24,7 @@ import {
 } from 'framer-motion';
 import {
   Plus, ArrowRight, ChevronLeft, ChevronRight, Pencil, RotateCcw,
-  PanelRightOpen, PanelRightClose,
+  PanelRightOpen, PanelRightClose, Eraser,
 } from 'lucide-react';
 
 import { SheetKey } from '../hooks/useSheet';
@@ -67,7 +68,7 @@ interface InputBarProps {
   onOpenSheet: (key: SheetKey) => void;
   /** Slash-command animation dispatcher. */
   onDispatchAnimation: (
-    name: 'give_a_kiss' | 'do_dance' | 'say_hello',
+    name: 'give_a_kiss' | 'do_dance' | 'say_hello' | 'react_as_star_wars_fan',
   ) => void;
   /** Slash command for /clear. */
   onClearMemory: () => void;
@@ -77,6 +78,9 @@ interface InputBarProps {
   /** Wipe the saved profile and restart the wizard from scratch. Backs
    *  the temporary reset button next to the pencil. */
   onResetProfile: () => void;
+  /** Fire a Text2Face-only probe with an emotion prompt. Backs the
+   *  /express <emotion> slash command. */
+  onExpress: (emotion: string) => void;
   voice: InputVoiceState;
   /** When true, the input bar shows its voice-active visual state
    *  (accent border + halo) and disables manual editing of the
@@ -139,6 +143,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onClearMemory,
   onOpenOnboarding,
   onResetProfile,
+  onExpress,
   voice,
   voiceActive = false,
   voiceTentative = '',
@@ -262,29 +267,37 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     return undefined;
   }, [isSending]);
 
-  // Slash commands.
+  // Slash commands. Actions are bundled into one `actions` bag the
+  // registry's command implementations call. After any action fires
+  // we clear the textarea; the existing useEffect watching slash.query
+  // handles the highlight reset on the next slash session.
   const slash = useSlashCommands({
     value: message,
-    onOpenSheet: (key) => {
-      onOpenSheet(key);
-      setMessage('');
-      slashReset();
-    },
-    onDispatchAnimation: (name) => {
-      onDispatchAnimation(name);
-      setMessage('');
-      slashReset();
-    },
-    onClearMemory: () => {
-      onClearMemory();
-      setMessage('');
-      slashReset();
-    },
-    onOpenOnboarding: () => {
-      onOpenOnboarding();
-      setMessage('');
-      slashReset();
-    },
+    actions: useMemo(() => ({
+      onOpenSheet: (key) => {
+        onOpenSheet(key);
+        setMessage('');
+      },
+      onDispatchAnimation: (name) => {
+        onDispatchAnimation(name);
+        setMessage('');
+      },
+      onClearMemory: () => {
+        onClearMemory();
+        setMessage('');
+      },
+      onOpenOnboarding: () => {
+        onOpenOnboarding();
+        setMessage('');
+      },
+      onExpress: (emotion) => {
+        onExpress(emotion);
+        setMessage('');
+      },
+    }), [
+      onOpenSheet, onDispatchAnimation, onClearMemory,
+      onOpenOnboarding, onExpress,
+    ]),
   });
   const slashReset = slash.reset;
   useEffect(() => {
@@ -320,8 +333,16 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       }
       if (e.key === 'Tab' && slash.items.length > 0) {
         e.preventDefault();
-        const top = slash.items[slash.highlightedIndex];
-        setMessage(top.command + ' ');
+        // tabKey() returns:
+        //   * a string → autocomplete the textarea to it (args command)
+        //   * null     → it already executed (no-args command), clear input
+        //   * undefined → nothing actionable (e.g. already in args mode)
+        const next = slash.tabKey();
+        if (typeof next === 'string') {
+          setMessage(next);
+        } else if (next === null) {
+          setMessage('');
+        }
         return;
       }
     }
@@ -545,6 +566,16 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
                 </span>
               </>
             )}
+            {/* Slash-command ghost-text autocomplete. Only shows when
+                there's a single best match the user is in the middle
+                of typing — sits flush against the typed text so the
+                user reads "/e" + light "xpress " as one word. Press
+                Tab to accept (autocomplete or execute). */}
+            {!voiceActive && slash.completion && (
+              <span style={{ color: 'rgba(255, 255, 255, 0.32)' }}>
+                {slash.completion}
+              </span>
+            )}
             {/* Trailing newline so a textarea ending with '\n' (the
                 user pressed Shift+Enter on a fresh line) still creates
                 a visible blank line in the mirror. */}
@@ -746,6 +777,48 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             }}
           >
             <RotateCcw size={12} strokeWidth={2.2} />
+          </button>
+
+          {/* Clear conversation history — same handler as the /clear
+              slash command. Confirms before wiping. Replaces the
+              titlebar gear's old "Clear conversation" row. */}
+          <button
+            type="button"
+            onClick={() => {
+              const ok = window.confirm(
+                personaName
+                  ? `Clear conversation history with ${personaName}?`
+                  : 'Clear conversation history?',
+              );
+              if (ok) onClearMemory();
+            }}
+            aria-label="Clear conversation history"
+            title="Clear conversation"
+            style={{
+              flexShrink: 0,
+              width: 22,
+              height: 22,
+              borderRadius: 6,
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-ghost)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              transition: 'all 0.15s var(--ease-out-quart)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'var(--glass-bg-hover)';
+              e.currentTarget.style.color = 'var(--text-primary)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'transparent';
+              e.currentTarget.style.color = 'var(--text-ghost)';
+            }}
+          >
+            <Eraser size={12} strokeWidth={2.2} />
           </button>
 
           {/* Chat-pane expand toggle. Opens the gray history pane on

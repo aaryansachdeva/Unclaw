@@ -12,7 +12,7 @@ import { useMemo, useRef } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 
-const COUNT = 2400;
+const COUNT = 1500;
 const DEPTH = 100;
 const MIN_RADIUS = 2;
 const MAX_RADIUS = 14;
@@ -122,11 +122,10 @@ const FRAGMENT_SHADER = /* glsl */ `
     float hotness = smoothstep(0.68, 0.95, vUv.y) * 0.42;
     vec3 color = vColor + vec3(hotness);
 
-    // Master alpha — split between the original 0.3 (too dim) and
-    // the punched 0.55 (too loud). 0.42 lands in the sweet spot:
-    // trails clearly visible, never demanding attention away from
-    // the sign-in card.
-    float alpha = coreX * body * vAlpha * vBrightness * 0.42;
+    // Master alpha — muted further to let the sign-in card breathe.
+    // 0.26 keeps trails visible as ambient atmosphere without ever
+    // pulling focus from the form.
+    float alpha = coreX * body * vAlpha * vBrightness * 0.26;
     if (alpha < 0.002) discard;
 
     gl_FragColor = vec4(color, alpha);
