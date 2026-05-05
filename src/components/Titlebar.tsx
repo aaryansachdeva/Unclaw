@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { Pin, PinOff, LogOut } from 'lucide-react';
+import { Pin, PinOff, LogOut, Settings } from 'lucide-react';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -228,6 +228,56 @@ export function Titlebar({
                         </span>
                       )}
                     </div>
+                    {/* Soul Settings — opens the soul portal in the
+                        user's default browser. Engine power-user surface;
+                        most users never need it but it's the canonical
+                        place to tune lipsync sliders, model picks,
+                        signalling config, and the live stats viz. */}
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setProfileOpen(false);
+                        const url = 'http://127.0.0.1:8765/';
+                        // Open in the user's default browser via Electron's
+                        // shell.openExternal. The auth:open-external IPC
+                        // handler accepts any http(s) URL — name's a misnomer
+                        // (it just shells out). Browser fallback for non-
+                        // Electron contexts (vite dev preview, etc.).
+                        if (window.electronAPI?.authOpenExternal) {
+                          void window.electronAPI.authOpenExternal(url);
+                        } else {
+                          window.open(url, '_blank', 'noopener,noreferrer');
+                        }
+                      }}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        width: '100%',
+                        padding: '8px 10px',
+                        borderRadius: 8,
+                        background: 'transparent',
+                        border: 'none',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        color: 'var(--text-primary)',
+                        fontFamily: 'inherit',
+                        fontSize: 13,
+                        fontWeight: 500,
+                        letterSpacing: '-0.01em',
+                        transition: 'background 120ms var(--ease-out-quart)',
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'transparent';
+                      }}
+                    >
+                      <Settings size={14} strokeWidth={2} color="var(--text-secondary)" />
+                      <span>Soul Settings</span>
+                    </button>
                     <button
                       type="button"
                       role="menuitem"
