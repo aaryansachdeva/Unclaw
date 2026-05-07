@@ -1320,8 +1320,6 @@ function formatBytes(n: number): string {
 const AGENTIC_OPENAI_MODELS: ReadonlyArray<{ id: string; label: string; hint?: string }> = [
   { id: 'openai:gpt-5.4-mini',  label: 'GPT-5.4 Mini',  hint: 'recommended' },
   { id: 'openai:gpt-5.4-nano',  label: 'GPT-5.4 Nano',  hint: 'cheapest' },
-  { id: 'openai:gpt-4o-mini',   label: 'GPT-4o Mini' },
-  { id: 'openai:gpt-4o',        label: 'GPT-4o',        hint: 'smartest' },
 ];
 
 function AgenticSection({
