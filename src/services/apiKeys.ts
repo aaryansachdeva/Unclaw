@@ -146,6 +146,29 @@ export interface ApiKeysProfile {
    *  when `tts_provider === 'qwen3'`. Defaults to the Grace clone soul
    *  downloads during install. */
   qwen3_voice: string | null;
+  /** Agentic features toggle. When false (default), the 20b's
+   *  `escalate` action is suppressed in the system prompt and the
+   *  fast-escalation regex no-ops; soul never spins up the OpenAI
+   *  Responses-API loop. When true, escalation is live and uses the
+   *  user-supplied agentic_model + agentic_api_key (or the chat
+   *  provider's key if `agentic_use_same_as_chat` is on AND chat
+   *  provider is OpenAI). */
+  agentic_enabled: boolean;
+  /** When true AND `llm_provider === 'openai'`, escalation reuses
+   *  the conversational model + key. When the chat provider isn't
+   *  OpenAI this flag has no effect (soul still needs an OpenAI key
+   *  for escalation since gpt-5.4-mini-class is the only supported
+   *  agentic backend in v1). */
+  agentic_use_same_as_chat: boolean;
+  /** OpenAI model id used for the agentic loop (e.g. 'gpt-5.4-mini').
+   *  Required when `agentic_enabled` is true unless
+   *  `agentic_use_same_as_chat` is on AND chat is already OpenAI. */
+  agentic_model: string | null;
+  /** OpenAI API key for the agentic loop. Required when
+   *  `agentic_enabled` is true unless `agentic_use_same_as_chat` is
+   *  on AND chat is already OpenAI (in which case llm_api_key is
+   *  reused). */
+  agentic_api_key: string | null;
   /** Gemini API key — used ONLY for Google Search grounding (a separate
    *  feature from the chat provider). When `grounding_search_enabled` is
    *  true and this key is set, escalation calls can include
@@ -176,6 +199,10 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   // Kokoro; they can still flip to any of the bundled 54 voices.
   kokoro_voice:             'grace_kokoro',
   qwen3_voice:              'grace_qwen3',
+  agentic_enabled:          false,
+  agentic_use_same_as_chat: false,
+  agentic_model:            null,
+  agentic_api_key:          null,
   gemini_search_api_key:    null,
   grounding_search_enabled: false,
   sync_across_devices:      false,
@@ -278,6 +305,18 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
   } else {
     if (!profile.elevenlabs_api_key) missing.push('ElevenLabs API key');
   }
+  // Agentic gates: only enforced when the user opted in.
+  if (profile.agentic_enabled) {
+    const reuseChat = profile.agentic_use_same_as_chat
+      && profile.llm_provider === 'openai'
+      && !!profile.llm_api_key;
+    if (!profile.agentic_model && !reuseChat) {
+      missing.push('Agentic model');
+    }
+    if (!reuseChat && !profile.agentic_api_key) {
+      missing.push('OpenAI key for agentic');
+    }
+  }
   return missing;
 }
 
@@ -301,17 +340,22 @@ export interface KeyValidationOutcome {
 }
 
 export interface KeyValidationResult {
-  /** True iff both `llm.ok` and `tts.ok` are true. */
+  /** True iff every requested probe (`llm`, `tts`, optionally
+   *  `agentic`) succeeded. */
   ok: boolean;
   llm: KeyValidationOutcome;
-  /** Provider-agnostic TTS outcome (works for ElevenLabs and Kokoro
-   *  uniformly). Carries a `provider` tag so the wizard can render
-   *  the right label next to the row. */
-  tts: KeyValidationOutcome & { provider: 'elevenlabs' | 'kokoro' };
+  /** Provider-agnostic TTS outcome (works for ElevenLabs / Kokoro /
+   *  Qwen3). Carries a `provider` tag so the wizard can render the
+   *  right label next to the row. */
+  tts: KeyValidationOutcome & { provider: 'elevenlabs' | 'kokoro' | 'qwen3' };
   /** Legacy alias — pre-Kokoro versions of the wizard read this. New
    *  code should use `tts` instead. Soul still emits both for back-
    *  compat. */
   elevenlabs: KeyValidationOutcome;
+  /** Optional — only present when `agentic_enabled` was true in the
+   *  request. Probes the OpenAI key + model used for the escalation
+   *  loop. Wizard renders a third row when this is set. */
+  agentic?: KeyValidationOutcome;
 }
 
 /** Soul probes each provider's API with the supplied keys in parallel.
@@ -335,6 +379,16 @@ export async function validateKeys(
         profile.tts_provider === 'kokoro' && profile.kokoro_mode === 'custom'
           ? (profile.kokoro_endpoint || null)
           : null,
+      // Agentic — soul probes the OpenAI key + model when enabled.
+      // When `agentic_use_same_as_chat` is on AND chat is OpenAI,
+      // the chat key is reused; otherwise the dedicated agentic key
+      // is sent. Soul does the right thing on its end.
+      agentic_enabled:     profile.agentic_enabled,
+      agentic_model:       profile.agentic_model,
+      agentic_api_key:     profile.agentic_use_same_as_chat
+                            && profile.llm_provider === 'openai'
+                              ? profile.llm_api_key
+                              : profile.agentic_api_key,
     }),
   });
   if (!res.ok) {

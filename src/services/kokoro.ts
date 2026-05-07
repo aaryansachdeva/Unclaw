@@ -85,7 +85,7 @@ export async function uninstallKokoro(): Promise<boolean> {
  *  the bundled Kokoro voices.bin during install. Pinned to the top so
  *  Grace-persona users see "Grace (offline)" as the first option. */
 export const RECOMMENDED_VOICES: ReadonlyArray<{ id: string; label: string }> = [
-  { id: 'grace_kokoro', label: 'Grace (offline)' },
+  { id: 'grace_kokoro', label: 'Grace' },
   { id: 'af_heart',    label: 'Heart (American · F)' },
   { id: 'af_bella',    label: 'Bella (American · F)' },
   { id: 'af_nicole',   label: 'Nicole (American · F)' },

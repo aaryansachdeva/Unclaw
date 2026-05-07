@@ -94,7 +94,7 @@ export async function uninstallQwen3(): Promise<boolean> {
  *  should appear. The renderer uses the same shape as Kokoro's
  *  RECOMMENDED_VOICES so the picker code stays identical. */
 export const RECOMMENDED_VOICES: ReadonlyArray<{ id: string; label: string }> = [
-  { id: 'grace_qwen3', label: 'Grace (offline)' },
+  { id: 'grace_qwen3', label: 'Grace' },
 ];
 
 /** User-facing label for a Qwen3 voice id. Falls back to the id when

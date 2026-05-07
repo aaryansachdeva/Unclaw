@@ -15,7 +15,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Eye, EyeOff, Lock, Search, ExternalLink,
+  Eye, EyeOff, Lock, Search, ExternalLink, Zap,
   AlertCircle, CheckCircle2, ShieldCheck, Loader2, Download,
 } from 'lucide-react';
 import { StepHeader } from './StepHeader';
@@ -65,11 +65,15 @@ interface Props {
    *  pre-gen audio line. Only called on actual check completion, never
    *  on the field-edit reset that also clears validation. */
   onCheckFailed?: () => void;
-  /** Live name from the Vibe step — drives the offline-Kokoro voice
-   *  label so users see "Aria (offline)" instead of the persona's
-   *  default name when they've renamed their assistant. Falls back
-   *  to "Grace" when null/empty. */
+  /** Live name from the Vibe step. Currently unused for voice labels
+   *  (the cloned voice always reads "Grace") but kept for future
+   *  agent-name customizations elsewhere on the step. */
   agentName?: string | null;
+  /** Which half of the configuration to render. The wizard splits
+   *  this step into two pages so the user picks LLM + agentic on
+   *  page 1 and voice + verify on page 2. Default 'all' shows the
+   *  full single-page layout (back-compat). */
+  mode?: 'llm' | 'voice' | 'all';
 }
 
 const FIELD_BASE: React.CSSProperties = {
@@ -104,7 +108,11 @@ export function ConnectionsStep({
   onValidatedChange,
   onCheckFailed,
   agentName,
+  mode = 'all',
 }: Props) {
+  const showLlm = mode === 'all' || mode === 'llm';
+  const showVoice = mode === 'all' || mode === 'voice';
+  const showVerify = mode === 'all' || mode === 'voice';
   const [showLlmKey, setShowLlmKey] = useState(false);
   const [showElevenKey, setShowElevenKey] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
@@ -258,12 +266,25 @@ export function ConnectionsStep({
     }
   };
 
+  // Header copy keyed off mode — same panel reused on both wizard
+  // pages, with whatever's relevant to that page.
+  const headerTitle = mode === 'voice'
+    ? 'Pick a voice.'
+    : mode === 'llm'
+      ? 'Pick a chat model.'
+      : 'Bring your own keys.';
+  const headerSubtitle = mode === 'voice'
+    ? 'Voice provider for the assistant. Local options run on your GPU; ElevenLabs is cloud.'
+    : mode === 'llm'
+      ? 'Provider and model for chat. Anything stored is encrypted on this device.'
+      : 'Pick a chat provider and a voice. Anything stored is encrypted on this device.';
+
   return (
     <div style={{ display: 'flex', gap: 28, alignItems: 'flex-start' }}>
       <div style={{ width: 180, flexShrink: 0, paddingTop: 2 }}>
         <StepHeader
-          title="Bring your own keys."
-          subtitle="Pick a chat provider and a voice. Anything stored is encrypted on this device."
+          title={headerTitle}
+          subtitle={headerSubtitle}
         />
       </div>
 
@@ -276,6 +297,8 @@ export function ConnectionsStep({
           gap: 12,
         }}
       >
+        {showLlm && (
+        <>
         {/* Provider + Model on one row. Model collapses to the placeholder
             when no provider is selected. */}
         <div style={{ display: 'flex', gap: 12 }}>
@@ -316,7 +339,7 @@ export function ConnectionsStep({
                   : provider.dynamicModels && models.length === 0
                     ? (ollamaLoading
                         ? 'Looking for installed models…'
-                        : 'No Ollama models found — run `ollama pull <name>`')
+                        : 'No Ollama models found, run `ollama pull <name>`')
                     : 'Choose a model'
               }
               options={models.map((m) => ({
@@ -344,6 +367,12 @@ export function ConnectionsStep({
           </FieldLabel>
         )}
 
+        <AgenticSection values={values} onChange={onChange} />
+        </>
+        )}
+
+        {showVoice && (
+        <>
         <VoiceSection
           values={values}
           onChange={onChange}
@@ -391,6 +420,8 @@ export function ConnectionsStep({
           title="Sync across devices"
           helper="Encrypted before it leaves this device. You can change this later."
         />
+        </>
+        )}
 
         {/* Check-keys bar. Three states:
               1. Missing required fields    -> show the Required panel.
@@ -403,7 +434,7 @@ export function ConnectionsStep({
             The Wizard's Finish button is gated on `validated` (set when
             both rows come back ok), so this block is the user's only
             path forward once they've reached this step. */}
-        {missing.length > 0 ? (
+        {showVerify && (missing.length > 0 ? (
           <div
             role="status"
             style={{
@@ -438,7 +469,7 @@ export function ConnectionsStep({
             providerLabel={provider?.label ?? 'LLM'}
             onCheck={handleCheckKeys}
           />
-        )}
+        ))}
       </div>
     </div>
   );
@@ -530,10 +561,10 @@ function CheckKeysBar({
             }
           />
           {result?.ok
-            ? 'Keys verified'
+            ? 'Verified'
             : check.state === 'done'
-              ? 'Couldn’t verify all keys'
-              : 'Verify your keys to finish'}
+              ? 'Couldn’t verify all'
+              : 'Verify to finish'}
         </span>
         <button
           type="button"
@@ -603,10 +634,10 @@ function CheckKeysBar({
             />
           ) : null}
           {checking
-            ? 'Checking…'
+            ? 'Verifying…'
             : check.state === 'done'
-              ? 'Check again'
-              : 'Check keys'}
+              ? 'Verify again'
+              : 'Verify'}
         </button>
       </div>
 
@@ -810,27 +841,20 @@ function VoiceSection({
     onChange({ ...values, kokoro_voice: id || null });
   };
 
-  // Voice options — when soul reports installed voices, use those;
-  // otherwise show the curated catalog so the dropdown isn't empty
-  // before the install completes. labelForVoice prettifies whatever
-  // ids we end up with.
-  //
-  // Special case: the offline Kokoro clone (`grace_kokoro`) carries the
-  // user's chosen assistant name from the Vibe step ("Aria (offline)"
-  // for an Aria persona, etc.). Falls back to "Grace (offline)" when
-  // the user hasn't named their assistant yet.
+  // Voice options. Soul-reported installed voices first; otherwise
+  // the curated catalog so the dropdown isn't empty before install
+  // completes. The cloned Grace voice always reads "Grace" regardless
+  // of the user's chosen agent name — the agent_name customization
+  // is for the chat persona, not the underlying voice asset.
   const voiceOptions = useMemo(() => {
-    const trimmedName = (agentName ?? '').trim() || 'Grace';
     const ids = (kokoro?.voices && kokoro.voices.length > 0)
       ? kokoro.voices
       : RECOMMENDED_VOICES.map((v) => v.id);
     return ids.map((id) => ({
       id,
-      label: id === 'grace_kokoro'
-        ? `${trimmedName} (offline)`
-        : labelForVoice(id),
+      label: id === 'grace_kokoro' ? 'Grace' : labelForVoice(id),
     }));
-  }, [kokoro?.voices, agentName]);
+  }, [kokoro?.voices]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -840,9 +864,9 @@ function VoiceSection({
           value={values.tts_provider}
           onChange={(v) => setTtsProvider(v as TtsProviderId)}
           options={[
-            { id: 'elevenlabs', label: 'ElevenLabs (cloud)' },
-            { id: 'kokoro',     label: 'Kokoro (local, free)' },
-            { id: 'qwen3',      label: 'Qwen3-TTS (local, premium)' },
+            { id: 'elevenlabs', label: 'ElevenLabs' },
+            { id: 'kokoro',     label: 'Kokoro' },
+            { id: 'qwen3',      label: 'Qwen3-TTS' },
           ]}
         />
       </FieldLabel>
@@ -953,7 +977,7 @@ function KokoroModePicker({
         active={mode === 'custom'}
         onClick={() => onChange('custom')}
         title="My own endpoint"
-        body="I have Kokoro running elsewhere — point soul at the URL."
+        body="I have Kokoro running elsewhere. Point soul at the URL."
       />
     </div>
   );
@@ -1187,6 +1211,144 @@ function formatBytes(n: number): string {
 
 
 // ---------------------------------------------------------------------
+// Agentic features section. Lives on the LLM page next to the chat
+// model. Three nested states:
+//
+//   1. Toggle off (default)  — escalation disabled. The 20b can't emit
+//                              `escalate`; soul refuses /chat without
+//                              `agentic_enabled` even when the message
+//                              would normally trigger escalation.
+//   2. Toggle on + chat is OpenAI — show "Use same model as chat"
+//                              checkbox. When checked, escalation reuses
+//                              the conversational model + key (single
+//                              field for both). When unchecked, show
+//                              the Agentic model dropdown (key already
+//                              available from chat).
+//   3. Toggle on + chat is NOT OpenAI — show OpenAI key field +
+//                              Agentic model dropdown. Escalation
+//                              still goes through OpenAI's Responses
+//                              API (the only supported agentic
+//                              backend in v1).
+//
+// Why OpenAI-only for agentic in v1: the Responses API (with
+// previous_response_id state retention + reasoning preservation +
+// proper tool integration) is what makes the multi-step browser /
+// memory / web-search loop tractable. Groq + Ollama have tool calls
+// but none have an equivalent state-retention API; building one
+// would mean rebuilding the loop with manual state management. Real
+// engineering, deferred to v2.
+// ---------------------------------------------------------------------
+
+const AGENTIC_OPENAI_MODELS: ReadonlyArray<{ id: string; label: string; hint?: string }> = [
+  { id: 'openai:gpt-5.4-mini',  label: 'GPT-5.4 Mini',  hint: 'recommended' },
+  { id: 'openai:gpt-5.4-nano',  label: 'GPT-5.4 Nano',  hint: 'cheapest' },
+  { id: 'openai:gpt-4o-mini',   label: 'GPT-4o Mini' },
+  { id: 'openai:gpt-4o',        label: 'GPT-4o',        hint: 'smartest' },
+];
+
+function AgenticSection({
+  values,
+  onChange,
+}: {
+  values: ApiKeysProfile;
+  onChange: (next: ApiKeysProfile) => void;
+}) {
+  const [showKey, setShowKey] = useState(false);
+
+  const setEnabled = (b: boolean) => {
+    onChange({ ...values, agentic_enabled: b });
+  };
+  const setUseSame = (b: boolean) => {
+    onChange({ ...values, agentic_use_same_as_chat: b });
+  };
+  const setModel = (id: string) => {
+    onChange({ ...values, agentic_model: id || null });
+  };
+  const setKey = (k: string) => {
+    onChange({ ...values, agentic_api_key: k || null });
+  };
+
+  // Whether the chat provider is OpenAI — "use same as chat" is
+  // only meaningful in that case (escalation needs an OpenAI model
+  // either way; if chat is already OpenAI we can borrow its key).
+  const chatIsOpenAI = values.llm_provider === 'openai';
+  // Effective "reuse chat" state. Even if user toggled the checkbox,
+  // it only takes effect when chat IS OpenAI.
+  const effectiveReuse = values.agentic_use_same_as_chat && chatIsOpenAI;
+
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+      padding: '12px 14px',
+      borderRadius: 10,
+      border: '1px solid var(--glass-border)',
+      background: 'rgba(255, 255, 255, 0.025)',
+    }}>
+      <Toggle
+        value={values.agentic_enabled}
+        onChange={setEnabled}
+        icon={<Zap size={11} strokeWidth={2} aria-hidden style={{ opacity: 0.7 }} />}
+        title="Enable agentic features"
+        helper={values.agentic_enabled
+          ? 'Lets the assistant browse, search, and use tools for harder questions. Uses an OpenAI model for the agentic loop.'
+          : 'Off by default. Turn on for live web search, page-reading, and multi-step research. Needs an OpenAI key.'}
+        dimWhen={!values.agentic_enabled}
+      />
+
+      {values.agentic_enabled && (
+        <>
+          {chatIsOpenAI && (
+            <Toggle
+              value={values.agentic_use_same_as_chat}
+              onChange={setUseSame}
+              icon={null}
+              title="Use the same model as conversational"
+              helper={values.agentic_use_same_as_chat
+                ? "Reuses your chat model + key. Simpler, but the conversational pick may be too small for tool-use."
+                : "Pick a separate (likely larger) model for agentic work. Recommended."}
+            />
+          )}
+
+          {!effectiveReuse && (
+            <FieldLabel
+              text="Agentic model"
+              trailing={!chatIsOpenAI ? (
+                <SignupLink href="https://platform.openai.com/api-keys" />
+              ) : null}
+            >
+              <Dropdown
+                value={values.agentic_model ?? ''}
+                onChange={setModel}
+                placeholder="Choose a model"
+                options={AGENTIC_OPENAI_MODELS.map((m) => ({
+                  id: m.id, label: m.label, hint: m.hint,
+                }))}
+              />
+            </FieldLabel>
+          )}
+
+          {!effectiveReuse && !chatIsOpenAI && (
+            <FieldLabel text="OpenAI API key">
+              <SecretInput
+                value={values.agentic_api_key ?? ''}
+                onChange={setKey}
+                placeholder="sk-…"
+                visible={showKey}
+                onToggleVisible={() => setShowKey((v) => !v)}
+                autoComplete="off"
+              />
+            </FieldLabel>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------
 // Qwen3 section — provider branch UI for Qwen3-TTS.
 //
 // Self-contained: polls /tts/qwen3/status on its own (different cadence
@@ -1258,22 +1420,18 @@ function Qwen3Section({
     onChange({ ...values, qwen3_voice: id || null });
   };
 
-  // Voice catalogue — show whatever soul reports as installed; fall
-  // back to the curated list before /status returns. Re-label
-  // grace_qwen3 with the user's chosen agent name (e.g. "Aria
-  // (offline)") so the dropdown reads consistently with their pick.
+  // Voice catalogue. Soul-reported installed voices first, curated
+  // list as fallback. The cloned Grace voice always reads "Grace"
+  // (no dynamic agent-name override, no "offline" suffix).
   const voiceOptions = useMemo(() => {
-    const trimmedName = (agentName ?? '').trim() || 'Grace';
     const ids = (status?.voices && status.voices.length > 0)
       ? status.voices
       : QWEN3_VOICES.map((v) => v.id);
     return ids.map((id) => ({
       id,
-      label: id === 'grace_qwen3'
-        ? `${trimmedName} (offline)`
-        : labelForQwen3Voice(id),
+      label: id === 'grace_qwen3' ? 'Grace' : labelForQwen3Voice(id),
     }));
-  }, [status?.voices, agentName]);
+  }, [status?.voices]);
 
   return (
     <>

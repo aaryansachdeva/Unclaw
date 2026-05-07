@@ -69,9 +69,9 @@ interface WizardProps {
   onIdentityNameChange?: (name: string) => void;
 }
 
-type StepKey = 'welcome' | 'identity' | 'vibe' | 'interests' | 'connections';
-const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'identity', 'vibe', 'interests', 'connections'];
-const EDIT_STEPS: StepKey[] = ['identity', 'vibe', 'interests', 'connections'];
+type StepKey = 'welcome' | 'identity' | 'vibe' | 'interests' | 'llm' | 'voice';
+const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'identity', 'vibe', 'interests', 'llm', 'voice'];
+const EDIT_STEPS: StepKey[] = ['identity', 'vibe', 'interests', 'llm', 'voice'];
 
 /** localStorage key for the onboarding-mute preference. Persisted so a
  *  user who finished onboarding with audio off doesn't have to mute
@@ -239,11 +239,14 @@ export function Wizard({
   // Welcome step has no validation gate; identity needs a name; the
   // rest are always advance-able EXCEPT connections (the last step),
   // where Continue/Finish is blocked until the keys are filled in.
+  // LLM page advances unconditionally; the voice page (the LAST step)
+  // is the one that gates Continue/Finish on verification — that's
+  // where the verify panel lives.
   const canAdvance = step === 'welcome'
     ? true
     : step === 'identity'
     ? hasName
-    : step === 'connections'
+    : step === 'voice'
     ? canFinish
     : true;
 
@@ -329,21 +332,25 @@ export function Wizard({
       return;
     }
     if (missingKeyFields.length > 0) {
-      // Route the user back to Connections so they can fix it; the
-      // inline validation block in that step calls out the same
-      // missing fields. Cmd+Enter Finish from any step funnels here.
-      setStep('connections');
-      setError(
-        `Please add: ${missingKeyFields.join(', ')}`,
-      );
+      // Route the user back to whichever step holds the missing field
+      // so they can fix it. LLM-related fields (provider, model, key,
+      // agentic) live on the LLM page; everything else (voice provider
+      // or its install state) lives on the voice page.
+      const targetStep: StepKey = missingKeyFields.some((f) =>
+        f === 'LLM provider' || f === 'Model'
+        || f.endsWith('API key') && f !== 'ElevenLabs API key'
+        || f === 'Agentic model' || f === 'OpenAI key for agentic',
+      ) ? 'llm' : 'voice';
+      setStep(targetStep);
+      setError(`Please add: ${missingKeyFields.join(', ')}`);
       return;
     }
     if (!keysValidated) {
-      // Fields are filled but the user hasn't pressed Check Keys (or
-      // they edited a key after a prior successful check). Send them
-      // back so they can verify before we save.
-      setStep('connections');
-      setError('Press Check keys to verify before finishing.');
+      // Fields are filled but the user hasn't pressed Verify (or
+      // they edited a key after a prior successful check). The voice
+      // page is the last one and hosts the verify panel.
+      setStep('voice');
+      setError('Press Verify before finishing.');
       return;
     }
     setSubmitting(true);
@@ -428,30 +435,30 @@ export function Wizard({
     if (step === 'interests') {
       return <InterestsStep values={interests} onChange={setInterests} />;
     }
+    // Both LLM + Voice pages reuse ConnectionsStep with a `mode`
+    // prop. The component itself owns layout; the mode just toggles
+    // which sections render. Verify panel is on `voice` only — that's
+    // where Finish is gated, and the panel checks LLM + TTS together.
+    if (step === 'llm') {
+      return (
+        <ConnectionsStep
+          mode="llm"
+          values={apiKeys}
+          onChange={setApiKeys}
+          validated={keysValidated}
+          onValidatedChange={setKeysValidated}
+          onCheckFailed={() => playLine('keys-wrong')}
+          agentName={vibe.agent_name}
+        />
+      );
+    }
     return (
       <ConnectionsStep
+        mode="voice"
         values={apiKeys}
         onChange={setApiKeys}
         validated={keysValidated}
-        onValidatedChange={(ok) => {
-          setKeysValidated(ok);
-          // Failed Check Keys = Grace says the "something's off"
-          // line. Only on transition false→done-but-bad, not on
-          // the "edit invalidates" reset (which also flips us
-          // back to false). The ConnectionsStep only calls this
-          // setter on real check completion + on edits, but
-          // edits also reset its `check.result` to null, so
-          // distinguishing here would mean threading more state.
-          // Simpler heuristic: only play the line when ok=false
-          // AND keysValidated was previously true (a regression),
-          // OR when the user explicitly pressed Check (check.result
-          // is set). We don't know the latter from here, so just
-          // play on any false-emit that follows a real check.
-          // Conn Step calls onValidatedChange(true) on success and
-          // onValidatedChange(false) ONLY on (a) explicit failure,
-          // (b) edit-reset. Edits clear `check.result` so we can
-          // detect via ConnectionsStep — see comment in that file.
-        }}
+        onValidatedChange={setKeysValidated}
         onCheckFailed={() => playLine('keys-wrong')}
         agentName={vibe.agent_name}
       />
