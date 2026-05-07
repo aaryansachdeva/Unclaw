@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { Pin, PinOff, LogOut, Settings, Trash2, LogIn, UserCircle2 } from 'lucide-react';
+import { Pin, PinOff, LogOut, Settings, Trash2, LogIn, UserCircle2, RotateCcw } from 'lucide-react';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -56,6 +56,12 @@ interface TitlebarProps {
    *  just owns a two-step confirm UI (click once → "click again to
    *  confirm" — no separate dialog). */
   onResetAccount?: () => void;
+  /** Triggered from the "Reset session" row. Sends a reset descriptor
+   *  to the Unreal pixel stream so the character returns to a neutral
+   *  pose / clears any in-progress speech. Same two-click confirm UI
+   *  as Reset all data, since interrupting Grace mid-sentence on an
+   *  accidental click would be annoying. */
+  onResetSession?: () => void;
   /** Width of the workspace area in pixels — i.e. window width minus
    *  any open chat pane. Used to keep the UNCLAW wordmark centered
    *  over the visible stream view rather than the whole window. When
@@ -82,6 +88,7 @@ export function Titlebar({
   onSignOut,
   onSignIn,
   onResetAccount,
+  onResetSession,
   workspaceWidth,
 }: TitlebarProps) {
   const reduce = useReducedMotion() ?? false;
@@ -91,6 +98,10 @@ export function Titlebar({
   // click flips this on (the row turns red and prompts to confirm);
   // second click runs onResetAccount. Reset to false on popover close.
   const [resetArmed, setResetArmed] = useState(false);
+  // Same two-click pattern for the softer "Reset session" row. Sends
+  // a reset descriptor to Unreal but leaves the user's account / keys
+  // untouched. Separate state so arming one doesn't affect the other.
+  const [sessionResetArmed, setSessionResetArmed] = useState(false);
   const profileWrapRef = useRef<HTMLDivElement | null>(null);
 
   const handlePin = () => {
@@ -121,10 +132,13 @@ export function Titlebar({
     };
   }, [profileOpen]);
 
-  // Disarm the reset confirm when the popover closes — otherwise the
+  // Disarm the reset confirms when the popover closes — otherwise the
   // user could open it again and a stray click would skip the confirm.
   useEffect(() => {
-    if (!profileOpen) setResetArmed(false);
+    if (!profileOpen) {
+      setResetArmed(false);
+      setSessionResetArmed(false);
+    }
   }, [profileOpen]);
 
   return (
@@ -335,6 +349,57 @@ export function Titlebar({
                       <Settings size={14} strokeWidth={2} color="var(--text-secondary)" />
                       <span>Soul Settings</span>
                     </button>
+                    {/* Reset session — sends a reset descriptor to the
+                        Unreal pixel stream. Resets the character to a
+                        neutral pose / clears any in-progress speech
+                        without touching the user's keys, profile, or
+                        account. Two-click confirm so an accidental hit
+                        doesn't yank Grace out of mid-sentence. */}
+                    {onResetSession && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          if (!sessionResetArmed) {
+                            setSessionResetArmed(true);
+                            return;
+                          }
+                          setProfileOpen(false);
+                          setSessionResetArmed(false);
+                          onResetSession();
+                        }}
+                        style={{
+                          ...menuItemStyle,
+                          color: sessionResetArmed
+                            ? 'var(--accent)'
+                            : 'var(--text-primary)',
+                          background: sessionResetArmed
+                            ? 'rgba(196, 68, 68, 0.10)'
+                            : 'transparent',
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = sessionResetArmed
+                            ? 'rgba(196, 68, 68, 0.16)'
+                            : 'rgba(255, 255, 255, 0.06)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = sessionResetArmed
+                            ? 'rgba(196, 68, 68, 0.10)'
+                            : 'transparent';
+                        }}
+                      >
+                        <RotateCcw
+                          size={14}
+                          strokeWidth={2}
+                          color={sessionResetArmed
+                            ? 'var(--accent)'
+                            : 'var(--text-secondary)'}
+                        />
+                        <span>
+                          {sessionResetArmed ? 'Click again to confirm' : 'Reset session'}
+                        </span>
+                      </button>
+                    )}
                     {/* Sign in / Sign out — flips based on whether
                         the session is real (auth token) or guest. */}
                     {user ? (

@@ -107,12 +107,11 @@ export async function chatViaSoul(
   if (opts.systemExtension) body.system_extension = opts.systemExtension;
   if (opts.images && opts.images.length > 0) body.images = opts.images;
 
-  // Pull the user's saved {provider, model, key, elevenlabs_key} so
-  // soul routes the request to the backend they configured in
-  // onboarding AND uses their own ElevenLabs key for TTS. Soul's
-  // /chat route is BYOK-strict in shipping mode (no env-key fallback),
-  // so the keys gathered here are required end-to-end — the wizard
-  // gates Finish on them.
+  // Pull the user's saved {provider, model, key, tts_provider...} so
+  // soul routes the request to the backends they configured in
+  // onboarding. Soul's /chat route is BYOK-strict in shipping mode
+  // (no env-key fallback), so the values gathered here are required
+  // end-to-end — the wizard gates Finish on them.
   try {
     const keys = await fetchApiKeys();
     if (keys.llm_model) body.llm_model = keys.llm_model;
@@ -121,8 +120,18 @@ export async function chatViaSoul(
     if (keys.llm_api_key && keys.llm_provider !== 'ollama') {
       body.llm_api_key = keys.llm_api_key;
     }
-    if (keys.elevenlabs_api_key) {
+    // TTS routing. Default is ElevenLabs (cloud BYOK); when the user
+    // picked Kokoro we send the provider tag + (optionally) the
+    // custom endpoint URL so soul forwards instead of running locally.
+    body.tts_provider = keys.tts_provider;
+    if (keys.tts_provider === 'elevenlabs' && keys.elevenlabs_api_key) {
       body.elevenlabs_api_key = keys.elevenlabs_api_key;
+    }
+    if (keys.tts_provider === 'kokoro') {
+      if (keys.kokoro_voice) body.voice_id = keys.kokoro_voice;
+      if (keys.kokoro_mode === 'custom' && keys.kokoro_endpoint) {
+        body.kokoro_endpoint = keys.kokoro_endpoint;
+      }
     }
   } catch (err) {
     console.warn('[soulChat] failed to read api keys', err);

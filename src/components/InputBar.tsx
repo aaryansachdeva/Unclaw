@@ -113,6 +113,13 @@ interface InputBarProps {
   /** Toggle the chat-history side pane. Pane lives in App.tsx; the
    *  input bar just exposes the affordance. */
   onToggleChatPane?: () => void;
+  /** When true, the input is locked with a "coming soon" placeholder
+   *  message in place of the cycling prompts. Used for personas that
+   *  aren't ready yet (Mark today). The persona-switcher chevrons stay
+   *  enabled so the user can swap back. */
+  comingSoon?: boolean;
+  /** Copy shown in the placeholder slot while `comingSoon` is true. */
+  comingSoonMessage?: string;
 }
 
 /** Imperative API for the parent — used by App.tsx to drive the
@@ -153,7 +160,13 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onPasteImage,
   chatPaneOpen = false,
   onToggleChatPane,
+  comingSoon = false,
+  comingSoonMessage = 'Coming soon',
 }, forwardedRef) {
+  // Lock the editing surface (textarea, send, voice) when the active
+  // persona isn't ready yet. Persona-switcher chevrons stay live so
+  // the user can swap back; only the chat surface goes inert.
+  const inputLocked = disabled || comingSoon;
   const reduce = useReducedMotion() ?? false;
   const [message, setMessage] = useState('');
   const [isFocused, setIsFocused] = useState(false);
@@ -230,9 +243,12 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     return () => clearTimeout(timerRef.current);
   }, [cyclePlaceholder]);
 
-  // Pause cycling while the user is typing OR while AI is producing.
+  // Pause cycling while the user is typing, while AI is producing,
+  // OR while the active persona is locked behind a coming-soon
+  // message. In the comingSoon case the placeholder slot displays a
+  // static message (rendered below) instead of the cycling prompts.
   useEffect(() => {
-    const shouldPause = !!message || isSending;
+    const shouldPause = !!message || isSending || comingSoon;
     if (shouldPause) {
       paused.current = true;
       clearTimeout(timerRef.current);
@@ -242,7 +258,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       promptIdx.current++;
       cyclePlaceholder();
     }
-  }, [message, isSending, cyclePlaceholder]);
+  }, [message, isSending, comingSoon, cyclePlaceholder]);
 
   // Auto-grow the textarea up to ~10 lines. Tall enough to handle
   // dictated multi-sentence prompts comfortably, capped so the bar
@@ -314,12 +330,12 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     // (or several) we let Enter fire with no text — the attachment
     // is the message. Otherwise require text. Guard against double-
     // fires while a send is in flight without clearing keystrokes.
-    if ((!text && !hasAttachments) || disabled || isSending) return;
+    if ((!text && !hasAttachments) || inputLocked || isSending) return;
     onSendMessage(text);
     setMessage('');
     setPulse('submit');
     window.setTimeout(() => setPulse('none'), 280);
-  }, [slash, message, hasAttachments, disabled, isSending, onSendMessage]);
+  }, [slash, message, hasAttachments, inputLocked, isSending, onSendMessage]);
 
   const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (slash.active) {
@@ -552,7 +568,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               letterSpacing: '0.01em',
               fontFamily: 'inherit',
               color: 'var(--text-primary)',
-              opacity: disabled ? 0.45 : 1,
+              opacity: inputLocked ? 0.45 : 1,
               userSelect: 'none',
               zIndex: 1,
             }}
@@ -593,7 +609,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             onPaste={handlePaste}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
-            disabled={disabled}
+            disabled={inputLocked}
             readOnly={voiceActive}
             rows={1}
             aria-label="Message input"
@@ -614,7 +630,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               // visible so typing/IME/selection still feel native.
               color: 'transparent',
               caretColor: 'var(--accent)',
-              opacity: disabled ? 0.45 : 1,
+              opacity: inputLocked ? 0.45 : 1,
               fontFamily: 'inherit',
               fontWeight: 400,
               letterSpacing: '0.01em',
@@ -643,11 +659,14 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
                   fontWeight: 400,
                   letterSpacing: '0.01em',
                   color: 'rgba(255, 255, 255, 0.32)',
-                  opacity: promptVisible ? 1 : 0,
+                  // Coming-soon shows static; cycling prompts honor the
+                  // typewriter's visibility state so the fade between
+                  // prompts still reads.
+                  opacity: comingSoon ? 1 : promptVisible ? 1 : 0,
                   transition: 'opacity 0.4s var(--ease-out-quart)',
                 }}
               >
-                {currentPrompt}
+                {comingSoon ? comingSoonMessage : currentPrompt}
               </span>
             </div>
           )}
@@ -890,14 +909,18 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
                   'opacity 0.18s var(--ease-out-quart), transform 0.18s var(--ease-out-quart)',
               }}
             >
-              <VoiceButton voice={voice} isSending={isSending} reduce={reduce} />
+              <VoiceButton
+                voice={comingSoon ? { ...voice, disabled: true } : voice}
+                isSending={isSending}
+                reduce={reduce}
+              />
             </div>
             <motion.button
               type="button"
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.92 }}
               onClick={handleSend}
-              disabled={disabled || !canSend || isSending}
+              disabled={inputLocked || !canSend || isSending}
               aria-label="Send message"
               aria-hidden={!canSend}
               tabIndex={canSend ? 0 : -1}

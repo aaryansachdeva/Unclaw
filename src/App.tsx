@@ -902,6 +902,20 @@ export function App() {
     profileSyncedRef.current = false;
   }, [authToken]);
 
+  // Soft session reset — tells Unreal to drop back to neutral pose +
+  // clear any in-progress speech. Doesn't touch auth, profile, keys,
+  // or chat memory. Same descriptor shape we use elsewhere
+  // (PS_Next_Claude originated the pattern). No-op when the stream
+  // isn't connected — the popover button only mounts when titlebar
+  // is up, which itself only renders post-load, but guard anyway.
+  const handleResetSession = useCallback(() => {
+    if (!pixelStreaming) return;
+    pixelStreaming.emitUIInteraction({
+      EventType: 'reset',
+      Timestamp: new Date().toISOString(),
+    });
+  }, [pixelStreaming]);
+
   // Fetch the user profile, but only once the stream is connected.
   // Null -> open the onboarding wizard in firstRun mode. Any non-null
   // profile lets us silently skip onboarding and feed the saved name
@@ -1467,6 +1481,8 @@ export function App() {
                   onPasteImage={handlePasteImage}
                   chatPaneOpen={chatPaneOpen}
                   onToggleChatPane={() => setChatPaneOpen((o) => !o)}
+                  comingSoon={persona.id === 'mark'}
+                  comingSoonMessage="Mark is coming soon"
                 />
               </div>
             </motion.div>
@@ -1495,6 +1511,7 @@ export function App() {
           try { localStorage.removeItem(GUEST_MODE_KEY); } catch { /* ignore */ }
         }}
         onResetAccount={() => { void handleResetAccount(); }}
+        onResetSession={handleResetSession}
         // Workspace = the visible stream area. UNCLAW wordmark stays
         // centered over THIS region, not the whole window, so it
         // remains visually centered on the streamed face when the

@@ -453,6 +453,7 @@ export function Wizard({
           // detect via ConnectionsStep — see comment in that file.
         }}
         onCheckFailed={() => playLine('keys-wrong')}
+        agentName={vibe.agent_name}
       />
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps

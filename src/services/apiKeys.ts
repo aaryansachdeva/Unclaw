@@ -99,6 +99,18 @@ export function getProvider(id: LLMProviderId | null | undefined): ProviderInfo 
 }
 
 
+/** TTS provider the user picked. ElevenLabs is the cloud / BYOK key
+ *  path; Kokoro is the local / open-weight option (no key, ~325 MB
+ *  one-time download, soul runs the model in-process or forwards to
+ *  a user-supplied endpoint). */
+export type TtsProviderId = 'elevenlabs' | 'kokoro';
+
+/** Sub-mode when `tts_provider === 'kokoro'`. `recommended` = soul
+ *  downloads + runs Kokoro locally; `custom` = user has Kokoro
+ *  running elsewhere (kokoro-fastapi, etc.) and provides the URL. */
+export type KokoroMode = 'recommended' | 'custom';
+
+
 export interface ApiKeysProfile {
   /** Selected LLM provider for chat, or null if the user hasn't set one. */
   llm_provider: LLMProviderId | null;
@@ -113,8 +125,22 @@ export interface ApiKeysProfile {
    *  default (http://localhost:11434) when null/empty — set this only
    *  if the user runs Ollama on a different host or non-default port. */
   ollama_base_url: string | null;
-  /** ElevenLabs API key for TTS. */
+  /** Selected TTS provider. Defaults to ElevenLabs (cloud) for new
+   *  users; can switch to Kokoro (local, open-weight) any time. */
+  tts_provider: TtsProviderId;
+  /** ElevenLabs API key for TTS. Required only when
+   *  `tts_provider === 'elevenlabs'`. */
   elevenlabs_api_key: string | null;
+  /** Kokoro sub-mode. Only consulted when `tts_provider === 'kokoro'`. */
+  kokoro_mode: KokoroMode;
+  /** Custom Kokoro endpoint URL (e.g. http://localhost:8880 for a
+   *  local kokoro-fastapi). Only used when
+   *  `tts_provider === 'kokoro' && kokoro_mode === 'custom'`. */
+  kokoro_endpoint: string | null;
+  /** Selected Kokoro voice id (e.g. 'af_heart'). Soul passes this to
+   *  whichever Kokoro path runs (local or remote). Falls back to
+   *  af_heart if null. */
+  kokoro_voice: string | null;
   /** Gemini API key — used ONLY for Google Search grounding (a separate
    *  feature from the chat provider). When `grounding_search_enabled` is
    *  true and this key is set, escalation calls can include
@@ -135,7 +161,15 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   llm_model:                null,
   llm_api_key:              null,
   ollama_base_url:          null,
+  tts_provider:             'elevenlabs',
   elevenlabs_api_key:       null,
+  kokoro_mode:              'recommended',
+  kokoro_endpoint:          null,
+  // Default to the KVoiceWalk-evolved Grace clone (`grace_kokoro.pt`),
+  // which soul downloads from files.fotonlabs.com during install. New
+  // users get persona-consistent voice out of the box if they pick
+  // Kokoro; they can still flip to any of the bundled 54 voices.
+  kokoro_voice:             'grace_kokoro',
   gemini_search_api_key:    null,
   grounding_search_enabled: false,
   sync_across_devices:      false,
@@ -196,14 +230,21 @@ export async function saveApiKeys(profile: ApiKeysProfile): Promise<boolean> {
  *  of these means the next chat will 400. Surface them inline in the
  *  Connections step instead of letting the user discover them on send.
  *
- *  Rules:
+ *  LLM rules:
  *    * llm_provider must be set
  *    * llm_model must be set
  *    * llm_api_key required when the provider isn't Ollama
- *    * elevenlabs_api_key always required (no free TTS path today)
+ *
+ *  TTS rules vary by provider:
+ *    * elevenlabs → elevenlabs_api_key required
+ *    * kokoro recommended → no field-level requirement here; install
+ *        state is checked separately by ConnectionsStep via the
+ *        /tts/kokoro/status endpoint (TS doesn't see disk state)
+ *    * kokoro custom → kokoro_endpoint URL required
  *
  *  Returns the list of missing-field labels (UI-readable). Empty list
- *  means the keys are good to go. */
+ *  means the field-level prereqs are met (Kokoro install state is
+ *  validated at Check-keys time, not here). */
 export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
   const missing: string[] = [];
   const provider = getProvider(profile.llm_provider);
@@ -215,7 +256,17 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
       missing.push(`${provider.label} API key`);
     }
   }
-  if (!profile.elevenlabs_api_key) missing.push('ElevenLabs API key');
+  if (profile.tts_provider === 'kokoro') {
+    if (profile.kokoro_mode === 'custom' && !profile.kokoro_endpoint?.trim()) {
+      missing.push('Kokoro endpoint URL');
+    }
+    // 'recommended' mode: install state lives on soul's disk; the
+    // wizard's Check Keys step calls /validate_keys which probes that
+    // state and surfaces "not installed" as a per-row failure with an
+    // Install Kokoro button — no field-level entry needed here.
+  } else {
+    if (!profile.elevenlabs_api_key) missing.push('ElevenLabs API key');
+  }
   return missing;
 }
 
@@ -239,9 +290,16 @@ export interface KeyValidationOutcome {
 }
 
 export interface KeyValidationResult {
-  /** True iff both `llm.ok` and `elevenlabs.ok` are true. */
+  /** True iff both `llm.ok` and `tts.ok` are true. */
   ok: boolean;
   llm: KeyValidationOutcome;
+  /** Provider-agnostic TTS outcome (works for ElevenLabs and Kokoro
+   *  uniformly). Carries a `provider` tag so the wizard can render
+   *  the right label next to the row. */
+  tts: KeyValidationOutcome & { provider: 'elevenlabs' | 'kokoro' };
+  /** Legacy alias — pre-Kokoro versions of the wizard read this. New
+   *  code should use `tts` instead. Soul still emits both for back-
+   *  compat. */
   elevenlabs: KeyValidationOutcome;
 }
 
@@ -259,6 +317,13 @@ export async function validateKeys(
       llm_model:           profile.llm_model,
       llm_api_key:         profile.llm_api_key,
       elevenlabs_api_key:  profile.elevenlabs_api_key,
+      tts_provider:        profile.tts_provider,
+      // Only thread the endpoint when we're in custom mode; soul
+      // treats empty/null as "use local install".
+      kokoro_endpoint:
+        profile.tts_provider === 'kokoro' && profile.kokoro_mode === 'custom'
+          ? (profile.kokoro_endpoint || null)
+          : null,
     }),
   });
   if (!res.ok) {

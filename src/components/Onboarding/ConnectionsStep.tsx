@@ -13,10 +13,10 @@
 // Gemini stays in the schema but ONLY for Google Search grounding,
 // not as a chat provider — its key gets its own field below.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Eye, EyeOff, Lock, Search, ExternalLink,
-  AlertCircle, CheckCircle2, ShieldCheck, Loader2,
+  AlertCircle, CheckCircle2, ShieldCheck, Loader2, Download,
 } from 'lucide-react';
 import { StepHeader } from './StepHeader';
 import { Dropdown } from './Dropdown';
@@ -28,8 +28,17 @@ import {
   type ApiKeysProfile,
   type KeyValidationResult,
   type LLMProviderId,
+  type KokoroMode,
+  type TtsProviderId,
 } from '../../services/apiKeys';
 import { fetchOllamaModels, type SoulProviderModel } from '../../services/providers';
+import {
+  fetchKokoroStatus,
+  startKokoroInstall,
+  labelForVoice,
+  RECOMMENDED_VOICES,
+  type KokoroStatus,
+} from '../../services/kokoro';
 
 interface Props {
   values: ApiKeysProfile;
@@ -46,6 +55,11 @@ interface Props {
    *  pre-gen audio line. Only called on actual check completion, never
    *  on the field-edit reset that also clears validation. */
   onCheckFailed?: () => void;
+  /** Live name from the Vibe step — drives the offline-Kokoro voice
+   *  label so users see "Aria (offline)" instead of the persona's
+   *  default name when they've renamed their assistant. Falls back
+   *  to "Grace" when null/empty. */
+  agentName?: string | null;
 }
 
 const FIELD_BASE: React.CSSProperties = {
@@ -79,6 +93,7 @@ export function ConnectionsStep({
   validated,
   onValidatedChange,
   onCheckFailed,
+  agentName,
 }: Props) {
   const [showLlmKey, setShowLlmKey] = useState(false);
   const [showElevenKey, setShowElevenKey] = useState(false);
@@ -190,7 +205,7 @@ export function ConnectionsStep({
   const missing = missingRequiredKeyFields(values);
 
   // Reset check-result + invalidate the Wizard's "validated" flag any
-  // time a key-relevant field changes. Without this, the user could
+  // time a setup-relevant field changes. Without this, the user could
   // pass Check, then change a key, then Finish with stale validation.
   useEffect(() => {
     setCheck((prev) =>
@@ -198,15 +213,17 @@ export function ConnectionsStep({
         ? prev
         : { state: 'idle', result: null, networkError: null });
     if (validated) onValidatedChange(false);
-    // We intentionally watch the four key-bearing fields directly, not
-    // the whole `values` object — sync_across_devices toggles, vibe
-    // sliders elsewhere, etc. don't invalidate keys.
+    // Watch every field that feeds into /validate_keys. Sync toggles
+    // and vibe sliders elsewhere don't invalidate.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     values.llm_provider,
     values.llm_model,
     values.llm_api_key,
     values.elevenlabs_api_key,
+    values.tts_provider,
+    values.kokoro_mode,
+    values.kokoro_endpoint,
   ]);
 
   const handleCheckKeys = async () => {
@@ -236,7 +253,7 @@ export function ConnectionsStep({
       <div style={{ width: 180, flexShrink: 0, paddingTop: 2 }}>
         <StepHeader
           title="Bring your own keys."
-          subtitle="Pick a chat provider and add your ElevenLabs voice key. Stored encrypted on this device."
+          subtitle="Pick a chat provider and a voice. Anything stored is encrypted on this device."
         />
       </div>
 
@@ -317,21 +334,13 @@ export function ConnectionsStep({
           </FieldLabel>
         )}
 
-        <FieldLabel
-          text="ElevenLabs API key (voice)"
-          trailing={
-            <SignupLink href="https://elevenlabs.io/app/settings/api-keys" />
-          }
-        >
-          <SecretInput
-            value={values.elevenlabs_api_key ?? ''}
-            onChange={setElevenKey}
-            placeholder="sk_…"
-            visible={showElevenKey}
-            onToggleVisible={() => setShowElevenKey((v) => !v)}
-            autoComplete="off"
-          />
-        </FieldLabel>
+        <VoiceSection
+          values={values}
+          onChange={onChange}
+          showElevenKey={showElevenKey}
+          onToggleElevenKey={() => setShowElevenKey((v) => !v)}
+          agentName={agentName}
+        />
 
         {/* Gemini Search key — separate from the chat provider. Only
             used when grounding is enabled; the chat path stays whatever
@@ -627,8 +636,8 @@ function CheckKeysBar({
             outcome={result.llm}
           />
           <KeyResultRow
-            label="ElevenLabs"
-            outcome={result.elevenlabs}
+            label={result.tts?.provider === 'kokoro' ? 'Kokoro' : 'ElevenLabs'}
+            outcome={result.tts ?? result.elevenlabs}
           />
         </div>
       )}
@@ -677,6 +686,479 @@ function KeyResultRow({
 // ---------------------------------------------------------------------
 // Field building blocks
 // ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------
+// Voice section — TTS provider picker.
+//
+// Two top-level options:
+//   * ElevenLabs (cloud)   — needs a BYOK API key, ~real-time, paid
+//   * Kokoro (local, free) — open-weight 82M-param model; either soul
+//                            downloads + runs it in-process, OR the
+//                            user has Kokoro running elsewhere and
+//                            hands us a URL.
+//
+// When Kokoro is picked, a sub-radio toggles between:
+//   * Recommended  — soul downloads model + voices on demand (~325MB
+//                    one-time), runs inference locally; no setup beyond
+//                    a single Install button.
+//   * Custom       — user provides an OpenAI-compat endpoint URL
+//                    (e.g. their own kokoro-fastapi). soul forwards
+//                    every TTS call to that server.
+//
+// Voice picker lists Kokoro's pre-trained voices. Polled live from the
+// soul-side install state; falls back to a curated list while loading.
+// ---------------------------------------------------------------------
+
+function VoiceSection({
+  values,
+  onChange,
+  showElevenKey,
+  onToggleElevenKey,
+  agentName,
+}: {
+  values: ApiKeysProfile;
+  onChange: (next: ApiKeysProfile) => void;
+  showElevenKey: boolean;
+  onToggleElevenKey: () => void;
+  /** User's chosen assistant name from the Vibe step. Drives the
+   *  `grace_kokoro` label ("Aria (offline)" instead of "Grace"). */
+  agentName?: string | null;
+}) {
+  // Kokoro install snapshot from soul. Refetched on mount + while
+  // a download is in flight; cached otherwise. Null until the first
+  // fetch returns (or stays null when soul is unreachable).
+  const [kokoro, setKokoro] = useState<KokoroStatus | null>(null);
+  const pollRef = useRef<number | null>(null);
+
+  // Poll loop — only active when Kokoro is the chosen provider AND
+  // we're in recommended mode. Custom-endpoint users don't need
+  // install state. The interval is rebuilt whenever those conditions
+  // change so a switch from custom→recommended kicks off a fresh
+  // status fetch.
+  useEffect(() => {
+    if (values.tts_provider !== 'kokoro') return;
+    if (values.kokoro_mode !== 'recommended') return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const s = await fetchKokoroStatus();
+        if (cancelled) return;
+        setKokoro(s);
+        if (s.state === 'downloading') {
+          pollRef.current = window.setTimeout(tick, 1500);
+        }
+      } catch {
+        // Soul might still be loading models; try again.
+        if (!cancelled) pollRef.current = window.setTimeout(tick, 3000);
+      }
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      if (pollRef.current !== null) {
+        window.clearTimeout(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [values.tts_provider, values.kokoro_mode]);
+
+  const handleInstallClick = async () => {
+    try {
+      const s = await startKokoroInstall();
+      setKokoro(s);
+      // Kick the polling loop immediately so the progress bar moves
+      // even on the first 1.5 s tick after Install was clicked.
+      const tick = async () => {
+        try {
+          const next = await fetchKokoroStatus();
+          setKokoro(next);
+          if (next.state === 'downloading') {
+            pollRef.current = window.setTimeout(tick, 1000);
+          }
+        } catch { /* transient — outer effect will retry */ }
+      };
+      void tick();
+    } catch (err) {
+      console.warn('[kokoro] install failed', err);
+    }
+  };
+
+  const setTtsProvider = (id: TtsProviderId) => {
+    onChange({ ...values, tts_provider: id });
+  };
+  const setKokoroMode = (m: KokoroMode) => {
+    onChange({ ...values, kokoro_mode: m });
+  };
+  const setKokoroEndpoint = (url: string) => {
+    onChange({ ...values, kokoro_endpoint: url || null });
+  };
+  const setKokoroVoice = (id: string) => {
+    onChange({ ...values, kokoro_voice: id || null });
+  };
+
+  // Voice options — when soul reports installed voices, use those;
+  // otherwise show the curated catalog so the dropdown isn't empty
+  // before the install completes. labelForVoice prettifies whatever
+  // ids we end up with.
+  //
+  // Special case: the offline Kokoro clone (`grace_kokoro`) carries the
+  // user's chosen assistant name from the Vibe step ("Aria (offline)"
+  // for an Aria persona, etc.). Falls back to "Grace (offline)" when
+  // the user hasn't named their assistant yet.
+  const voiceOptions = useMemo(() => {
+    const trimmedName = (agentName ?? '').trim() || 'Grace';
+    const ids = (kokoro?.voices && kokoro.voices.length > 0)
+      ? kokoro.voices
+      : RECOMMENDED_VOICES.map((v) => v.id);
+    return ids.map((id) => ({
+      id,
+      label: id === 'grace_kokoro'
+        ? `${trimmedName} (offline)`
+        : labelForVoice(id),
+    }));
+  }, [kokoro?.voices, agentName]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Provider picker — single row at the top of the section. */}
+      <FieldLabel text="Voice provider">
+        <Dropdown
+          value={values.tts_provider}
+          onChange={(v) => setTtsProvider(v as TtsProviderId)}
+          options={[
+            { id: 'elevenlabs', label: 'ElevenLabs (cloud)' },
+            { id: 'kokoro',     label: 'Kokoro (local, free)' },
+          ]}
+        />
+      </FieldLabel>
+
+      {/* ElevenLabs branch — original BYOK key field. */}
+      {values.tts_provider === 'elevenlabs' && (
+        <FieldLabel
+          text="ElevenLabs API key"
+          trailing={
+            <SignupLink href="https://elevenlabs.io/app/settings/api-keys" />
+          }
+        >
+          <SecretInput
+            value={values.elevenlabs_api_key ?? ''}
+            onChange={(v) => onChange({ ...values, elevenlabs_api_key: v || null })}
+            placeholder="sk_…"
+            visible={showElevenKey}
+            onToggleVisible={onToggleElevenKey}
+            autoComplete="off"
+          />
+        </FieldLabel>
+      )}
+
+      {/* Kokoro branch — mode picker + install panel / endpoint
+          input + voice dropdown. */}
+      {values.tts_provider === 'kokoro' && (
+        <>
+          <KokoroModePicker
+            mode={values.kokoro_mode}
+            onChange={setKokoroMode}
+          />
+          {values.kokoro_mode === 'recommended' && (
+            <KokoroInstallPanel
+              status={kokoro}
+              onInstall={handleInstallClick}
+            />
+          )}
+          {values.kokoro_mode === 'custom' && (
+            <FieldLabel
+              text="Kokoro endpoint URL"
+            >
+              <input
+                type="url"
+                value={values.kokoro_endpoint ?? ''}
+                onChange={(e) => setKokoroEndpoint(e.target.value)}
+                placeholder="http://localhost:8880"
+                spellCheck={false}
+                autoComplete="off"
+                style={FIELD_BASE}
+                onFocus={(e) => applyFocus(e.target)}
+                onBlur={(e) => applyBlur(e.target)}
+              />
+            </FieldLabel>
+          )}
+          <FieldLabel text="Voice">
+            <Dropdown
+              value={values.kokoro_voice ?? ''}
+              onChange={setKokoroVoice}
+              placeholder="Pick a voice"
+              options={voiceOptions}
+            />
+          </FieldLabel>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Kokoro mode picker — radio-style toggle between "recommended" and
+// "custom endpoint". Two cards, side by side; the active one gets
+// the accent border.
+// ---------------------------------------------------------------------
+
+function KokoroModePicker({
+  mode,
+  onChange,
+}: {
+  mode: KokoroMode;
+  onChange: (m: KokoroMode) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr',
+        gap: 8,
+      }}
+    >
+      <ModeCard
+        active={mode === 'recommended'}
+        onClick={() => onChange('recommended')}
+        title="Recommended"
+        body="Download Kokoro and run it locally. ~325 MB one time, no API cost."
+      />
+      <ModeCard
+        active={mode === 'custom'}
+        onClick={() => onChange('custom')}
+        title="My own endpoint"
+        body="I have Kokoro running elsewhere — point soul at the URL."
+      />
+    </div>
+  );
+}
+
+function ModeCard({
+  active,
+  onClick,
+  title,
+  body,
+}: {
+  active: boolean;
+  onClick: () => void;
+  title: string;
+  body: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'flex-start',
+        gap: 4,
+        padding: '10px 12px',
+        borderRadius: 10,
+        background: active ? 'var(--accent-dim)' : 'rgba(255, 255, 255, 0.025)',
+        border: active
+          ? '1px solid var(--accent-strong)'
+          : '1px solid var(--glass-border)',
+        color: 'var(--text-primary)',
+        fontFamily: 'inherit',
+        textAlign: 'left',
+        cursor: 'pointer',
+        boxShadow: active
+          ? '0 0 14px -6px rgba(196, 68, 68, 0.45)'
+          : 'none',
+        transition: 'all 0.18s var(--ease-out-quart)',
+      }}
+      onMouseEnter={(e) => {
+        if (active) return;
+        e.currentTarget.style.borderColor = 'var(--glass-border-focus)';
+      }}
+      onMouseLeave={(e) => {
+        if (active) return;
+        e.currentTarget.style.borderColor = 'var(--glass-border)';
+      }}
+    >
+      <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '-0.005em' }}>
+        {title}
+      </span>
+      <span style={{
+        fontSize: 11.5,
+        color: 'var(--text-secondary)',
+        lineHeight: 1.4,
+        letterSpacing: '0.005em',
+      }}>
+        {body}
+      </span>
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Kokoro install panel — three states tied to the soul-side state
+// machine:
+//   * status null / state idle   → show Install button (~325 MB)
+//   * state downloading           → progress bar with bytes_done/total
+//   * state installed             → green tick + the model version
+//   * state error                 → error message + Retry button
+// ---------------------------------------------------------------------
+
+function KokoroInstallPanel({
+  status,
+  onInstall,
+}: {
+  status: KokoroStatus | null;
+  onInstall: () => void;
+}) {
+  // Conservative defaults while we wait for the first /status response.
+  const state = status?.state ?? 'idle';
+  const error = status?.error ?? null;
+  const progress = status?.progress;
+
+  const pct = progress && progress.bytes_total > 0
+    ? Math.min(100, Math.max(0, (progress.bytes_done / progress.bytes_total) * 100))
+    : 0;
+
+  const showInstallButton = state === 'idle' || state === 'error';
+  const headerColor =
+    state === 'installed' ? '#7fc97f'
+    : state === 'error' ? 'var(--accent)'
+    : 'var(--text-secondary)';
+
+  let header: string;
+  if (state === 'installed') header = 'Kokoro is installed and ready.';
+  else if (state === 'downloading')
+    header = progress?.phase === 'voices'
+      ? 'Downloading voices…'
+      : 'Downloading Kokoro model…';
+  else if (state === 'error') header = 'Install failed.';
+  else header = 'Kokoro is not installed yet.';
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        padding: '12px 14px',
+        background: state === 'installed'
+          ? 'rgba(96, 178, 96, 0.06)'
+          : 'rgba(255, 255, 255, 0.025)',
+        border: state === 'installed'
+          ? '1px solid rgba(96, 178, 96, 0.32)'
+          : '1px solid var(--glass-border)',
+        borderRadius: 10,
+        transition: 'background 0.18s var(--ease-out-quart), border-color 0.18s var(--ease-out-quart)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {state === 'installed' ? (
+          <CheckCircle2 size={15} strokeWidth={2} aria-hidden color="#7fc97f" />
+        ) : state === 'error' ? (
+          <AlertCircle size={15} strokeWidth={2} aria-hidden color="var(--accent)" />
+        ) : (
+          <Download size={15} strokeWidth={2} aria-hidden color={headerColor} />
+        )}
+        <span style={{
+          fontSize: 13,
+          color: 'var(--text-primary)',
+          fontWeight: 500,
+          flex: 1,
+        }}>
+          {header}
+        </span>
+        {showInstallButton && (
+          <button
+            type="button"
+            onClick={onInstall}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '7px 14px',
+              borderRadius: 10,
+              border: 'none',
+              background: '#ffffff',
+              color: 'rgba(20, 20, 20, 0.92)',
+              fontFamily: 'inherit',
+              fontSize: 12.5,
+              fontWeight: 600,
+              letterSpacing: '0.005em',
+              cursor: 'pointer',
+              boxShadow:
+                '0 4px 14px -4px rgba(196, 68, 68, 0.45), 0 2px 6px rgba(0, 0, 0, 0.25)',
+              transition: 'transform 0.12s var(--ease-out-quart), box-shadow 0.18s var(--ease-out-quart)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = 'translateY(-1px)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'translateY(0)';
+            }}
+          >
+            <Download size={13} strokeWidth={2.2} />
+            {state === 'error' ? 'Retry install' : 'Install Kokoro (~325 MB)'}
+          </button>
+        )}
+      </div>
+
+      {state === 'downloading' && progress && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{
+            position: 'relative',
+            width: '100%',
+            height: 6,
+            background: 'rgba(255, 255, 255, 0.06)',
+            borderRadius: 3,
+            overflow: 'hidden',
+          }}>
+            <div style={{
+              position: 'absolute',
+              inset: 0,
+              width: `${pct}%`,
+              background: 'var(--accent)',
+              borderRadius: 3,
+              transition: 'width 0.25s var(--ease-out-quart)',
+            }} />
+          </div>
+          <span style={{
+            fontSize: 11,
+            color: 'var(--text-secondary)',
+            letterSpacing: '0.01em',
+          }}>
+            {Math.round(pct)}% · {formatBytes(progress.bytes_done)} of {formatBytes(progress.bytes_total)}
+          </span>
+        </div>
+      )}
+
+      {state === 'error' && error && (
+        <span style={{
+          fontSize: 11.5,
+          color: 'var(--accent)',
+          lineHeight: 1.4,
+        }}>
+          {error}
+        </span>
+      )}
+
+      {state === 'installed' && status?.model_version && (
+        <span style={{
+          fontSize: 11,
+          color: 'var(--text-secondary)',
+          letterSpacing: '0.01em',
+        }}>
+          Model version {status.model_version}, {status.voices.length} voices available.
+        </span>
+      )}
+    </div>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
 
 function FieldLabel({
   text,

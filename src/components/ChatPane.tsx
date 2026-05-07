@@ -237,7 +237,7 @@ export function ChatPane({
             }}
           >
             {items.length === 0 ? (
-              <EmptyState personaName={personaName} />
+              <EmptyState />
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column' }}>
                 <AnimatePresence initial={false}>
@@ -505,7 +505,7 @@ function ToolEventRow({
 // Empty state
 // ---------------------------------------------------------------------
 
-function EmptyState({ personaName }: { personaName: string }) {
+function EmptyState() {
   return (
     <div
       style={{
@@ -540,16 +540,6 @@ function EmptyState({ personaName }: { personaName: string }) {
         }}
       >
         nothing yet
-      </div>
-      <div
-        style={{
-          fontSize: 11,
-          color: 'var(--text-ghost)',
-          lineHeight: 1.5,
-          maxWidth: 200,
-        }}
-      >
-        Say something to {personaName}, your conversation will appear here.
       </div>
     </div>
   );
