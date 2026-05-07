@@ -151,6 +151,80 @@ export async function chatViaSoul(
 
 
 // ---------------------------------------------------------------------
+// Idle driver
+// ---------------------------------------------------------------------
+//
+// Soul's `/idle` endpoint runs a tiny LLM call (mood/behavior token) +
+// Text2Face only — no TTS, no LipSync. UnClaw periodically pings it to
+// produce ambient micro-expressions while the user isn't talking.
+//
+// BYOK: idle uses the SAME llm_model + llm_api_key the user picked for
+// chat. There's no separate idle config. Soul refuses /idle without an
+// explicit llm_model in the body — onboarding owns the choice, no
+// server-side default. We pull from `apiKeys` per call so a wizard
+// edit propagates without an app restart.
+
+export interface SoulIdleResult {
+  type: 'idle' | 'idle_skipped';
+  id?: string;
+  mood?: string;
+  behavior?: string;
+  flavor?: string;
+  duration?: number;
+  fps?: number;
+  n_frames?: number;
+  generation_ms?: number;
+  reason?: string;
+  [k: string]: unknown;
+}
+
+/** POST /idle with the user's llm_model + key. Soft-fails (returns
+ *  null) on any transport / 4xx error so the caller's polling loop
+ *  doesn't break — idle is fire-and-forget. */
+export async function fireIdle(opts: {
+  duration_s?: number;
+  t2f_guidance?: number;
+  t2f_smooth?: number;
+  fade_in_ms?: number;
+  fade_out_ms?: number;
+  blink_rate?: number;
+  gaze_activity?: number;
+} = {}): Promise<SoulIdleResult | null> {
+  const keys = await fetchApiKeys();
+  if (!keys.llm_model) return null;     // no model picked yet → skip
+  const body: Record<string, unknown> = {
+    duration_s:   opts.duration_s   ?? 3.5 + Math.random() * 1.5,
+    t2f_guidance: opts.t2f_guidance ?? 1.2,
+    t2f_smooth:   opts.t2f_smooth   ?? 5,
+    fade_in_ms:   opts.fade_in_ms   ?? 50,
+    fade_out_ms:  opts.fade_out_ms  ?? 250,
+    blink_rate:   opts.blink_rate   ?? 0,
+    gaze_activity: opts.gaze_activity ?? 0,
+    llm_model: keys.llm_model,
+  };
+  // Cloud providers need the key; Ollama runs locally so skip.
+  if (keys.llm_api_key && keys.llm_provider !== 'ollama') {
+    body.llm_api_key = keys.llm_api_key;
+  }
+  try {
+    const res = await fetch(`${SOUL_URL}/idle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      console.warn(`[idle] soul /idle ${res.status}`);
+      return null;
+    }
+    return (await res.json()) as SoulIdleResult;
+  } catch (err) {
+    console.warn('[idle] /idle fetch failed', err);
+    return null;
+  }
+}
+
+
+// ---------------------------------------------------------------------
 // Streaming chat (Kokoro local only)
 // ---------------------------------------------------------------------
 //

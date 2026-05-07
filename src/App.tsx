@@ -18,7 +18,7 @@ import { useChatMemory, type Turn } from './hooks/useChatMemory';
 import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
-import { chatViaSoul, streamChatViaSoul, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
+import { chatViaSoul, streamChatViaSoul, fireIdle, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
 import { pollNextEscalation } from './services/escalation';
 import { listReminders } from './services/reminders';
 import { expressFace } from './services/express';
@@ -460,7 +460,13 @@ export function App() {
    *  dispatchChatResult sends but skips memory + the speak-finished
    *  timer — those happen once per stream (memory on first chunk, timer
    *  on the final-chunk total_duration). Action animations are also
-   *  scoped to chunk 0 since soul only attaches `action` there. */
+   *  scoped to chunk 0 since soul only attaches `action` there.
+   *
+   *  Also fires POST /broadcast/{id} so the soul portal HTML's /ws
+   *  subscriber updates the curves + audio waveform display in
+   *  lockstep with playback. Soul stages chunks with broadcast=False
+   *  to keep UE from auto-fetching at synthesis rate; the renderer is
+   *  the authority on when each chunk plays. */
   const dispatchChatChunk = useCallback((chunk: SoulChatChunk) => {
     if (!pixelStreaming) return;
     pixelStreaming.emitUIInteraction({
@@ -474,6 +480,16 @@ export function App() {
       Behavior: chunk.behavior ?? '',
       Timestamp: new Date().toISOString(),
     });
+    // Fire the portal's WS broadcast so its curves/waveform display
+    // tracks playback. Best-effort — failure is logged, never thrown,
+    // so a flaky portal subscriber never breaks the chat path.
+    if (chunk.id) {
+      void fetch(`http://127.0.0.1:8765/broadcast/${chunk.id}`, {
+        method: 'POST',
+      }).catch((err) => {
+        console.warn('[chat] /broadcast ping failed', err);
+      });
+    }
     if (chunk.chunk_idx === 0 && chunk.action) {
       const action = chunk.action;
       const isAnim = action.name === 'give_a_kiss'
@@ -774,6 +790,7 @@ export function App() {
       let firstChunkArrivedAt = 0;
       let memoryAdded = false;
       let totalDuration = 0;
+      let totalChunks = 0;
       let escalationFallback: SoulChatChunk | null = null;
       try {
         for await (const chunk of streamChatViaSoul(trimmed, {
@@ -787,6 +804,7 @@ export function App() {
           }
           if (chunk.is_final) {
             totalDuration = chunk.total_duration ?? totalDuration;
+            totalChunks = chunk.n_chunks ?? totalChunks;
             continue;
           }
           // First non-final chunk anchors the timeline. Add memory
@@ -806,8 +824,15 @@ export function App() {
           // Schedule. Negative deltas (chunk arrived after its play
           // time) dispatch immediately — happens when synth is slower
           // than the audio it produced, i.e. the buffer is empty.
+          // INTER_CHUNK_GAP_MS adds a small breath between chunks so
+          // sentence boundaries get natural prosodic spacing instead
+          // of butting up against each other; ~150 ms matches the
+          // pause length the LLM-formatted text usually implies via
+          // sentence-final punctuation.
+          const INTER_CHUNK_GAP_MS = 150;
           const playAt = firstChunkArrivedAt
-            + ((chunk.start_offset_s ?? 0) * 1000);
+            + ((chunk.start_offset_s ?? 0) * 1000)
+            + (chunk.chunk_idx * INTER_CHUNK_GAP_MS);
           const delay = Math.max(0, playAt - now);
           const tid = window.setTimeout(() => {
             pendingChunkTimeoutsRef.current.delete(tid);
@@ -830,14 +855,18 @@ export function App() {
           }
         } else {
           // Set the AI-speaking timer using the cumulative duration
-          // reported on the final chunk. Once that's elapsed the
-          // notify hook fires and the voice agent can resume.
-          const speakSec = totalDuration > 0 ? totalDuration : 4;
+          // reported on the final chunk PLUS the inter-chunk gaps the
+          // scheduler inserted (n_chunks - 1 gaps × 150 ms each). Once
+          // that's elapsed the notify hook fires and the voice agent
+          // can resume.
+          const INTER_CHUNK_GAP_MS = 150;
+          const gapsMs = Math.max(0, totalChunks - 1) * INTER_CHUNK_GAP_MS;
+          const speakMs = (totalDuration > 0 ? totalDuration * 1000 : 4000) + gapsMs;
           const timerId = window.setTimeout(() => {
             pendingChunkTimeoutsRef.current.delete(timerId);
             isAISpeakingRef.current = false;
             notifyAIFinishedRef.current();
-          }, Math.round(speakSec * 1000));
+          }, Math.round(speakMs));
           pendingChunkTimeoutsRef.current.add(timerId);
         }
       } catch (err) {
@@ -875,6 +904,54 @@ export function App() {
       setIsSending(false);
     }
   }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream]);
+
+  // Idle micro-expression driver. Fires POST /idle on a jittered
+  // timer (~30-50s mean) to keep Grace alive when the user isn't
+  // talking. UnClaw is the canonical idle driver — soul refuses /idle
+  // without an explicit llm_model in the body, which `fireIdle` pulls
+  // from the user's apiKeys (the SAME model + key chat uses).
+  //
+  // Gates (matching soul's own short-circuits + a couple renderer-side
+  // gates that soul can't observe):
+  //   * stream not connected         — pointless, no UE to render to
+  //   * isSending                    — chat in flight
+  //   * isAISpeakingRef              — Grace is still mid-reply
+  //   * voice listening              — user is talking; idle would
+  //                                     compete for audio focus
+  //   * wizardMode                   — onboarding overlay is up
+  //
+  // Soul itself also refuses to fire when no /ws clients are
+  // connected, when a chat is in flight, when audio is still playing
+  // (`_speaking_until_ts`), or when escalation is running — so any
+  // race we miss client-side gets caught server-side too.
+  useEffect(() => {
+    if (!isConnected) return undefined;
+    if (wizardMode) return undefined;
+    let cancelled = false;
+    let timerId: number | null = null;
+    const tick = async () => {
+      if (cancelled) return;
+      const ok = !isSending
+        && !isAISpeakingRef.current
+        && !voice.isListening
+        && !escalating;
+      if (ok) {
+        try { await fireIdle(); } catch { /* fireIdle soft-fails */ }
+      }
+      if (cancelled) return;
+      // Jitter [25s, 50s] — natural between-thoughts spacing without
+      // a metronome feel.
+      const wait = 25_000 + Math.random() * 25_000;
+      timerId = window.setTimeout(tick, wait);
+    };
+    // First fire after a small initial delay so a cold app boot
+    // isn't immediately punctuated by an idle expression.
+    timerId = window.setTimeout(tick, 8_000);
+    return () => {
+      cancelled = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+    };
+  }, [isConnected, wizardMode, isSending, voice.isListening, escalating]);
 
   // Slash-command animation dispatcher — hands a ready-to-go UE
   // descriptor to the dock so it can fire `/dance`, `/kiss`, `/hello`
