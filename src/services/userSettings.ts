@@ -112,12 +112,45 @@ export async function deleteSettings(): Promise<void> {
 
 // ---- Onboarding helpers (unchanged from the old profile module) -----
 
-/** POST /onboarding/welcome — fixed welcome line on wizard mount. */
+/** Build the BYOK fields shared by both onboarding endpoints. The wizard's
+ *  pick (provider, key, voice) must drive every TTS render — no env
+ *  fallbacks on the soul side, so an empty body would 400. Caller is
+ *  expected to have already prompted for the keys (or be deep enough
+ *  in the wizard that they exist). */
+async function _onboardingBodyFromKeys(): Promise<Record<string, unknown>> {
+  const { fetchApiKeys } = await import('./apiKeys');
+  const keys = await fetchApiKeys();
+  const body: Record<string, unknown> = {
+    tts_provider: keys.tts_provider,
+    voice_id:
+      keys.tts_provider === 'kokoro' ? keys.kokoro_voice :
+      keys.tts_provider === 'qwen3'  ? keys.qwen3_voice :
+      undefined,
+  };
+  if (keys.tts_provider === 'elevenlabs' && keys.elevenlabs_api_key) {
+    body.elevenlabs_api_key = keys.elevenlabs_api_key;
+  }
+  if (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'custom'
+      && keys.kokoro_endpoint) {
+    body.kokoro_endpoint = keys.kokoro_endpoint;
+  }
+  if (keys.llm_model) body.llm_model = keys.llm_model;
+  if (keys.llm_provider) body.llm_provider = keys.llm_provider;
+  if (keys.llm_api_key && keys.llm_provider !== 'ollama') {
+    body.llm_api_key = keys.llm_api_key;
+  }
+  return body;
+}
+
+/** POST /onboarding/welcome — fixed welcome line on wizard mount.
+ *  Sends the user's BYOK TTS pick so the cached audio matches the
+ *  voice they actually selected (cache is keyed by provider+voice). */
 export async function fetchOnboardingWelcome(): Promise<SoulChatResult> {
+  const body = await _onboardingBodyFromKeys();
   const res = await fetch(`${SOUL_URL}/onboarding/welcome`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const err = await res.text().catch(() => res.statusText);
@@ -128,16 +161,17 @@ export async function fetchOnboardingWelcome(): Promise<SoulChatResult> {
   return (await res.json()) as SoulChatResult;
 }
 
-/** POST /onboarding/greet — personalized first greeting after settings save. */
+/** POST /onboarding/greet — personalized first greeting after settings save.
+ *  Threads the user's full BYOK profile (LLM + TTS + voice). */
 export async function fetchOnboardingGreet(
   systemExtension?: string,
 ): Promise<SoulChatResult> {
+  const body = await _onboardingBodyFromKeys();
+  if (systemExtension) body.system_extension = systemExtension;
   const res = await fetch(`${SOUL_URL}/onboarding/greet`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(
-      systemExtension ? { system_extension: systemExtension } : {},
-    ),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const err = await res.text().catch(() => res.statusText);
