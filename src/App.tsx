@@ -1253,9 +1253,30 @@ export function App() {
     if (wizardMode) return undefined;
     let cancelled = false;
     let timerId: number | null = null;
+    // Re-checks soul's /settings every tick. The portal's slider /
+    // pause button mutate that registry, and this is how UnClaw obeys
+    // them without a separate poll loop. Lag is bounded by the current
+    // tick interval (worst case ~one period after a change).
+    const SOUL_URL = 'http://127.0.0.1:8765';
+    const PAUSE_REPOLL_MS = 8_000;        // recheck while paused/disabled
+    const DEFAULT_PERIOD_S = 37;          // mirror of soul's default
     const tick = async () => {
       if (cancelled) return;
-      const ok = !isSending
+      // Pull idle config from soul each tick. Network failures fall
+      // back to the default period so a flaky soul doesn't freeze idle.
+      let periodS = DEFAULT_PERIOD_S;
+      let paused = false;
+      try {
+        const r = await fetch(`${SOUL_URL}/settings`);
+        if (r.ok) {
+          const s = await r.json();
+          if (typeof s.idle_period_s === 'number') periodS = s.idle_period_s;
+          if (typeof s.idle_paused === 'boolean')  paused = s.idle_paused;
+        }
+      } catch { /* soft-fail to defaults */ }
+      const enabled = !paused && periodS > 0;
+      const ok = enabled
+        && !isSending
         && !isAISpeakingRef.current
         && !voice.isListening
         && !escalating;
@@ -1263,10 +1284,15 @@ export function App() {
         try { await fireIdle(); } catch { /* fireIdle soft-fails */ }
       }
       if (cancelled) return;
-      // Jitter [25s, 50s] — natural between-thoughts spacing without
-      // a metronome feel.
-      const wait = 25_000 + Math.random() * 25_000;
-      timerId = window.setTimeout(tick, wait);
+      // When idle is disabled (paused or period=0) we still cycle, on a
+      // shorter cadence, so a "resume" on the portal propagates fast.
+      // When enabled, jitter [0.67x .. 1.34x] off the configured mean
+      // (matches soul's old portal-side jitter formula and avoids a
+      // metronome feel).
+      const wait = enabled
+        ? periodS * 1000 * (0.67 + Math.random() * 0.67)
+        : PAUSE_REPOLL_MS;
+      timerId = window.setTimeout(tick, Math.max(3_000, wait));
     };
     // First fire after a small initial delay so a cold app boot
     // isn't immediately punctuated by an idle expression.
