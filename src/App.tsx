@@ -414,8 +414,21 @@ export function App() {
     if (result.response) {
       // memory.add returns the created Turn (with its generated ts)
       // so callers can correlate side-data (e.g. tools-used labels)
-      // with the assistant turn that just landed.
-      addedTurn = memory.add('assistant', result.response);
+      // with the assistant turn that just landed. Web citations from
+      // an escalation web_search ride along on `result.web_sources`
+      // — attach them to this turn so the chat pane can render
+      // attribution chips. Sources never go back to the LLM (memory's
+      // getHistory strips them).
+      const rawSources = (result as { web_sources?: unknown }).web_sources;
+      const sources = Array.isArray(rawSources)
+        ? (rawSources as Array<{ uri?: unknown; title?: unknown }>)
+            .filter(s => typeof s?.uri === 'string' && (s.uri as string).length > 0)
+            .map(s => ({
+              uri: s.uri as string,
+              title: typeof s.title === 'string' && s.title ? (s.title as string) : (s.uri as string),
+            }))
+        : undefined;
+      addedTurn = memory.add('assistant', result.response, sources);
       // Cache the latest response so a barge-in can pass it as
       // "what I was just saying" context to the LLM.
       lastResponseRef.current = result.response;

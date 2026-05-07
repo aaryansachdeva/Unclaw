@@ -8,6 +8,16 @@ export interface Turn {
   /** Wall-clock when this turn happened. Useful for debugging + future
    *  features ("you said X two days ago"). Not sent to the LLM. */
   ts: number;
+  /** Citations from any web_search calls during the escalation that
+   *  produced this turn. Populated only on assistant turns; the chat
+   *  pane renders them as small chips under the message. NOT included
+   *  in `getHistory` — the LLM should never re-ingest URLs. */
+  sources?: WebSource[];
+}
+
+export interface WebSource {
+  uri: string;
+  title: string;
 }
 
 const STORAGE_PREFIX = 'unclaw.chat.';
@@ -57,8 +67,13 @@ export interface ChatMemoryAPI {
   /** Append a turn and persist. Returns the created turn (with its
    *  generated ts) so callers can correlate side data — e.g. attaching
    *  tool-usage labels to the assistant turn that just landed. Returns
-   *  null when content was empty after trim. */
-  add: (role: 'user' | 'assistant', content: string) => Turn | null;
+   *  null when content was empty after trim. `sources` attaches web
+   *  citations from an escalation web_search to an assistant turn. */
+  add: (
+    role: 'user' | 'assistant',
+    content: string,
+    sources?: WebSource[],
+  ) => Turn | null;
   /**
    * Return the last `limit` turns in the schema soul/Groq expect:
    * `[{role, content}, ...]`. Used for the `history` field of /chat.
@@ -88,10 +103,11 @@ export function useChatMemory(personaId: string): ChatMemoryAPI {
     turnsRef.current = next;
   }, [personaId]);
 
-  const add = useCallback<ChatMemoryAPI['add']>((role, content) => {
+  const add = useCallback<ChatMemoryAPI['add']>((role, content, sources) => {
     const trimmed = content.trim();
     if (!trimmed) return null;
     const turn: Turn = { role, content: trimmed, ts: Date.now() };
+    if (sources && sources.length > 0) turn.sources = sources;
     const next = [...turnsRef.current, turn].slice(-MAX_TURNS);
     turnsRef.current = next;
     setTurns(next);

@@ -435,7 +435,9 @@ function MessageRow({
 
   // Assistant: plain left-aligned text, no bubble, no stripe. The
   // user-bubble alignment (right) vs assistant text-flush-left is
-  // enough directional contrast on its own.
+  // enough directional contrast on its own. Citations from any
+  // web_search call land below as small `via host.com` chips —
+  // attribution without dragging the eye away from the prose.
   return (
     <div
       style={{
@@ -449,6 +451,64 @@ function MessageRow({
       }}
     >
       {turn.content}
+      {turn.sources && turn.sources.length > 0 && (
+        <SourceChips sources={turn.sources} />
+      )}
+    </div>
+  );
+}
+
+function SourceChips({ sources }: { sources: NonNullable<Turn['sources']> }) {
+  // Hosts only, deduped, capped at 4 — the user reads names, not URLs.
+  // Vertex grounding-redirect URIs all resolve to vertexaisearch.cloud.google.com,
+  // which is useless attribution; fall back to the title in that case.
+  const items = sources.map(s => {
+    let host = '';
+    try { host = new URL(s.uri).hostname.replace(/^www\./, ''); } catch {}
+    const isVertex = host.includes('vertexaisearch.cloud.google.com');
+    return {
+      uri: s.uri,
+      label: isVertex ? (s.title || host) : (host || s.title || s.uri),
+    };
+  });
+  const seen = new Set<string>();
+  const unique = items.filter(it => {
+    if (seen.has(it.label)) return false;
+    seen.add(it.label);
+    return true;
+  }).slice(0, 4);
+  if (unique.length === 0) return null;
+  return (
+    <div
+      style={{
+        marginTop: 6,
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 4,
+      }}
+    >
+      {unique.map((s, i) => (
+        <a
+          key={i}
+          href={s.uri}
+          target="_blank"
+          rel="noreferrer noopener"
+          title={s.uri}
+          style={{
+            fontSize: 10.5,
+            padding: '2px 7px',
+            borderRadius: 999,
+            background: 'rgba(255, 255, 255, 0.04)',
+            border: '1px solid rgba(255, 255, 255, 0.06)',
+            color: 'var(--text-secondary)',
+            textDecoration: 'none',
+            letterSpacing: '-0.002em',
+            cursor: 'pointer',
+          }}
+        >
+          {s.label}
+        </a>
+      ))}
     </div>
   );
 }
