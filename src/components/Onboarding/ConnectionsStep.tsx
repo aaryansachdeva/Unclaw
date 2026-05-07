@@ -112,7 +112,12 @@ export function ConnectionsStep({
 }: Props) {
   const showLlm = mode === 'all' || mode === 'llm';
   const showVoice = mode === 'all' || mode === 'voice';
-  const showVerify = mode === 'all' || mode === 'voice';
+  // Verify panel is on both 'llm' and 'voice' pages now (and the
+  // legacy 'all' mode). Each page verifies its own scope:
+  //   * llm page  → LLM provider key (and agentic key when on)
+  //   * voice page → TTS provider readiness (key or local install)
+  //   * all       → both, single panel
+  const showVerify = mode === 'all' || mode === 'llm' || mode === 'voice';
   const [showLlmKey, setShowLlmKey] = useState(false);
   const [showElevenKey, setShowElevenKey] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
@@ -220,21 +225,47 @@ export function ConnectionsStep({
   // Live validation: which required keys are still missing? Drives the
   // inline "you still need…" panel below + the Wizard's Finish gate.
   // Recomputed on every keystroke (cheap; just a few field reads).
-  const missing = missingRequiredKeyFields(values);
+  // Filtered by mode so the LLM page only flags LLM/agentic gaps and
+  // the voice page only flags voice gaps.
+  const allMissing = missingRequiredKeyFields(values);
+  const missing = allMissing.filter((field) => {
+    if (mode === 'all') return true;
+    const isLlmField = field === 'LLM provider'
+      || field === 'Model'
+      || field === 'Agentic model'
+      || field === 'OpenAI key for agentic'
+      || (field.endsWith(' API key') && field !== 'ElevenLabs API key');
+    return mode === 'llm' ? isLlmField : !isLlmField;
+  });
 
   // Reset check-result + invalidate the Wizard's "validated" flag any
   // time a setup-relevant field changes. Without this, the user could
-  // pass Check, then change a key, then Finish with stale validation.
+  // pass Verify, then change a key, then Finish with stale validation.
+  // Each page invalidates only when ITS OWN scope's fields change —
+  // editing the voice provider doesn't invalidate the LLM verify.
   useEffect(() => {
     setCheck((prev) =>
       prev.state === 'idle' && prev.result === null
         ? prev
         : { state: 'idle', result: null, networkError: null });
     if (validated) onValidatedChange(false);
-    // Watch every field that feeds into /validate_keys. Sync toggles
-    // and vibe sliders elsewhere don't invalidate.
+    // Watch only the fields THIS scope cares about. The full union
+    // is still listed for `mode === 'all'` (legacy single-page).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
+  }, mode === 'llm' ? [
+    values.llm_provider,
+    values.llm_model,
+    values.llm_api_key,
+    values.agentic_enabled,
+    values.agentic_use_same_as_chat,
+    values.agentic_model,
+    values.agentic_api_key,
+  ] : mode === 'voice' ? [
+    values.elevenlabs_api_key,
+    values.tts_provider,
+    values.kokoro_mode,
+    values.kokoro_endpoint,
+  ] : [
     values.llm_provider,
     values.llm_model,
     values.llm_api_key,
@@ -242,6 +273,10 @@ export function ConnectionsStep({
     values.tts_provider,
     values.kokoro_mode,
     values.kokoro_endpoint,
+    values.agentic_enabled,
+    values.agentic_use_same_as_chat,
+    values.agentic_model,
+    values.agentic_api_key,
   ]);
 
   const handleCheckKeys = async () => {
@@ -249,17 +284,20 @@ export function ConnectionsStep({
     try {
       const result = await validateKeys(values);
       setCheck({ state: 'done', result, networkError: null });
-      onValidatedChange(result.ok);
-      // Per-key validation failure (provider rejected a key) — Wizard
-      // dispatches the pre-gen "something's off" audio line so Grace
-      // tells the user out loud. Network/transport failures (catch
-      // branch below) skip the cue since the issue is soul/network,
-      // not the user's key.
-      if (!result.ok) onCheckFailed?.();
+      // Compute scope-relevant ok. The /validate_keys call always
+      // probes everything (cheap; one round trip), but each page's
+      // pass criterion is local: LLM page passes when LLM probes
+      // (and agentic, when enabled) succeed; voice page passes
+      // when TTS readiness succeeds.
+      const llmOk = result.llm.ok
+        && (!values.agentic_enabled || (result.agentic?.ok ?? true));
+      const voiceOk = result.tts?.ok ?? result.elevenlabs?.ok ?? false;
+      const scopeOk = mode === 'llm' ? llmOk
+                    : mode === 'voice' ? voiceOk
+                    : (llmOk && voiceOk);
+      onValidatedChange(scopeOk);
+      if (!scopeOk) onCheckFailed?.();
     } catch (err) {
-      // Soul is down, network is dead, etc. Surface a single error
-      // string above the per-row icons so the user understands the
-      // transport failure isn't about their key.
       const message = err instanceof Error ? err.message : 'check failed';
       setCheck({ state: 'done', result: null, networkError: message });
       onValidatedChange(false);
@@ -468,6 +506,8 @@ export function ConnectionsStep({
             check={check}
             providerLabel={provider?.label ?? 'LLM'}
             onCheck={handleCheckKeys}
+            scope={mode}
+            agenticEnabled={values.agentic_enabled}
           />
         ))}
       </div>
@@ -485,6 +525,8 @@ function CheckKeysBar({
   check,
   providerLabel,
   onCheck,
+  scope = 'all',
+  agenticEnabled = false,
 }: {
   check: {
     state: 'idle' | 'checking' | 'done';
@@ -493,6 +535,14 @@ function CheckKeysBar({
   };
   providerLabel: string;
   onCheck: () => void | Promise<void>;
+  /** Which result rows to render. `'llm'` shows the LLM provider
+   *  (and Agentic when enabled); `'voice'` shows the TTS row;
+   *  `'all'` shows both. Pass-through from ConnectionsStep's mode. */
+  scope?: 'llm' | 'voice' | 'all';
+  /** When true AND scope includes LLM, render an Agentic row from
+   *  result.agentic. When the soul-side probe lands, this row will
+   *  show the OpenAI-key check outcome. */
+  agenticEnabled?: boolean;
 }) {
   const checking = check.state === 'checking';
   const result = check.result;
@@ -660,7 +710,8 @@ function CheckKeysBar({
         </div>
       )}
 
-      {/* Per-key result rows. Only rendered after a check completes. */}
+      {/* Per-key result rows. Only rendered after a check completes,
+          and only the rows relevant to the current scope. */}
       {result && (
         <div
           style={{
@@ -672,18 +723,28 @@ function CheckKeysBar({
             marginTop: 4,
           }}
         >
-          <KeyResultRow
-            label={providerLabel}
-            outcome={result.llm}
-          />
-          <KeyResultRow
-            label={
-              result.tts?.provider === 'kokoro' ? 'Kokoro'
-              : result.tts?.provider === 'qwen3' ? 'Qwen3-TTS'
-              : 'ElevenLabs'
-            }
-            outcome={result.tts ?? result.elevenlabs}
-          />
+          {(scope === 'all' || scope === 'llm') && (
+            <KeyResultRow
+              label={providerLabel}
+              outcome={result.llm}
+            />
+          )}
+          {(scope === 'all' || scope === 'llm') && agenticEnabled && (
+            <KeyResultRow
+              label="Agentic (OpenAI)"
+              outcome={result.agentic ?? { ok: false, error: 'not probed yet' }}
+            />
+          )}
+          {(scope === 'all' || scope === 'voice') && (
+            <KeyResultRow
+              label={
+                result.tts?.provider === 'kokoro' ? 'Kokoro'
+                : result.tts?.provider === 'qwen3' ? 'Qwen3-TTS'
+                : 'ElevenLabs'
+              }
+              outcome={result.tts ?? result.elevenlabs}
+            />
+          )}
         </div>
       )}
     </div>

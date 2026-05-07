@@ -149,7 +149,14 @@ export function Wizard({
   // field changes (ConnectionsStep handles that side via its own
   // useEffect — it calls our setter with `false`). Gates the Finish
   // button so the user can't ship a typo and discover it on first chat.
-  const [keysValidated, setKeysValidated] = useState(false);
+  // Verification is now per-page. The user verifies LLM + agentic
+  // on the LLM page, voice on the voice page. Both must be true for
+  // Finish to unlock. Splitting them lets each page hold its own
+  // green check independently — editing the voice provider doesn't
+  // invalidate the LLM verify (and vice versa).
+  const [llmValidated, setLlmValidated] = useState(false);
+  const [voiceValidated, setVoiceValidated] = useState(false);
+  const keysValidated = llmValidated && voiceValidated;
 
   // Mute switch — when on, the wizard suppresses every Grace audio
   // beat (the welcome line on mount, the per-step pre-gens, the
@@ -445,8 +452,8 @@ export function Wizard({
           mode="llm"
           values={apiKeys}
           onChange={setApiKeys}
-          validated={keysValidated}
-          onValidatedChange={setKeysValidated}
+          validated={llmValidated}
+          onValidatedChange={setLlmValidated}
           onCheckFailed={() => playLine('keys-wrong')}
           agentName={vibe.agent_name}
         />
@@ -457,14 +464,14 @@ export function Wizard({
         mode="voice"
         values={apiKeys}
         onChange={setApiKeys}
-        validated={keysValidated}
-        onValidatedChange={setKeysValidated}
+        validated={voiceValidated}
+        onValidatedChange={setVoiceValidated}
         onCheckFailed={() => playLine('keys-wrong')}
         agentName={vibe.agent_name}
       />
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, identity, vibe, interests, apiKeys, keysValidated]);
+  }, [step, identity, vibe, interests, apiKeys, llmValidated, voiceValidated]);
 
   return (
     <motion.div
