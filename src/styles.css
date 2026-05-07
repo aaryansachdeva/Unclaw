@@ -8,8 +8,19 @@
   --border-subtle: rgba(255, 255, 255, 0.08);
   --border-focus: rgba(196, 68, 68, 0.22);
   --text-primary: #fafafa;
-  --text-secondary: #b8b3ad;
-  --text-ghost: #6e6862;
+  /* `--text-secondary` was #b8b3ad (~72% L) — readable but on the
+     edge for body-microcopy. Bumped to #d4cec7 so wizard subtitles,
+     field labels, and helper text don't disappear into the frosted
+     panel. The frosted-slate aesthetic still leads — primary is white,
+     secondary is warm grey, accent is the only color — but the reader
+     can actually see secondary now without leaning in. */
+  --text-secondary: #d4cec7;
+  /* `--text-ghost` was #6e6862 (~43% L). At that luminance, dropdown
+     placeholders and chevron icons sat right at WCAG AA borderline
+     against the glass bg and read as "broken/disabled" rather than
+     "fill this in". Bumped to #a39c95 (~64% L) — clearly there, still
+     subordinate to secondary, still passes AA on dark glass. */
+  --text-ghost: #a39c95;
   --accent: #c44444;
   --accent-dim: rgba(196, 68, 68, 0.08);
   --accent-glow: rgba(196, 68, 68, 0.14);
@@ -74,6 +85,18 @@ video {
 textarea {
   user-select: text;
   font-family: inherit;
+}
+
+/* Form-control placeholders. Without this, Chromium's default
+   placeholder color renders far darker than `--text-ghost` (the
+   browser uses ~40% opacity on the input's `color`, which on dark
+   panels gets the placeholder lost). Using the ghost token directly
+   keeps placeholders consistent with the wizard's other "fill this
+   in" microcopy (dropdown placeholders use the same token inline). */
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-ghost);
+  opacity: 1;
 }
 
 /* Glass button base */

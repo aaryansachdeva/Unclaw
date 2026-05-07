@@ -24,6 +24,11 @@ const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
 interface Props {
   onSignedIn: (session: AuthSession) => void;
+  /** "Continue without an account" — let the user dismiss this screen
+   *  and use UnClaw locally without signing in. Profile + keys persist
+   *  on this device only; cross-device sync is unavailable until they
+   *  sign in later via the profile menu. */
+  onSkipLogin: () => void;
 }
 
 type Mode =
@@ -32,7 +37,7 @@ type Mode =
   | { kind: 'email-register' }
   | { kind: 'email-verify'; email: string };
 
-export function SignInScreen({ onSignedIn }: Props) {
+export function SignInScreen({ onSignedIn, onSkipLogin }: Props) {
   const reduce = useReducedMotion() ?? false;
   const [mode, setMode] = useState<Mode>({ kind: 'choose' });
   const [busy, setBusy] = useState<null | 'google' | 'discord' | 'email'>(null);
@@ -258,6 +263,7 @@ export function SignInScreen({ onSignedIn }: Props) {
                     setError(null);
                     setMode({ kind: 'email-login' });
                   }}
+                  onSkipLogin={onSkipLogin}
                 />
               )}
               {mode.kind === 'email-login' && (
@@ -341,10 +347,12 @@ function ChooseProviders({
   busy,
   onProvider,
   onPickEmail,
+  onSkipLogin,
 }: {
   busy: null | 'google' | 'discord' | 'email';
   onProvider: (p: 'google' | 'discord') => void;
   onPickEmail: () => void;
+  onSkipLogin: () => void;
 }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -369,6 +377,25 @@ function ChooseProviders({
         onClick={onPickEmail}
         icon={<Mail size={16} strokeWidth={1.8} />}
       />
+      {/* Skip-login affordance — lets the user try UnClaw without an
+          account. Their profile + API keys stay on this device only;
+          cloud sync is unavailable until they later sign in via the
+          profile menu. Rendered as a quiet text button, not a primary
+          provider, so signing in stays the recommended path. */}
+      <button
+        type="button"
+        onClick={onSkipLogin}
+        disabled={busy !== null}
+        style={{
+          ...subtleLinkStyle,
+          marginTop: 4,
+          fontSize: 12.5,
+          color: 'var(--text-secondary)',
+          opacity: busy !== null ? 0.5 : 1,
+        }}
+      >
+        Continue without an account
+      </button>
     </div>
   );
 }

@@ -1,8 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { Pin, PinOff, LogOut, Settings } from 'lucide-react';
+import { Pin, PinOff, LogOut, Settings, Trash2, LogIn, UserCircle2 } from 'lucide-react';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
+
+/** Shared row style for entries inside the profile popover. The
+ *  destructive "Reset all data" row overrides the color/background
+ *  fields when armed. */
+const menuItemStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 10,
+  width: '100%',
+  padding: '8px 10px',
+  borderRadius: 8,
+  background: 'transparent',
+  border: 'none',
+  cursor: 'pointer',
+  textAlign: 'left',
+  color: 'var(--text-primary)',
+  fontFamily: 'inherit',
+  fontSize: 13,
+  fontWeight: 500,
+  letterSpacing: '-0.01em',
+  transition: 'background 120ms var(--ease-out-quart)',
+};
 
 interface TitlebarUser {
   name: string | null;
@@ -18,8 +40,22 @@ interface TitlebarProps {
    *  side (where the gear used to be) and clicking it opens a small
    *  menu with email + Sign out. */
   user?: TitlebarUser | null;
+  /** True when the user picked "Continue without an account". The
+   *  popover still mounts (so they can hit Reset / Sign in) but
+   *  shows "Guest" as the identity and offers a "Sign in" affordance
+   *  in place of "Sign out". */
+  guestMode?: boolean;
   /** Triggered from the profile menu's "Sign out" row. */
   onSignOut?: () => void;
+  /** Triggered from the "Sign in" row that's only shown in guest
+   *  mode — drops the user back to the SignInScreen so they can
+   *  promote a guest session into a real account. */
+  onSignIn?: () => void;
+  /** Triggered from the "Reset all data" row. Caller is responsible
+   *  for confirming + actually wiping (resetEverything). The Titlebar
+   *  just owns a two-step confirm UI (click once → "click again to
+   *  confirm" — no separate dialog). */
+  onResetAccount?: () => void;
   /** Width of the workspace area in pixels — i.e. window width minus
    *  any open chat pane. Used to keep the UNCLAW wordmark centered
    *  over the visible stream view rather than the whole window. When
@@ -42,12 +78,19 @@ function userDisplayName(user: TitlebarUser): string {
 export function Titlebar({
   showReconnecting = false,
   user = null,
+  guestMode = false,
   onSignOut,
+  onSignIn,
+  onResetAccount,
   workspaceWidth,
 }: TitlebarProps) {
   const reduce = useReducedMotion() ?? false;
   const [pinned, setPinned] = useState(true);
   const [profileOpen, setProfileOpen] = useState(false);
+  // Two-step confirm for the destructive "Reset all data" row. First
+  // click flips this on (the row turns red and prompts to confirm);
+  // second click runs onResetAccount. Reset to false on popover close.
+  const [resetArmed, setResetArmed] = useState(false);
   const profileWrapRef = useRef<HTMLDivElement | null>(null);
 
   const handlePin = () => {
@@ -78,6 +121,12 @@ export function Titlebar({
     };
   }, [profileOpen]);
 
+  // Disarm the reset confirm when the popover closes — otherwise the
+  // user could open it again and a stray click would skip the confirm.
+  useEffect(() => {
+    if (!profileOpen) setResetArmed(false);
+  }, [profileOpen]);
+
   return (
     <>
       <motion.div
@@ -96,8 +145,12 @@ export function Titlebar({
               here previously). Bigger now so it reads as a primary
               identity affordance, not a chrome button. The dropdown
               opens DOWN-LEFT so it sits below the avatar without
-              clipping the window's left edge. */}
-          {user ? (
+              clipping the window's left edge.
+              Renders in two modes: signed-in (avatar + initials) and
+              guest mode (generic UserCircle icon). Both surface the
+              same "Reset all data" row; the auth-state row swaps
+              between Sign out (signed in) and Sign in (guest). */}
+          {(user || guestMode) ? (
             <div
               ref={profileWrapRef}
               style={{
@@ -111,7 +164,7 @@ export function Titlebar({
                 onClick={() => setProfileOpen((o) => !o)}
                 aria-label="Profile menu"
                 aria-expanded={profileOpen}
-                title={userDisplayName(user)}
+                title={user ? userDisplayName(user) : 'Guest'}
                 className="glass-btn"
                 style={{
                   width: 36,
@@ -125,6 +178,9 @@ export function Titlebar({
                   overflow: 'hidden',
                   transition: 'background 180ms var(--ease-out-quart)',
                   padding: 0,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
                 }}
                 onMouseEnter={(e) => {
                   if (profileOpen) return;
@@ -135,7 +191,7 @@ export function Titlebar({
                   e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
                 }}
               >
-                {user.avatar_url ? (
+                {user && user.avatar_url ? (
                   <img
                     src={user.avatar_url}
                     alt=""
@@ -148,7 +204,7 @@ export function Titlebar({
                     }}
                     referrerPolicy="no-referrer"
                   />
-                ) : (
+                ) : user ? (
                   <span
                     aria-hidden
                     style={{
@@ -160,6 +216,13 @@ export function Titlebar({
                   >
                     {userInitials(user)}
                   </span>
+                ) : (
+                  <UserCircle2
+                    size={20}
+                    strokeWidth={1.6}
+                    aria-hidden
+                    color="var(--text-secondary)"
+                  />
                 )}
               </motion.button>
 
@@ -212,9 +275,9 @@ export function Titlebar({
                           whiteSpace: 'nowrap',
                         }}
                       >
-                        {userDisplayName(user)}
+                        {user ? userDisplayName(user) : 'Guest'}
                       </span>
-                      {user.name && (
+                      {user && user.name && (
                         <span
                           style={{
                             fontSize: 11.5,
@@ -225,6 +288,17 @@ export function Titlebar({
                           }}
                         >
                           {user.email}
+                        </span>
+                      )}
+                      {!user && guestMode && (
+                        <span
+                          style={{
+                            fontSize: 11.5,
+                            color: 'var(--text-secondary)',
+                            letterSpacing: '0.005em',
+                          }}
+                        >
+                          Local-only session
                         </span>
                       )}
                     </div>
@@ -250,24 +324,7 @@ export function Titlebar({
                           window.open(url, '_blank', 'noopener,noreferrer');
                         }
                       }}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 10,
-                        width: '100%',
-                        padding: '8px 10px',
-                        borderRadius: 8,
-                        background: 'transparent',
-                        border: 'none',
-                        cursor: 'pointer',
-                        textAlign: 'left',
-                        color: 'var(--text-primary)',
-                        fontFamily: 'inherit',
-                        fontSize: 13,
-                        fontWeight: 500,
-                        letterSpacing: '-0.01em',
-                        transition: 'background 120ms var(--ease-out-quart)',
-                      }}
+                      style={menuItemStyle}
                       onMouseEnter={(e) => {
                         e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
                       }}
@@ -278,41 +335,117 @@ export function Titlebar({
                       <Settings size={14} strokeWidth={2} color="var(--text-secondary)" />
                       <span>Soul Settings</span>
                     </button>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => {
-                        setProfileOpen(false);
-                        onSignOut?.();
-                      }}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 10,
-                        width: '100%',
-                        padding: '8px 10px',
-                        borderRadius: 8,
-                        background: 'transparent',
-                        border: 'none',
-                        cursor: 'pointer',
-                        textAlign: 'left',
-                        color: 'var(--text-primary)',
-                        fontFamily: 'inherit',
-                        fontSize: 13,
-                        fontWeight: 500,
-                        letterSpacing: '-0.01em',
-                        transition: 'background 120ms var(--ease-out-quart)',
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.background = 'transparent';
-                      }}
-                    >
-                      <LogOut size={14} strokeWidth={2} color="var(--text-secondary)" />
-                      <span>Sign out</span>
-                    </button>
+                    {/* Sign in / Sign out — flips based on whether
+                        the session is real (auth token) or guest. */}
+                    {user ? (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setProfileOpen(false);
+                          onSignOut?.();
+                        }}
+                        style={menuItemStyle}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'transparent';
+                        }}
+                      >
+                        <LogOut size={14} strokeWidth={2} color="var(--text-secondary)" />
+                        <span>Sign out</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setProfileOpen(false);
+                          onSignIn?.();
+                        }}
+                        style={menuItemStyle}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'transparent';
+                        }}
+                      >
+                        <LogIn size={14} strokeWidth={2} color="var(--text-secondary)" />
+                        <span>Sign in</span>
+                      </button>
+                    )}
+
+                    {/* Reset all data — destructive, two-click confirm.
+                        First click flips the row red; second runs the
+                        provided callback (which is responsible for the
+                        actual wipe across local + cloud). The popover
+                        closes on the second click since the App will
+                        re-render without an authToken anyway. */}
+                    {onResetAccount && (
+                      <>
+                        <div
+                          aria-hidden
+                          style={{
+                            height: 1,
+                            margin: '4px 4px',
+                            background: 'rgba(255, 255, 255, 0.06)',
+                          }}
+                        />
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            if (!resetArmed) {
+                              setResetArmed(true);
+                              return;
+                            }
+                            setProfileOpen(false);
+                            setResetArmed(false);
+                            onResetAccount();
+                          }}
+                          style={{
+                            ...menuItemStyle,
+                            color: resetArmed ? 'var(--accent)' : 'var(--text-primary)',
+                            background: resetArmed
+                              ? 'rgba(196, 68, 68, 0.10)'
+                              : 'transparent',
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = resetArmed
+                              ? 'rgba(196, 68, 68, 0.16)'
+                              : 'rgba(255, 255, 255, 0.06)';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = resetArmed
+                              ? 'rgba(196, 68, 68, 0.10)'
+                              : 'transparent';
+                          }}
+                        >
+                          <Trash2
+                            size={14}
+                            strokeWidth={2}
+                            color={resetArmed ? 'var(--accent)' : 'var(--text-secondary)'}
+                          />
+                          <span style={{ flex: 1 }}>
+                            {resetArmed ? 'Click again to confirm' : 'Reset all data'}
+                          </span>
+                          {!resetArmed && (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                color: 'var(--text-ghost)',
+                                letterSpacing: '0.04em',
+                                textTransform: 'uppercase',
+                              }}
+                            >
+                              testing
+                            </span>
+                          )}
+                        </button>
+                      </>
+                    )}
                   </motion.div>
                 )}
               </AnimatePresence>

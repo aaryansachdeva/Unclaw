@@ -14,6 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState, KeyboardEvent } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+import { Volume2, VolumeX } from 'lucide-react';
 
 import { IdentityStep, type IdentityValues } from './IdentityStep';
 import { VibeStep } from './VibeStep';
@@ -23,17 +24,18 @@ import { ConnectionsStep } from './ConnectionsStep';
 import type { VibeValues } from './VibeStep';
 import {
   fetchOnboardingWelcome,
-  fetchOnboardingGreet,
   DEFAULT_VIBE,
-  type UserProfile,
+  type UserSettings,
   type UserSchedule,
-} from '../../services/profile';
+} from '../../services/userSettings';
 import {
   fetchApiKeys,
   saveApiKeys,
+  missingRequiredKeyFields,
   DEFAULT_API_KEYS,
   type ApiKeysProfile,
 } from '../../services/apiKeys';
+import { playPreGenAudio, type PreGenLine } from '../../services/onboardingAudio';
 import type { SoulChatResult } from '../../services/soulChat';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
@@ -42,16 +44,16 @@ interface WizardProps {
   /** True on first launch (no profile yet). False when reopened to edit. */
   firstRun: boolean;
   /** Pre-fill values when reopening to edit. */
-  initial?: UserProfile | null;
+  initial?: UserSettings | null;
   /** Active persona's prompt — passed to /onboarding/greet so the
    *  personalization picks up the agent's voice. */
   personaPrompt?: string;
   /** Persist the profile. Parent owns the dual-write strategy (soul +
    *  cloud); the wizard just hands a finished payload over. */
-  onSave: (profile: UserProfile) => Promise<UserProfile>;
+  onSave: (profile: UserSettings) => Promise<UserSettings>;
   /** Called after a successful save. Wizard stays mounted briefly so the
    *  fade-out can play; parent removes it from the tree afterwards. */
-  onComplete: (profile: UserProfile) => void;
+  onComplete: (profile: UserSettings) => void;
   /** Called when a chat-shape result is ready to play (welcome line
    *  on mount, aha greeting on save). Parent feeds it to the existing
    *  dispatchChatResult path. */
@@ -59,11 +61,22 @@ interface WizardProps {
   /** User-driven close (Esc on last step / X). Only allowed when
    *  firstRun is false — first-run cannot be closed without saving. */
   onCancel?: () => void;
+  /** Streams the user's typed name out as they edit the Identity
+   *  step. App.tsx feeds this to the on-screen Greeting so "good
+   *  evening, friend" turns into "good evening, Aryan" live as the
+   *  user types — they see their name take effect before they even
+   *  hit Continue. Empty string while the field is blank. */
+  onIdentityNameChange?: (name: string) => void;
 }
 
 type StepKey = 'welcome' | 'identity' | 'vibe' | 'interests' | 'connections';
 const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'identity', 'vibe', 'interests', 'connections'];
 const EDIT_STEPS: StepKey[] = ['identity', 'vibe', 'interests', 'connections'];
+
+/** localStorage key for the onboarding-mute preference. Persisted so a
+ *  user who finished onboarding with audio off doesn't have to mute
+ *  again if they re-open the wizard via the profile edit flow. */
+const MUTED_STORAGE_KEY = 'unclaw.onboardingMuted';
 
 function detectTimezone(): string {
   try {
@@ -76,11 +89,17 @@ function detectTimezone(): string {
 export function Wizard({
   firstRun,
   initial,
-  personaPrompt,
+  // `personaPrompt` is still part of the public prop shape (App.tsx
+  // passes it) but unused now that the LLM-driven /onboarding/greet
+  // is replaced by a pre-gen "excited to start" audio clip. Left in
+  // place so the App-side call site doesn't need an unrelated edit;
+  // we'll prune the prop when the personalized greet flow returns.
+  personaPrompt: _personaPrompt,
   onSave,
   onComplete,
   onChatResult,
   onCancel,
+  onIdentityNameChange,
 }: WizardProps) {
   const reduce = useReducedMotion() ?? false;
 
@@ -99,6 +118,7 @@ export function Wizard({
     humor:      initial?.vibe_humor      ?? DEFAULT_VIBE.vibe_humor,
     directness: initial?.vibe_directness ?? DEFAULT_VIBE.vibe_directness,
     verbosity:  initial?.vibe_verbosity  ?? DEFAULT_VIBE.vibe_verbosity,
+    agent_name: initial?.agent_name ?? '',
   }));
 
   const [interests, setInterests] = useState<InterestsValues>(() => ({
@@ -111,8 +131,7 @@ export function Wizard({
   // BYOK profile — loaded from safeStorage once on mount. Independent of
   // the user profile (lives in its own encrypted blob), so we don't
   // serialize the keys through onSave; we persist them ourselves on
-  // Finish. Pure scaffolding for now: nothing in the chat path reads
-  // these yet.
+  // Finish.
   const [apiKeys, setApiKeys] = useState<ApiKeysProfile>({ ...DEFAULT_API_KEYS });
   useEffect(() => {
     let cancelled = false;
@@ -125,17 +144,106 @@ export function Wizard({
     };
   }, []);
 
+  // True when the user has pressed Check Keys and BOTH the LLM provider
+  // and ElevenLabs probes came back ok. Cleared the moment any key
+  // field changes (ConnectionsStep handles that side via its own
+  // useEffect — it calls our setter with `false`). Gates the Finish
+  // button so the user can't ship a typo and discover it on first chat.
+  const [keysValidated, setKeysValidated] = useState(false);
+
+  // Mute switch — when on, the wizard suppresses every Grace audio
+  // beat (the welcome line on mount, the per-step pre-gens, the
+  // finish celebration). The MetaHuman just stays quiet for the
+  // whole onboarding. Persisted across re-opens so a user who turned
+  // it off once doesn't keep getting startled. We also reset the
+  // ref-guard on the welcome line below so toggling mute mid-mount
+  // doesn't accidentally fire the line on a later effect tick.
+  const [muted, setMuted] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(MUTED_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
+  const toggleMuted = () => {
+    setMuted((prev) => {
+      const next = !prev;
+      try {
+        if (next) localStorage.setItem(MUTED_STORAGE_KEY, '1');
+        else localStorage.removeItem(MUTED_STORAGE_KEY);
+      } catch {
+        // Quota / private browsing — preference becomes session-only.
+      }
+      return next;
+    });
+  };
+
+  // Stream the live name up to App.tsx so the on-screen Greeting can
+  // re-render as the user types. The wizard panel sits over the
+  // workspace where the Greeting is mounted; this lets the user see
+  // their name take effect ("good evening, Aryan") before they even
+  // hit Continue, which makes the field feel like it actually does
+  // something rather than just collecting text into a future profile.
+  useEffect(() => {
+    onIdentityNameChange?.(identity.name);
+    // We deliberately don't include onIdentityNameChange in the deps
+    // array — App.tsx passes a stable setter (useState's setter is
+    // referentially stable), so this effect only fires on real name
+    // changes. Listing it would be correct in lint terms but cause
+    // every parent re-render to refire the effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identity.name]);
+
+  // Best-effort dispatch of a pre-generated onboarding audio clip
+  // through soul + UE. Failures (soul offline, asset missing) are
+  // swallowed — they shouldn't block the user advancing through the
+  // wizard. Each clip is a one-time ElevenLabs synth shipped as a
+  // static asset, so the wizard's fixed beats (name confirmation,
+  // failed key check, finish celebration) cost zero per-call ElevenLabs
+  // credit at runtime.
+  //
+  // Mute short-circuits at the top — we don't even POST the audio to
+  // soul, so the lipsync + T2F passes are skipped entirely. The
+  // MetaHuman's last pushed face frame just keeps showing.
+  const playLine = (line: PreGenLine) => {
+    if (mutedRef.current) return;
+    void (async () => {
+      try {
+        const result = await playPreGenAudio(line);
+        onChatResult(result);
+      } catch (err) {
+        console.warn(`[onboarding] pre-gen "${line}" failed`, err);
+      }
+    })();
+  };
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const stepIdx = stepOrder.indexOf(step);
   const isLastStep = stepIdx === stepOrder.length - 1;
-  const canFinish = identity.name.trim().length > 0;
-  // Welcome step has no validation gate; identity needs a name; the rest
-  // are always advance-able. The Finish action still requires a name.
+  // Connections is now a hard gate, not a polite suggestion: soul
+  // refuses to fall back to env keys for the chat path, so the wizard
+  // can't finish until the user has supplied an LLM provider + key
+  // (or picked Ollama) AND an ElevenLabs key AND pressed Check Keys
+  // to verify both probe successfully against the live provider APIs.
+  // The list of missing fields drives the inline panel in
+  // ConnectionsStep too.
+  const missingKeyFields = missingRequiredKeyFields(apiKeys);
+  const hasName = identity.name.trim().length > 0;
+  const canFinish = hasName
+    && missingKeyFields.length === 0
+    && keysValidated;
+  // Welcome step has no validation gate; identity needs a name; the
+  // rest are always advance-able EXCEPT connections (the last step),
+  // where Continue/Finish is blocked until the keys are filled in.
   const canAdvance = step === 'welcome'
     ? true
     : step === 'identity'
+    ? hasName
+    : step === 'connections'
     ? canFinish
     : true;
 
@@ -150,7 +258,13 @@ export function Wizard({
   useEffect(() => {
     if (!firstRun) return;
     if (welcomeFiredRef.current) return;
+    // Mute at mount → never even POST /onboarding/welcome. We still
+    // mark the ref as fired so toggling mute mid-onboarding doesn't
+    // queue the welcome line later in the session — by then the user
+    // has moved past the welcome step and replaying it would feel
+    // out of place.
     welcomeFiredRef.current = true;
+    if (mutedRef.current) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -170,11 +284,22 @@ export function Wizard({
   }, [firstRun]);
 
   const handleAdvance = () => {
-    if (step === 'identity' && !canFinish) return;
+    // Per-step gate. Identity needs a name to move forward; Connections
+    // (the last step) needs valid keys before it can Finish; the rest
+    // are always advance-able. `canAdvance` already encodes this — use
+    // it directly so adding a future step doesn't reintroduce the bug
+    // where Identity used the wrong (full-finish) check and locked out
+    // Continue before the user could even reach Connections.
+    if (!canAdvance) return;
     if (isLastStep) {
       void handleFinish();
       return;
     }
+    // First time the user moves past Identity is the natural moment
+    // for Grace to acknowledge the introduction. Fires once per
+    // session — the next time the user hits Continue (out of Vibe
+    // etc.) it doesn't replay because we only check `step` here.
+    if (step === 'identity') playLine('nice-to-meet-you');
     setStep(stepOrder[stepIdx + 1]);
   };
 
@@ -186,8 +311,11 @@ export function Wizard({
     // On welcome there's nothing to skip — Continue is the action.
     if (step === 'welcome') return;
     if (step === 'identity') {
-      // Skip-the-rest only valid once a name exists.
-      if (canFinish) void handleFinish();
+      // "Skip the rest" jumps straight to Finish — but the user still
+      // can't actually finish without keys, so handleFinish will route
+      // them to Connections if anything's missing. Just need a name to
+      // even attempt the shortcut.
+      if (hasName) void handleFinish();
       return;
     }
     if (isLastStep) void handleFinish();
@@ -195,19 +323,38 @@ export function Wizard({
   };
 
   const handleFinish = async () => {
-    if (!canFinish) {
+    if (!hasName) {
       setStep('identity');
       setError('Please enter your name.');
+      return;
+    }
+    if (missingKeyFields.length > 0) {
+      // Route the user back to Connections so they can fix it; the
+      // inline validation block in that step calls out the same
+      // missing fields. Cmd+Enter Finish from any step funnels here.
+      setStep('connections');
+      setError(
+        `Please add: ${missingKeyFields.join(', ')}`,
+      );
+      return;
+    }
+    if (!keysValidated) {
+      // Fields are filled but the user hasn't pressed Check Keys (or
+      // they edited a key after a prior successful check). Send them
+      // back so they can verify before we save.
+      setStep('connections');
+      setError('Press Check keys to verify before finishing.');
       return;
     }
     setSubmitting(true);
     setError(null);
     try {
-      const profile: UserProfile = {
+      const profile: UserSettings = {
         name:            identity.name.trim(),
         pronouns:        identity.pronouns.trim() || null,
         city:            identity.city.trim() || null,
         timezone:        identity.timezone.trim() || null,
+        agent_name:      vibe.agent_name.trim() || null,
         vibe_formality:  vibe.formality,
         vibe_humor:      vibe.humor,
         vibe_directness: vibe.directness,
@@ -226,16 +373,15 @@ export function Wizard({
       } catch (keyErr) {
         console.warn('[onboarding] api-key save failed', keyErr);
       }
-      // Fire greeting first (slow), then unmount the wizard so the user
-      // doesn't sit on a frozen Finish button while the LLM thinks.
+      // Tear down the wizard immediately, then dispatch the "excited
+      // to start" pre-gen line so the MetaHuman speaks while the user
+      // is settling into the chat workspace. This replaces the older
+      // /onboarding/greet path which round-tripped the LLM + ElevenLabs
+      // on every save — for shipping we ship a static MP3 instead.
+      // Personalized greeting can come back later via a /chat call
+      // once the keys are confirmed working.
       onComplete(saved);
-      // Aha-moment greeting, fully personalized. Best-effort.
-      try {
-        const greet = await fetchOnboardingGreet(personaPrompt);
-        onChatResult(greet);
-      } catch (greetErr) {
-        console.warn('[onboarding] greet failed', greetErr);
-      }
+      playLine('excited-to-start');
     } catch (err) {
       setSubmitting(false);
       setError(err instanceof Error ? err.message : 'Save failed');
@@ -282,9 +428,35 @@ export function Wizard({
     if (step === 'interests') {
       return <InterestsStep values={interests} onChange={setInterests} />;
     }
-    return <ConnectionsStep values={apiKeys} onChange={setApiKeys} />;
+    return (
+      <ConnectionsStep
+        values={apiKeys}
+        onChange={setApiKeys}
+        validated={keysValidated}
+        onValidatedChange={(ok) => {
+          setKeysValidated(ok);
+          // Failed Check Keys = Grace says the "something's off"
+          // line. Only on transition false→done-but-bad, not on
+          // the "edit invalidates" reset (which also flips us
+          // back to false). The ConnectionsStep only calls this
+          // setter on real check completion + on edits, but
+          // edits also reset its `check.result` to null, so
+          // distinguishing here would mean threading more state.
+          // Simpler heuristic: only play the line when ok=false
+          // AND keysValidated was previously true (a regression),
+          // OR when the user explicitly pressed Check (check.result
+          // is set). We don't know the latter from here, so just
+          // play on any false-emit that follows a real check.
+          // Conn Step calls onValidatedChange(true) on success and
+          // onValidatedChange(false) ONLY on (a) explicit failure,
+          // (b) edit-reset. Edits clear `check.result` so we can
+          // detect via ConnectionsStep — see comment in that file.
+        }}
+        onCheckFailed={() => playLine('keys-wrong')}
+      />
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, identity, vibe, interests, apiKeys]);
+  }, [step, identity, vibe, interests, apiKeys, keysValidated]);
 
   return (
     <motion.div
@@ -293,6 +465,14 @@ export function Wizard({
       aria-label="Onboarding"
       onKeyDown={onWizardKey}
       tabIndex={-1}
+      // `layout` tracks the panel's intrinsic size (driven by the
+      // currently-mounted step) and animates between values. The
+      // bottom-anchored absolute positioning means height changes
+      // grow upward — looks like the panel is breathing in/out as
+      // taller/shorter steps land. `layoutTransition` would be the
+      // right knob to override the spring per-axis if the default
+      // ever feels wrong here.
+      layout
       initial={reduce
         ? { y: 0, opacity: 1 }
         : { y: 24, opacity: 0 }}
@@ -352,7 +532,15 @@ export function Wizard({
             padding: '20px 22px 14px',
           }}
         >
-          <AnimatePresence mode="wait">
+          {/* `popLayout` mode lets the new step mount BEFORE the old
+              one finishes exiting (the exiting child gets absolutely
+              positioned so it doesn't push the new one around). With
+              `layout` on the panel above, the panel's height tracks
+              the new step's natural size immediately instead of
+              briefly collapsing while the old child unmounts in
+              `mode="wait"`. The result: a smooth grow/shrink between
+              step heights instead of the snap-then-pop effect. */}
+          <AnimatePresence mode="popLayout" initial={false}>
             <motion.div
               key={step}
               initial={reduce ? { opacity: 1, x: 0 } : { opacity: 0, x: 14 }}
@@ -389,6 +577,55 @@ export function Wizard({
             gap: 10,
           }}
         >
+          {/* Mute toggle — leftmost, present on every step (including
+              the welcome screen, where the user might want to silence
+              the welcome line itself before it lands). When muted, the
+              wizard skips every Grace audio beat and the MetaHuman just
+              stays on its last face frame for the duration. State is
+              persisted to localStorage so a user who silenced one
+              session doesn't get re-startled on next open. */}
+          <button
+            type="button"
+            onClick={toggleMuted}
+            aria-pressed={muted}
+            aria-label={muted ? 'Unmute onboarding' : 'Mute onboarding'}
+            title={muted ? 'Unmute' : 'Mute'}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 30,
+              height: 30,
+              flexShrink: 0,
+              borderRadius: 8,
+              background: muted
+                ? 'rgba(196, 68, 68, 0.10)'
+                : 'transparent',
+              border: muted
+                ? '1px solid var(--accent-strong)'
+                : '1px solid var(--glass-border)',
+              color: muted ? 'var(--accent)' : 'var(--text-secondary)',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              transition:
+                'background 0.15s var(--ease-out-quart), border-color 0.15s var(--ease-out-quart), color 0.15s var(--ease-out-quart)',
+            }}
+            onMouseEnter={(e) => {
+              if (muted) return;
+              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+              e.currentTarget.style.color = 'var(--text-primary)';
+            }}
+            onMouseLeave={(e) => {
+              if (muted) return;
+              e.currentTarget.style.background = 'transparent';
+              e.currentTarget.style.color = 'var(--text-secondary)';
+            }}
+          >
+            {muted
+              ? <VolumeX size={14} strokeWidth={2} />
+              : <Volume2 size={14} strokeWidth={2} />}
+          </button>
+
           {/* Welcome has no Skip/Back affordance — Continue is the only
               action. Render a placeholder so the footer keeps balanced
               spacing relative to the progress dots and primary button. */}

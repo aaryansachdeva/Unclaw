@@ -1,9 +1,13 @@
 // Welcome screen — shown only on first run, before the form steps.
-// The logo gets the same breathing aura treatment used in StreamView's
-// loading screen so the wizard reads as part of the same visual world.
+// Reuses the sign-in screen's logo + typewriter title so the wizard
+// reads as a continuation of the same visual language rather than a
+// separate moment. The streamed MetaHuman speaks the welcome line in
+// parallel (driven by /onboarding/welcome from soul); this surface is
+// just the visual anchor for that voice.
 
 import { motion } from 'framer-motion';
-import logoUrl from '../../assets/logo.png';
+import logoUrl from '../../assets/logo_lg.png';
+import { TypewriterTitle } from '../Auth/TypewriterTitle';
 
 export function WelcomeStep() {
   return (
@@ -11,32 +15,33 @@ export function WelcomeStep() {
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 32,
+        gap: 36,
         padding: '14px 0 10px',
       }}
     >
       <div
         style={{
           position: 'relative',
-          width: 160,
-          height: 160,
+          width: 168,
+          height: 168,
           flexShrink: 0,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        {/* Soft accent halo behind the logo — matches the loading-
-            screen aesthetic without overwhelming the panel. */}
+        {/* Soft accent halo behind the logo — same recipe as the
+            sign-in screen's logo, dialed slightly smaller to fit the
+            wizard panel without crowding the typewriter title. */}
         <span
           aria-hidden
           style={{
             position: 'absolute',
-            inset: -16,
+            inset: -18,
             borderRadius: '50%',
             background:
-              'radial-gradient(circle, rgba(196, 68, 68, 0.20) 0%, rgba(196, 68, 68, 0.05) 50%, transparent 70%)',
-            filter: 'blur(6px)',
+              'radial-gradient(circle, rgba(196, 68, 68, 0.22) 0%, rgba(196, 68, 68, 0.06) 50%, transparent 75%)',
+            filter: 'blur(10px)',
             pointerEvents: 'none',
           }}
         />
@@ -45,9 +50,9 @@ export function WelcomeStep() {
           alt="UnClaw"
           animate={{
             filter: [
-              'drop-shadow(0 0 16px rgba(196, 68, 68, 0.22))',
-              'drop-shadow(0 0 28px rgba(196, 68, 68, 0.40))',
-              'drop-shadow(0 0 16px rgba(196, 68, 68, 0.22))',
+              'drop-shadow(0 0 16px rgba(196, 68, 68, 0.26))',
+              'drop-shadow(0 0 30px rgba(196, 68, 68, 0.46))',
+              'drop-shadow(0 0 16px rgba(196, 68, 68, 0.26))',
             ],
           }}
           transition={{
@@ -56,8 +61,8 @@ export function WelcomeStep() {
             ease: 'easeInOut',
           }}
           style={{
-            width: 160,
-            height: 160,
+            width: 168,
+            height: 168,
             objectFit: 'contain',
             position: 'relative',
             zIndex: 1,
@@ -65,26 +70,26 @@ export function WelcomeStep() {
         />
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <h2
-          style={{
-            fontSize: 26,
-            fontWeight: 600,
-            color: 'var(--text-primary)',
-            letterSpacing: '-0.022em',
-            margin: 0,
-            lineHeight: 1.1,
-          }}
-        >
-          Welcome to UnClaw.
-        </h2>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 16,
+          alignItems: 'flex-start',
+        }}
+      >
+        {/* Typewriter brand mark — matches the sign-in screen so the
+            transition between the two surfaces feels like a single
+            continuous moment. Re-mounts with this step so the typing
+            animation replays each time the wizard opens. */}
+        <TypewriterTitle />
         <p
           style={{
-            fontSize: 13.5,
+            fontSize: 14,
             color: 'var(--text-secondary)',
             margin: 0,
             letterSpacing: '0.005em',
-            lineHeight: 1.5,
+            lineHeight: 1.55,
             maxWidth: 380,
           }}
         >

@@ -25,11 +25,11 @@ export function StepHeader({ title, subtitle }: Props) {
       {subtitle && (
         <p
           style={{
-            fontSize: 12.5,
+            fontSize: 13.5,
             color: 'var(--text-secondary)',
             margin: 0,
             letterSpacing: '0.005em',
-            lineHeight: 1.45,
+            lineHeight: 1.5,
           }}
         >
           {subtitle}

@@ -24,11 +24,11 @@ import { listReminders } from './services/reminders';
 import { expressFace } from './services/express';
 import { getStocks } from './services/stocks';
 import {
-  deleteProfile,
-  saveProfileEverywhere,
-  syncProfile,
-  type UserProfile,
-} from './services/profile';
+  deleteSettings,
+  saveSettingsEverywhere,
+  syncSettings,
+  type UserSettings,
+} from './services/userSettings';
 import {
   loadStoredToken,
   fetchCurrentUser,
@@ -36,10 +36,18 @@ import {
   type AuthSession,
   type AuthUser,
 } from './services/auth';
+import { resetEverything } from './services/accountReset';
+import { fetchSettings } from './services/userSettings';
 import { SignInScreen } from './components/Auth/SignInScreen';
 import { Wizard } from './components/Onboarding/Wizard';
 import { personalityFor } from './personalities';
 import { AGENTS } from './types';
+
+/** localStorage flag set when the user clicked "Continue without an
+ *  account" on the sign-in screen. Persists across launches so guests
+ *  don't see the sign-in screen on every relaunch. Cleared on real
+ *  sign-in or on account reset. */
+const GUEST_MODE_KEY = 'unclaw.guestMode';
 
 /** Base64-encode UTF-8 safely for transmission to UE. */
 function toBase64(text: string): string {
@@ -246,20 +254,37 @@ export function App() {
 
   // Auth session — fetched at app start from safeStorage.
   //   undefined: still resolving (don't render anything auth-dependent)
-  //   null:      no valid session, show SignInScreen
+  //   null:      no valid session, show SignInScreen (unless guestMode)
   //   object:    signed in
   const [authToken, setAuthToken] = useState<string | null | undefined>(undefined);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  // True when the user picked "Continue without an account" on the
+  // sign-in screen. Persisted in localStorage so guests aren't asked
+  // to sign in again next launch. When `authToken` is null AND
+  // `guestMode` is false, the SignInScreen renders.
+  const [guestMode, setGuestMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(GUEST_MODE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
 
   // User profile — fetched at app start. `null` means soul has no
   // profile yet, which triggers the onboarding wizard in firstRun mode.
   // `undefined` means the fetch hasn't resolved yet (we render nothing
   // profile-dependent until then to avoid a flash of "Aryan").
-  const [profile, setProfile] = useState<UserProfile | null | undefined>(undefined);
+  const [profile, setProfile] = useState<UserSettings | null | undefined>(undefined);
   // Wizard visibility + mode. 'first' = no profile yet, can't be cancelled.
   // 'edit' = user reopened to tweak; cancel returns to chat.
   // null = wizard closed.
   const [wizardMode, setWizardMode] = useState<'first' | 'edit' | null>(null);
+  // Live mirror of the Identity step's name input. The Wizard streams
+  // it up via `onIdentityNameChange` so the Greeting on the workspace
+  // (rendered alongside the wizard panel) can echo "good evening,
+  // <name>" as the user types — they see their name take effect
+  // before they hit Continue. Empty while the field is blank.
+  const [wizardLiveName, setWizardLiveName] = useState('');
 
   // Close the chat pane whenever the onboarding wizard opens (any
   // mode — first-run auto-mount, edit via the pencil, or reset).
@@ -272,7 +297,17 @@ export function App() {
     if (wizardMode) setChatPaneOpen(false);
   }, [wizardMode]);
 
-  const persona = personalityFor(AGENTS[currentAgentIndex].name);
+  // Apply the user's custom assistant name (set in onboarding) only on
+  // the default Grace persona — Mark stays Mark. This way the user can
+  // rename their primary assistant without affecting the alternate
+  // persona slot. The override flows through into displayName + the
+  // in-prompt voice the LLM hears, so every surface that says "Grace"
+  // (greeting, AgentSwitcher, Whisper prompt, system extension) picks
+  // up the new name automatically.
+  const persona = personalityFor(
+    AGENTS[currentAgentIndex].name,
+    currentAgentIndex === 0 ? profile?.agent_name ?? null : null,
+  );
   const memory = useChatMemory(persona.id);
 
   const handleAgentSwitch = useCallback((newIndex: number) => {
@@ -821,6 +856,14 @@ export function App() {
   const handleSignedIn = useCallback((session: AuthSession) => {
     setAuthToken(session.token);
     setAuthUser(session.user);
+    // Real sign-in supersedes any prior guest-mode session.
+    setGuestMode(false);
+    try { localStorage.removeItem(GUEST_MODE_KEY); } catch { /* ignore */ }
+  }, []);
+
+  const handleSkipLogin = useCallback(() => {
+    setGuestMode(true);
+    try { localStorage.setItem(GUEST_MODE_KEY, '1'); } catch { /* ignore */ }
   }, []);
 
   const handleSignOut = useCallback(async () => {
@@ -829,7 +872,33 @@ export function App() {
     setAuthUser(null);
     setProfile(undefined);
     setWizardMode(null);
+    // Sign-out is an explicit "I want the SignInScreen back" gesture,
+    // so drop guest mode too.
+    setGuestMode(false);
+    try { localStorage.removeItem(GUEST_MODE_KEY); } catch { /* ignore */ }
     // Allow a fresh sync if the user signs back in this session.
+    profileSyncedRef.current = false;
+  }, [authToken]);
+
+  // Account reset — wipes every local + cloud surface and drops the
+  // app back to the SignInScreen (or first-run wizard for guests).
+  // Bound to the "Reset all data" entry in the profile popover so the
+  // user can re-test onboarding end-to-end without manually clearing
+  // safeStorage / D1 / soul state.
+  const handleResetAccount = useCallback(async () => {
+    try {
+      await resetEverything(authToken ?? null);
+    } catch (err) {
+      console.warn('[reset] some steps failed', err);
+    }
+    // Drop everything in-memory so the next render starts from a
+    // first-run shape: SignInScreen up (no token, no guest), profile
+    // unresolved (will fall through to the wizard once auth is back).
+    setAuthToken(null);
+    setAuthUser(null);
+    setGuestMode(false);
+    setProfile(undefined);
+    setWizardMode(null);
     profileSyncedRef.current = false;
   }, [authToken]);
 
@@ -842,18 +911,22 @@ export function App() {
   const profileSyncedRef = useRef(false);
   useEffect(() => {
     // Profile sync runs once we have BOTH a connected stream AND a
-    // signed-in user. The sync reconciles cloud (Worker) and local
-    // (soul) — cloud wins when present, soul migrates up when cloud
-    // is empty. Wizard fires only when both sides are empty.
+    // session (either signed-in OR guest mode). Signed-in: reconcile
+    // cloud (Worker) and local (soul) — cloud wins when present, soul
+    // migrates up when cloud is empty. Guest mode: skip cloud entirely
+    // and read whatever soul has locally. Wizard fires when there's
+    // no profile on the side(s) we consulted.
     if (connectionState !== 'connected') return;
-    if (!authToken) return;
+    if (!authToken && !guestMode) return;
     if (profileSyncedRef.current) return;
     profileSyncedRef.current = true;
 
     let cancelled = false;
     void (async () => {
       try {
-        const p = await syncProfile(authToken);
+        const p = authToken
+          ? await syncSettings(authToken)
+          : await fetchSettings();
         if (cancelled) return;
         setProfile(p);
         if (!p) setWizardMode('first');
@@ -867,7 +940,12 @@ export function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, [connectionState, authToken]);
+  }, [connectionState, authToken, guestMode]);
+
+  // Either kind of session unlocks the post-login UI. Used as the gate
+  // for the chat dock, the wizard, the chat pane, and most other
+  // workspace surfaces. The SignInScreen mounts when there's neither.
+  const hasSession = !!authToken || guestMode;
 
   useEffect(() => {
     if (connectionState !== 'connected') return;
@@ -934,7 +1012,7 @@ export function App() {
   //   * Disabled while the continuous-voice button is on — it owns
   //     the mic and runs its own activation loop.
   useEffect(() => {
-    if (!isConnected || !authToken) return undefined;
+    if (!isConnected || !hasSession) return undefined;
 
     const LONG_HOLD_REPEATS = 8;     // ~250 ms at typical 30 Hz auto-repeat
     let repeatCount = 0;
@@ -1056,7 +1134,7 @@ export function App() {
       window.removeEventListener('keydown', onDown);
       window.removeEventListener('keyup', onUp);
     };
-  }, [isConnected, authToken, streaming, voice.isListening]);
+  }, [isConnected, hasSession, streaming, voice.isListening]);
 
   // Drive the textarea live as streaming partials arrive. ONLY the
   // committed portion lands in the textarea — tentative text gets
@@ -1143,11 +1221,22 @@ export function App() {
       />
 
       {/* Everything below this point — greeting, widgets, sheet, status,
-          screenshots, input bar, wizard — is gated on BOTH a connected
-          stream AND a signed-in user. */}
-      {isConnected && authToken && (
+          screenshots, input bar, wizard — is gated on a connected
+          stream AND some kind of session (signed-in OR guest mode). */}
+      {isConnected && hasSession && (
         <>
-      <Greeting userName={profile?.name || 'friend'} />
+      <Greeting
+        userName={
+          // Wizard open → prefer the live-typing name so the Greeting
+          // tracks the input. Once the field is non-empty it wins
+          // over the saved profile (the user is actively editing).
+          // Wizard closed → fall back to the saved profile, then to
+          // the generic "friend" placeholder.
+          (wizardMode && wizardLiveName.trim())
+            ? wizardLiveName.trim()
+            : (profile?.name || 'friend')
+        }
+      />
 
       <WidgetRail
         activeWidget={activeWidget}
@@ -1185,13 +1274,14 @@ export function App() {
             firstRun={wizardMode === 'first'}
             initial={profile}
             personaPrompt={persona.prompt}
-            onSave={(p) => saveProfileEverywhere(p, authToken ?? null)}
+            onSave={(p) => saveSettingsEverywhere(p, authToken ?? null)}
             onChatResult={dispatchChatResult}
             onComplete={(saved) => {
               setProfile(saved);
               setWizardMode(null);
             }}
             onCancel={() => setWizardMode(null)}
+            onIdentityNameChange={setWizardLiveName}
           />
         )}
       </AnimatePresence>
@@ -1209,7 +1299,7 @@ export function App() {
           states, so typing/voice/textarea-focus state survives toggles.
           Z-index 38 sits above the chat pane (35) so the bar reads
           on top of the gray pane surface, and below the titlebar (50). */}
-      {isConnected && authToken && (
+      {isConnected && hasSession && (
         <div
           style={{
             position: 'absolute',
@@ -1349,7 +1439,7 @@ export function App() {
                   onClearMemory={handleClearMemory}
                   onOpenOnboarding={() => setWizardMode('edit')}
                   onResetProfile={() => {
-                    void deleteProfile()
+                    void deleteSettings()
                       .catch((err) => console.warn('[profile] delete failed', err))
                       .finally(() => {
                         setProfile(null);
@@ -1390,7 +1480,21 @@ export function App() {
       <Titlebar
         showReconnecting={showReconnecting}
         user={authUser}
+        guestMode={guestMode}
         onSignOut={() => { void handleSignOut(); }}
+        onSignIn={() => {
+          // Drop guest mode so the SignInScreen mounts. Profile +
+          // keys saved as guest stay on disk; if the user signs in
+          // and creates a real account, syncSettings will migrate
+          // them up to the cloud automatically on first sync.
+          setGuestMode(false);
+          // Re-arm the profile sync so the next post-sign-in mount
+          // actually runs syncSettings (which mirrors the guest's
+          // local soul settings up to the cloud the first time).
+          profileSyncedRef.current = false;
+          try { localStorage.removeItem(GUEST_MODE_KEY); } catch { /* ignore */ }
+        }}
+        onResetAccount={() => { void handleResetAccount(); }}
         // Workspace = the visible stream area. UNCLAW wordmark stays
         // centered over THIS region, not the whole window, so it
         // remains visually centered on the streamed face when the
@@ -1399,19 +1503,23 @@ export function App() {
       />
 
       {/* Sign-in screen. Mounted whenever auth has resolved to "no
-          session" — sits over the loading screen so the user can
-          authenticate while the UnClaw Engine is still warming up.
-          Renders on top of everything else (zIndex 60). */}
-      {authToken === null && (
-        <SignInScreen onSignedIn={handleSignedIn} />
+          session" AND the user hasn't opted into guest mode — sits
+          over the loading screen so the user can authenticate while
+          the UnClaw Engine is still warming up. Renders on top of
+          everything else (zIndex 60). */}
+      {authToken === null && !guestMode && (
+        <SignInScreen
+          onSignedIn={handleSignedIn}
+          onSkipLogin={handleSkipLogin}
+        />
       )}
 
       {/* Chat history side pane — slides in from the right; the
           workspace wrapper above shrinks in unison so the stream is
           physically pushed in, not overlaid. Only mounted once
-          authed + connected; conversation history comes from the
-          per-persona localStorage memory. */}
-      {isConnected && authToken && (
+          a session exists (authed or guest); conversation history
+          comes from the per-persona localStorage memory. */}
+      {isConnected && hasSession && (
         <ChatPane
           open={chatPaneOpen}
           turns={memory.turns}
@@ -1431,7 +1539,7 @@ export function App() {
           drag region overlay. The wrapper's `right: 140` leaves
           room for the existing titlebar window controls (AS / pin /
           minimize / close-window). */}
-      {isConnected && authToken && chatPaneOpen && (
+      {isConnected && hasSession && chatPaneOpen && (
         <div
           style={{
             position: 'absolute',

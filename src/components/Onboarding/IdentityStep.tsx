@@ -3,8 +3,8 @@
 // product direction.
 
 import { useMemo, KeyboardEvent } from 'react';
-import { ChevronDown } from 'lucide-react';
 import { StepHeader } from './StepHeader';
+import { Dropdown } from './Dropdown';
 
 export interface IdentityValues {
   name: string;
@@ -232,41 +232,12 @@ export function IdentityStep({ values, onChange, onAdvance }: Props) {
           </FieldLabel>
 
           <FieldLabel text="Timezone" style={{ flex: 1.4 }}>
-            <div style={{ position: 'relative' }}>
-              <select
-                value={values.timezone}
-                onChange={(e) => onChange({ ...values, timezone: e.target.value })}
-                onFocus={(e) => applyFocus(e.target)}
-                onBlur={(e) => applyBlur(e.target)}
-                style={{
-                  ...FIELD_BASE,
-                  appearance: 'none',
-                  WebkitAppearance: 'none',
-                  MozAppearance: 'none',
-                  paddingRight: 32,
-                  cursor: 'pointer',
-                }}
-              >
-                {tzOptions.map(({ tz, label }) => (
-                  <option key={tz} value={tz} style={{ background: 'var(--bg-elevated)' }}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown
-                size={14}
-                strokeWidth={1.8}
-                aria-hidden
-                style={{
-                  position: 'absolute',
-                  top: '50%',
-                  right: 12,
-                  transform: 'translateY(-50%)',
-                  color: 'var(--text-ghost)',
-                  pointerEvents: 'none',
-                }}
-              />
-            </div>
+            <Dropdown
+              value={values.timezone}
+              onChange={(v) => onChange({ ...values, timezone: v })}
+              options={tzOptions.map(({ tz, label }) => ({ id: tz, label }))}
+              menuMaxHeight={320}
+            />
           </FieldLabel>
         </div>
       </div>
@@ -295,9 +266,10 @@ function FieldLabel({
     >
       <span
         style={{
-          fontSize: 11,
+          fontSize: 12,
+          fontWeight: 500,
           color: 'var(--text-secondary)',
-          letterSpacing: '0.06em',
+          letterSpacing: '0.05em',
           textTransform: 'uppercase',
         }}
       >

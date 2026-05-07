@@ -11,6 +11,11 @@
 // underlying gpt-oss-20b will collapse to "polite assistant voice" if
 // you give it generic prompts; concrete habits make the speech feel
 // like a person.
+//
+// Custom agent names: the user can rename their assistant in onboarding.
+// `personalityFor(displayName, customName?)` returns a personality whose
+// `displayName` and `prompt` use the override wherever the persona's name
+// would appear. The `id` stays stable so chat memory follows the rename.
 
 export interface Personality {
   /** Stable id used as the localStorage key for chat memory. */
@@ -65,9 +70,34 @@ Loop back to recent context naturally. "You mentioned the deploy earlier, did th
 
 const PERSONALITIES: Personality[] = [GRACE, MARK];
 
-/** Look up a persona by display name (matches types.ts/AGENTS naming). */
-export function personalityFor(displayName: string): Personality {
-  return PERSONALITIES.find(p => p.displayName === displayName) ?? GRACE;
+/** Apply a custom name to a personality. Replaces the original name
+ *  wherever it appears in the prompt + displayName, but leaves the
+ *  stable `id` alone so chat memory keys (`unclaw.chat.<id>`) follow
+ *  the persona, not the rename. The replacement uses a word-boundary
+ *  regex so we only catch the original name, not substrings (e.g.
+ *  "Mark" but not "marked"). */
+function withCustomName(base: Personality, custom: string): Personality {
+  const trimmed = custom.trim();
+  if (!trimmed || trimmed === base.displayName) return base;
+  const escaped = base.displayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`\\b${escaped}\\b`, 'g');
+  return {
+    id: base.id,
+    displayName: trimmed,
+    prompt: base.prompt.replace(re, trimmed),
+  };
+}
+
+/** Look up a persona by display name (matches types.ts/AGENTS naming).
+ *  When `customName` is provided and non-empty, the result has its
+ *  display name + every in-prompt occurrence of the original name
+ *  swapped out — so the LLM thinks of itself as the user's chosen name
+ *  while the underlying persona character (Grace's specific voice and
+ *  habits) is preserved. */
+export function personalityFor(displayName: string, customName?: string | null): Personality {
+  const base = PERSONALITIES.find(p => p.displayName === displayName) ?? GRACE;
+  if (!customName) return base;
+  return withCustomName(base, customName);
 }
 
 export { GRACE, MARK, PERSONALITIES };

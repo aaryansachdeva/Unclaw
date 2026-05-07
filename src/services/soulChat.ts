@@ -1,9 +1,16 @@
 // Single-call client for the soul.exe server's /chat endpoint.
-// Soul runs the entire pipeline (Groq LLM → ElevenLabs TTS → lipsync → T2F)
+// Soul runs the entire pipeline (LLM → ElevenLabs TTS → lipsync → T2F)
 // and broadcasts the result to all /ws subscribers (Unreal pulls
 // /result/{id} automatically). Replaces the older Cerebras-LLM +
 // ElevenLabs-from-browser + /upload-lipsync chain in services/ai.ts +
 // services/tts.ts + services/lipsync.ts for the default chat path.
+//
+// BYOK plumbing: the Electron app reads the user's saved api key from
+// safeStorage (via fetchApiKeys) and passes it along on each request.
+// Soul accepts `llm_api_key` per-call, so cloud providers can run
+// against the user's own key without touching server-side env vars.
+
+import { fetchApiKeys } from './apiKeys';
 
 const SOUL_URL = 'http://127.0.0.1:8765';
 
@@ -80,6 +87,13 @@ export interface SoulChatResult {
 /**
  * POST the user's message to soul.exe /chat. Returns the full result
  * (id, mood, response, timings, etc.) once the server pipeline finishes.
+ *
+ * BYOK behavior: reads the persisted ApiKeysProfile via safeStorage and,
+ * when the user has chosen a cloud provider with a key set, passes
+ * `{llm_model, llm_api_key}` along so soul dispatches to the user's
+ * provider/model with their key. When no BYOK config is set (or the
+ * user picked Ollama, which doesn't need a key), soul falls back to
+ * its env-var configuration just like it always has.
  */
 export async function chatViaSoul(
   message: string,
@@ -92,6 +106,27 @@ export async function chatViaSoul(
   if (opts.lipsyncModel) body.lipsync_model = opts.lipsyncModel;
   if (opts.systemExtension) body.system_extension = opts.systemExtension;
   if (opts.images && opts.images.length > 0) body.images = opts.images;
+
+  // Pull the user's saved {provider, model, key, elevenlabs_key} so
+  // soul routes the request to the backend they configured in
+  // onboarding AND uses their own ElevenLabs key for TTS. Soul's
+  // /chat route is BYOK-strict in shipping mode (no env-key fallback),
+  // so the keys gathered here are required end-to-end — the wizard
+  // gates Finish on them.
+  try {
+    const keys = await fetchApiKeys();
+    if (keys.llm_model) body.llm_model = keys.llm_model;
+    // Only send the LLM key for providers that actually need one
+    // (cloud); Ollama bypasses this and soul uses its local daemon.
+    if (keys.llm_api_key && keys.llm_provider !== 'ollama') {
+      body.llm_api_key = keys.llm_api_key;
+    }
+    if (keys.elevenlabs_api_key) {
+      body.elevenlabs_api_key = keys.elevenlabs_api_key;
+    }
+  } catch (err) {
+    console.warn('[soulChat] failed to read api keys', err);
+  }
 
   const res = await fetch(`${SOUL_URL}/chat`, {
     method: 'POST',

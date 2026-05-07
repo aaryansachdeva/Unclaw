@@ -4,7 +4,7 @@
 
 import { Sunrise, Moon, SunMoon } from 'lucide-react';
 import { StepHeader } from './StepHeader';
-import type { UserSchedule } from '../../services/profile';
+import type { UserSchedule } from '../../services/userSettings';
 
 export interface InterestsValues {
   interests: string[];
@@ -106,9 +106,10 @@ export function InterestsStep({ values, onChange }: Props) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <span
           style={{
-            fontSize: 11,
+            fontSize: 12,
+            fontWeight: 500,
             color: 'var(--text-secondary)',
-            letterSpacing: '0.06em',
+            letterSpacing: '0.05em',
             textTransform: 'uppercase',
           }}
         >
@@ -164,9 +165,10 @@ export function InterestsStep({ values, onChange }: Props) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <span
           style={{
-            fontSize: 11,
+            fontSize: 12,
+            fontWeight: 500,
             color: 'var(--text-secondary)',
-            letterSpacing: '0.06em',
+            letterSpacing: '0.05em',
             textTransform: 'uppercase',
           }}
         >
@@ -228,9 +230,10 @@ export function InterestsStep({ values, onChange }: Props) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <span
             style={{
-              fontSize: 11,
+              fontSize: 12,
+              fontWeight: 500,
               color: 'var(--text-secondary)',
-              letterSpacing: '0.06em',
+              letterSpacing: '0.05em',
               textTransform: 'uppercase',
             }}
           >
