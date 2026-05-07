@@ -829,7 +829,7 @@ export function App() {
           // of butting up against each other; ~150 ms matches the
           // pause length the LLM-formatted text usually implies via
           // sentence-final punctuation.
-          const INTER_CHUNK_GAP_MS = 150;
+          const INTER_CHUNK_GAP_MS = 800;
           const playAt = firstChunkArrivedAt
             + ((chunk.start_offset_s ?? 0) * 1000)
             + (chunk.chunk_idx * INTER_CHUNK_GAP_MS);
@@ -859,7 +859,7 @@ export function App() {
           // scheduler inserted (n_chunks - 1 gaps × 150 ms each). Once
           // that's elapsed the notify hook fires and the voice agent
           // can resume.
-          const INTER_CHUNK_GAP_MS = 150;
+          const INTER_CHUNK_GAP_MS = 800;
           const gapsMs = Math.max(0, totalChunks - 1) * INTER_CHUNK_GAP_MS;
           const speakMs = (totalDuration > 0 ? totalDuration * 1000 : 4000) + gapsMs;
           const timerId = window.setTimeout(() => {
@@ -905,54 +905,6 @@ export function App() {
     }
   }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream]);
 
-  // Idle micro-expression driver. Fires POST /idle on a jittered
-  // timer (~30-50s mean) to keep Grace alive when the user isn't
-  // talking. UnClaw is the canonical idle driver — soul refuses /idle
-  // without an explicit llm_model in the body, which `fireIdle` pulls
-  // from the user's apiKeys (the SAME model + key chat uses).
-  //
-  // Gates (matching soul's own short-circuits + a couple renderer-side
-  // gates that soul can't observe):
-  //   * stream not connected         — pointless, no UE to render to
-  //   * isSending                    — chat in flight
-  //   * isAISpeakingRef              — Grace is still mid-reply
-  //   * voice listening              — user is talking; idle would
-  //                                     compete for audio focus
-  //   * wizardMode                   — onboarding overlay is up
-  //
-  // Soul itself also refuses to fire when no /ws clients are
-  // connected, when a chat is in flight, when audio is still playing
-  // (`_speaking_until_ts`), or when escalation is running — so any
-  // race we miss client-side gets caught server-side too.
-  useEffect(() => {
-    if (!isConnected) return undefined;
-    if (wizardMode) return undefined;
-    let cancelled = false;
-    let timerId: number | null = null;
-    const tick = async () => {
-      if (cancelled) return;
-      const ok = !isSending
-        && !isAISpeakingRef.current
-        && !voice.isListening
-        && !escalating;
-      if (ok) {
-        try { await fireIdle(); } catch { /* fireIdle soft-fails */ }
-      }
-      if (cancelled) return;
-      // Jitter [25s, 50s] — natural between-thoughts spacing without
-      // a metronome feel.
-      const wait = 25_000 + Math.random() * 25_000;
-      timerId = window.setTimeout(tick, wait);
-    };
-    // First fire after a small initial delay so a cold app boot
-    // isn't immediately punctuated by an idle expression.
-    timerId = window.setTimeout(tick, 8_000);
-    return () => {
-      cancelled = true;
-      if (timerId !== null) window.clearTimeout(timerId);
-    };
-  }, [isConnected, wizardMode, isSending, voice.isListening, escalating]);
-
   // Slash-command animation dispatcher — hands a ready-to-go UE
   // descriptor to the dock so it can fire `/dance`, `/kiss`, `/hello`
   // without round-tripping through the LLM.
@@ -976,7 +928,20 @@ export function App() {
     onTranscript: (text) => {
       const trimmed = text.trim();
       if (!trimmed) return;
+      // Mirror the PTT visual: drop the final transcription into the
+      // textarea so the user briefly sees what was heard, then send.
+      // The InputBar's send path will clear the textarea on its way
+      // out (sets message to '' inside handleSend); for the voice
+      // path we clear explicitly after dispatch so the next utterance
+      // starts from an empty surface.
+      inputBarRef.current?.setText(trimmed);
       void handleSendMessage(trimmed);
+      // Race window between setText and the chat-firing reset is fine
+      // — the user message lands in the chat pane immediately, so the
+      // textarea content is just a momentary mirror anyway.
+      window.setTimeout(() => {
+        inputBarRef.current?.setText('');
+      }, 0);
     },
     isAISpeaking: () => isAISpeakingRef.current,
     whisperPrompt: () => `Conversation with ${persona.displayName}.`,
@@ -1227,6 +1192,55 @@ export function App() {
   const handleCloseSheet = useCallback(() => setActiveWidget(null), []);
 
   const isConnected = connectionState === 'connected';
+
+  // Idle micro-expression driver. Fires POST /idle on a jittered
+  // timer (~30-50s mean) to keep Grace alive when the user isn't
+  // talking. UnClaw is the canonical idle driver — soul refuses /idle
+  // without an explicit llm_model in the body, which `fireIdle` pulls
+  // from the user's apiKeys (the SAME model + key chat uses).
+  //
+  // Gates (matching soul's own short-circuits + a couple renderer-side
+  // gates that soul can't observe):
+  //   * stream not connected         — pointless, no UE to render to
+  //   * isSending                    — chat in flight
+  //   * isAISpeakingRef              — Grace is still mid-reply
+  //   * voice listening              — user is talking; idle would
+  //                                     compete for audio focus
+  //   * wizardMode                   — onboarding overlay is up
+  //
+  // Soul itself also refuses to fire when no /ws clients are
+  // connected, when a chat is in flight, when audio is still playing
+  // (`_speaking_until_ts`), or when escalation is running — so any
+  // race we miss client-side gets caught server-side too.
+  useEffect(() => {
+    if (!isConnected) return undefined;
+    if (wizardMode) return undefined;
+    let cancelled = false;
+    let timerId: number | null = null;
+    const tick = async () => {
+      if (cancelled) return;
+      const ok = !isSending
+        && !isAISpeakingRef.current
+        && !voice.isListening
+        && !escalating;
+      if (ok) {
+        try { await fireIdle(); } catch { /* fireIdle soft-fails */ }
+      }
+      if (cancelled) return;
+      // Jitter [25s, 50s] — natural between-thoughts spacing without
+      // a metronome feel.
+      const wait = 25_000 + Math.random() * 25_000;
+      timerId = window.setTimeout(tick, wait);
+    };
+    // First fire after a small initial delay so a cold app boot
+    // isn't immediately punctuated by an idle expression.
+    timerId = window.setTimeout(tick, 8_000);
+    return () => {
+      cancelled = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+    };
+  }, [isConnected, wizardMode, isSending, voice.isListening, escalating]);
+
   // "Reconnecting…" shows whenever we're not in the connected state.
   // The loading screen takes over for the very first connect, so we
   // gate this on `connectionState !== 'connecting'` to avoid stacking
@@ -1703,12 +1717,25 @@ export function App() {
                     isTranscribing: voice.isTranscribing,
                     toggle: () => { void voice.toggle(); },
                   }}
-                  voiceActive={streaming.isActive}
-                  voiceTentative={
-                    streaming.isActive
-                      ? streaming.tentative.trim().replace(/^\s+/u, '')
-                      : ''
-                  }
+                  // Overlay during BOTH PTT and continuous mode. PTT
+                  // flips streaming.isActive on start(); continuous
+                  // mode flips it when VoiceController calls
+                  // startFeed() at speech onset. OR'ing `voice.isListening`
+                  // covers the brief gap between mic toggle and the WS
+                  // handshake.
+                  //
+                  // The overlay uses `display` (committed + tentative
+                  // joined) rather than `tentative` alone. Moonshine's
+                  // LocalAgreement-2 promotes most heard speech into
+                  // `committed` as soon as two consecutive inferences
+                  // agree on it; tentative is just the unstable tail.
+                  // Showing tentative-only made the overlay flicker
+                  // briefly with the last few words and disappear once
+                  // they stabilized — exactly the "millisecond flash"
+                  // the user reported. `display` keeps the whole
+                  // running transcript visible until finalize clears.
+                  voiceActive={streaming.isActive || voice.isListening}
+                  voiceTentative={streaming.display.trim().replace(/^\s+/u, '')}
                   onPrevPersona={handlePrevPersona}
                   onNextPersona={handleNextPersona}
                   personaDisabled={!isConnected}

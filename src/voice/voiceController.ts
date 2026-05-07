@@ -21,7 +21,8 @@ import {
 import { Endpointer, type EndpointerState } from './endpointer';
 import { ProsodyEngine, type ProsodySnapshot } from './prosodyEngine';
 import { SileroVAD, preloadVAD } from './vadEngine';
-import { transcribe, type TranscriptionResult } from './whisperClient';
+// Whisper-batch ASR was removed; Moonshine streaming is the only path.
+// `whisperClient.ts` lingers for historical reference but is unused.
 
 // --- public event surface ---------------------------------------------
 //
@@ -483,56 +484,36 @@ export class VoiceController {
     );
     const t0 = performance.now();
 
-    if (this.opts.streaming) {
-      // Streaming Moonshine path. Audio frames have already been
-      // pushed to the WS as they arrived; here we just request the
-      // final transcription and close the streaming session.
-      try {
-        // Wait for the open handshake in case finalize lands while
-        // the WS is still connecting (very fast utterances).
-        if (this.streamingOpenPromise) {
-          await this.streamingOpenPromise;
-        }
-        finalText = await this.opts.streaming.finalize();
-        totalMs = performance.now() - t0;
-        console.info(
-          `[stt] FINAL #${fireId} resp (moonshine)  ` +
-          `wall=${totalMs.toFixed(0)}ms  text="${finalText}"`,
-        );
-      } catch (err) {
-        console.error(`[stt] FINAL #${fireId} streaming finalize failed:`, err);
-        this.emit({ kind: 'error', message: `streaming finalize failed: ${err}` });
-      } finally {
-        try { await this.opts.streaming.stop(); } catch { /* nothing */ }
-        this.streamingOpen = false;
-        this.streamingOpenPromise = null;
+    // Moonshine is the only ASR path. Audio frames were pushed to the
+    // WS as they arrived; here we just ask the server for the final
+    // transcription and close the streaming session. There is no
+    // Whisper fallback — the controller refuses to run without a
+    // streaming feed wired (see start()).
+    if (!this.opts.streaming) {
+      this.emit({ kind: 'error', message: 'no streaming transcriber wired' });
+      this.emit({ kind: 'transcribing', pending: false });
+      this.resetForNextUtterance();
+      return;
+    }
+    try {
+      // Wait for the open handshake in case finalize lands while
+      // the WS is still connecting (very fast utterances).
+      if (this.streamingOpenPromise) {
+        await this.streamingOpenPromise;
       }
-    } else {
-      // Legacy Whisper-batch path. Kept as a fallback when no
-      // streaming hook is wired (mostly local dev / tests).
-      let result: TranscriptionResult | null = null;
-      this.finalAbort?.abort();
-      const ac = new AbortController();
-      this.finalAbort = ac;
-      try {
-        result = await transcribe(audio, {
-          signal: ac.signal,
-          prompt: this.opts.whisperPrompt?.() ?? '',
-        });
-        totalMs = performance.now() - t0;
-        console.info(
-          `[stt] FINAL #${fireId} resp (whisper)  ` +
-          `wall=${totalMs.toFixed(0)}ms  proxy=${result.proxyMs ?? '?'}ms  ` +
-          `text="${result.text}"  rejection=${result.rejection ?? '-'}`,
-        );
-        finalText = result.text;
-      } catch (err) {
-        if (!ac.signal.aborted) {
-          console.error(`[stt] FINAL #${fireId} failed:`, err);
-          this.emit({ kind: 'error', message: `transcribe failed: ${err}` });
-        }
-        finalText = '';
-      }
+      finalText = await this.opts.streaming.finalize();
+      totalMs = performance.now() - t0;
+      console.info(
+        `[stt] FINAL #${fireId} resp (moonshine)  ` +
+        `wall=${totalMs.toFixed(0)}ms  text="${finalText}"`,
+      );
+    } catch (err) {
+      console.error(`[stt] FINAL #${fireId} streaming finalize failed:`, err);
+      this.emit({ kind: 'error', message: `streaming finalize failed: ${err}` });
+    } finally {
+      try { await this.opts.streaming.stop(); } catch { /* nothing */ }
+      this.streamingOpen = false;
+      this.streamingOpenPromise = null;
     }
 
     this.emit({ kind: 'transcribing', pending: false });
