@@ -646,7 +646,11 @@ function CheckKeysBar({
             outcome={result.llm}
           />
           <KeyResultRow
-            label={result.tts?.provider === 'kokoro' ? 'Kokoro' : 'ElevenLabs'}
+            label={
+              result.tts?.provider === 'kokoro' ? 'Kokoro'
+              : result.tts?.provider === 'qwen3' ? 'Qwen3-TTS'
+              : 'ElevenLabs'
+            }
             outcome={result.tts ?? result.elevenlabs}
           />
         </div>
