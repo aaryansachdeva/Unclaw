@@ -1,9 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ConnectionState } from '../hooks/usePixelStreaming';
+import { fetchUnrealStatus, restartUnreal, UnrealStatus } from '../services/unreal';
 import logoUrl from '../assets/logo.png';
 
 const MIN_LOADING_MS = 2000;
+// Poll cadence while the stream isn't connected. Once connected we stop
+// polling — the stream itself is the liveness signal; soul's /unreal
+// endpoint exists to recover crashes, not to babysit a healthy game.
+const UNREAL_POLL_MS = 4000;
 
 interface StreamViewProps {
   videoParentRef: React.RefObject<HTMLDivElement | null>;
@@ -38,6 +43,57 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
   }, [streamReady]);
 
   const isConnected = streamReady && canShowStream;
+
+  // Poll soul's /unreal/status while the stream isn't connected, so we
+  // can offer a Restart button when the game has crashed/exited. Stops
+  // polling once the stream is up — at that point the stream itself is
+  // the liveness signal and there's no UI surface for the status.
+  const [unreal, setUnreal] = useState<UnrealStatus | null>(null);
+  const [restarting, setRestarting] = useState(false);
+
+  useEffect(() => {
+    if (isConnected) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      const s = await fetchUnrealStatus();
+      if (cancelled) return;
+      setUnreal(s);
+      timer = setTimeout(poll, UNREAL_POLL_MS);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [isConnected]);
+
+  const handleRestart = useCallback(async () => {
+    if (restarting) return;
+    setRestarting(true);
+    try {
+      const s = await restartUnreal();
+      if (s) setUnreal(s);
+    } finally {
+      setRestarting(false);
+    }
+  }, [restarting]);
+
+  // Show a "stopped" state when soul reports the game is gone. `idle`
+  // also surfaces here so the user gets a clear hint when soul booted
+  // without UNREAL_PIXELSTREAMING_EXE configured (instead of a silent
+  // dark stream). `crashed` carries an error string we can surface.
+  const engineStopped = unreal !== null
+    && (unreal.state === 'crashed'
+        || unreal.state === 'exited'
+        || unreal.state === 'idle');
+  const engineHint = unreal?.state === 'crashed'
+    ? `Engine crashed${unreal.error ? ` — ${unreal.error}` : ''}`
+    : unreal?.state === 'exited'
+      ? 'Engine stopped'
+      : unreal?.state === 'idle'
+        ? 'Engine not configured'
+        : null;
 
   return (
     <div className="absolute inset-0 overflow-hidden" style={{ background: 'var(--bg-void)' }}>
@@ -139,40 +195,82 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
                 zIndex: 1,
               }}
             >
-              {/* Loading dots */}
-              <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
-                {[0, 1, 2].map((i) => (
-                  <motion.div
-                    key={i}
-                    animate={{
-                      opacity: [0.25, 1, 0.25],
-                      y: [0, -2, 0],
-                    }}
-                    transition={{
-                      duration: 1.4,
-                      repeat: Infinity,
-                      delay: i * 0.18,
-                      ease: 'easeInOut',
-                    }}
-                    style={{
-                      width: '4px',
-                      height: '4px',
-                      borderRadius: '50%',
-                      background: 'var(--accent)',
-                    }}
-                  />
-                ))}
-              </div>
+              {/* Loading dots — only while we believe the engine is
+                  alive and we're just waiting for the WebRTC handshake.
+                  When soul reports the engine stopped, we swap them
+                  for the Restart affordance below. */}
+              {!engineStopped && (
+                <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
+                  {[0, 1, 2].map((i) => (
+                    <motion.div
+                      key={i}
+                      animate={{
+                        opacity: [0.25, 1, 0.25],
+                        y: [0, -2, 0],
+                      }}
+                      transition={{
+                        duration: 1.4,
+                        repeat: Infinity,
+                        delay: i * 0.18,
+                        ease: 'easeInOut',
+                      }}
+                      style={{
+                        width: '4px',
+                        height: '4px',
+                        borderRadius: '50%',
+                        background: 'var(--accent)',
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
 
               <span style={{
                 fontSize: '10px',
                 fontWeight: 600,
                 letterSpacing: '0.18em',
                 textTransform: 'uppercase',
-                color: 'var(--text-ghost)',
+                color: engineStopped ? 'rgba(196,68,68,0.85)' : 'var(--text-ghost)',
+                textAlign: 'center',
+                maxWidth: '380px',
               }}>
-                Waiting for UnClaw Engine
+                {engineHint ?? 'Waiting for UnClaw Engine'}
               </span>
+
+              {/* Restart affordance. Prominent (warm-red filled) when
+                  the engine is stopped; subtle ghost link otherwise so
+                  it's available as an escape hatch during a long
+                  handshake without dominating the loading screen. */}
+              <button
+                type="button"
+                onClick={handleRestart}
+                disabled={restarting}
+                style={{
+                  marginTop: 6,
+                  padding: engineStopped ? '7px 16px' : '4px 10px',
+                  borderRadius: 999,
+                  fontSize: engineStopped ? 11 : 10,
+                  fontWeight: 600,
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                  cursor: restarting ? 'default' : 'pointer',
+                  background: engineStopped
+                    ? 'rgba(196,68,68,0.14)'
+                    : 'transparent',
+                  border: engineStopped
+                    ? '1px solid rgba(196,68,68,0.35)'
+                    : '1px solid rgba(255,255,255,0.08)',
+                  color: engineStopped
+                    ? 'rgba(255,210,210,0.95)'
+                    : 'var(--text-ghost)',
+                  opacity: restarting ? 0.55 : 1,
+                  transition: 'opacity 160ms ease, background 160ms ease',
+                }}
+              >
+                {restarting
+                  ? 'Restarting…'
+                  : engineStopped ? 'Restart engine' : 'Restart'}
+              </button>
             </motion.div>
           </motion.div>
         )}
