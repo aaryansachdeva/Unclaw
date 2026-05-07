@@ -18,7 +18,7 @@ import { useChatMemory, type Turn } from './hooks/useChatMemory';
 import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
-import { chatViaSoul, SoulChatAction, SoulChatResult } from './services/soulChat';
+import { chatViaSoul, streamChatViaSoul, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
 import { pollNextEscalation } from './services/escalation';
 import { listReminders } from './services/reminders';
 import { expressFace } from './services/express';
@@ -38,6 +38,7 @@ import {
 } from './services/auth';
 import { resetEverything } from './services/accountReset';
 import { fetchSettings } from './services/userSettings';
+import { fetchApiKeys } from './services/apiKeys';
 import { SignInScreen } from './components/Auth/SignInScreen';
 import { Wizard } from './components/Onboarding/Wizard';
 import { personalityFor } from './personalities';
@@ -357,6 +358,28 @@ export function App() {
   // can clear it from anywhere — useEffect cleanup, escalation done, etc.
   const escalationIntervalRef = useRef<number | null>(null);
 
+  // Streaming Kokoro chat state. AbortController cancels an in-flight
+  // /chat_stream_audio fetch on barge-in / new turn; the timeout set
+  // tracks every scheduled chunk dispatch so we can yank them all when
+  // the user interrupts before they've played. Both get drained at the
+  // top of every handleSendMessage call.
+  const streamAbortRef = useRef<AbortController | null>(null);
+  const pendingChunkTimeoutsRef = useRef<Set<number>>(new Set());
+
+  // Cancel any in-flight stream + drop pending chunk dispatches. Called
+  // on barge-in and at the top of each new send so an old reply can't
+  // leak descriptors into a fresh turn.
+  const cancelActiveStream = useCallback(() => {
+    if (streamAbortRef.current) {
+      try { streamAbortRef.current.abort(); } catch { /* already aborted */ }
+      streamAbortRef.current = null;
+    }
+    pendingChunkTimeoutsRef.current.forEach((tid) => {
+      window.clearTimeout(tid);
+    });
+    pendingChunkTimeoutsRef.current.clear();
+  }, []);
+
   // Graceful interruption state.
   // ----------------------------------------------------------------------
   // `lastResponseRef` always reflects the most recent AI response text so
@@ -432,6 +455,39 @@ export function App() {
     }, Math.round(speakSec * 1000));
     return addedTurn;
   }, [pixelStreaming, memory]);
+
+  /** Dispatch ONE streaming chunk to UE. Mirrors the descriptor shape
+   *  dispatchChatResult sends but skips memory + the speak-finished
+   *  timer — those happen once per stream (memory on first chunk, timer
+   *  on the final-chunk total_duration). Action animations are also
+   *  scoped to chunk 0 since soul only attaches `action` there. */
+  const dispatchChatChunk = useCallback((chunk: SoulChatChunk) => {
+    if (!pixelStreaming) return;
+    pixelStreaming.emitUIInteraction({
+      EventType: 'respond_with_mood_server',
+      JobId: chunk.id,
+      Mood: chunk.mood,
+      // The mirror text descriptor uses the FULL response on every
+      // chunk (soul fills it in identically). Renderer-side memory is
+      // updated once outside this helper.
+      Response: toBase64(chunk.response),
+      Behavior: chunk.behavior ?? '',
+      Timestamp: new Date().toISOString(),
+    });
+    if (chunk.chunk_idx === 0 && chunk.action) {
+      const action = chunk.action;
+      const isAnim = action.name === 'give_a_kiss'
+        || action.name === 'do_dance'
+        || action.name === 'say_hello'
+        || action.name === 'react_as_star_wars_fan';
+      if (isAnim) {
+        dispatchActionToUE(pixelStreaming, action, chunk.response);
+      }
+      if (isReminderAction(action.name)) {
+        setRefreshKey(k => k + 1);
+      }
+    }
+  }, [pixelStreaming]);
 
   /** Start a 1.2s poll loop against /escalation/{id}/next. Each polled
    *  result is dispatched through the same UE pipeline a primary /chat
@@ -657,6 +713,9 @@ export function App() {
       window.clearInterval(escalationIntervalRef.current);
       escalationIntervalRef.current = null;
     }
+    // Same idea for the streaming Kokoro path: kill any in-flight
+    // stream + drop any chunk dispatches still queued for the future.
+    cancelActiveStream();
     setEscalating(false);
     setStatusHistory([]);
     // Reset the dedupe ref. Tool events that already landed in the
@@ -695,6 +754,104 @@ export function App() {
       ? `${persona.prompt}\n\n[INTERRUPTION CONTEXT] You were just speaking when the user interrupted you. The text you were in the middle of saying was: "${interruptedText.slice(0, 600)}". The user may have only heard part of it. Respond to what they're saying NOW. Don't simply repeat what you already said. If their new message is a follow-up question, a correction, or a tangent, address it directly and naturally.`
       : persona.prompt;
 
+    // Streaming Kokoro path: when the user picked Kokoro local AND
+    // there are no images attached (escalation handles vision; soul's
+    // streaming endpoint doesn't), drive a chunked /chat_stream_audio.
+    // Each chunk is scheduled to dispatch to UE based on cumulative
+    // audio duration so playback is gapless even when chunks arrive
+    // in bursts (and well before the full reply has been synthesized).
+    let useStreaming = false;
+    try {
+      const keys = await fetchApiKeys();
+      useStreaming = keys.tts_provider === 'kokoro'
+        && keys.kokoro_mode === 'recommended'
+        && pendingImages.length === 0;
+    } catch { /* fall through to non-streaming */ }
+
+    if (useStreaming) {
+      const ac = new AbortController();
+      streamAbortRef.current = ac;
+      let firstChunkArrivedAt = 0;
+      let memoryAdded = false;
+      let totalDuration = 0;
+      let escalationFallback: SoulChatChunk | null = null;
+      try {
+        for await (const chunk of streamChatViaSoul(trimmed, {
+          systemExtension: systemExt,
+          history,
+          signal: ac.signal,
+        })) {
+          if (chunk._escalation_request) {
+            escalationFallback = chunk;
+            continue;
+          }
+          if (chunk.is_final) {
+            totalDuration = chunk.total_duration ?? totalDuration;
+            continue;
+          }
+          // First non-final chunk anchors the timeline. Add memory
+          // once with the FULL response text (soul ships it on every
+          // chunk; we only stamp the assistant turn into our local
+          // memory the first time so the chat pane doesn't get N
+          // duplicated entries).
+          const now = performance.now();
+          if (firstChunkArrivedAt === 0) {
+            firstChunkArrivedAt = now;
+          }
+          if (!memoryAdded && chunk.response) {
+            memory.add('assistant', chunk.response);
+            lastResponseRef.current = chunk.response;
+            memoryAdded = true;
+          }
+          // Schedule. Negative deltas (chunk arrived after its play
+          // time) dispatch immediately — happens when synth is slower
+          // than the audio it produced, i.e. the buffer is empty.
+          const playAt = firstChunkArrivedAt
+            + ((chunk.start_offset_s ?? 0) * 1000);
+          const delay = Math.max(0, playAt - now);
+          const tid = window.setTimeout(() => {
+            pendingChunkTimeoutsRef.current.delete(tid);
+            dispatchChatChunk(chunk);
+          }, delay);
+          pendingChunkTimeoutsRef.current.add(tid);
+        }
+        // Stream done. If LLM picked escalation we fall back to
+        // chatViaSoul (the streaming pipeline doesn't host the
+        // escalation orchestrator yet).
+        if (escalationFallback) {
+          const fallback = await chatViaSoul(trimmed, {
+            systemExtension: systemExt,
+            history,
+            images: pendingImages.map((img) => img.base64),
+          });
+          dispatchChatResult(fallback);
+          if (fallback.escalation?.id) {
+            startEscalationPolling(fallback.escalation.id);
+          }
+        } else {
+          // Set the AI-speaking timer using the cumulative duration
+          // reported on the final chunk. Once that's elapsed the
+          // notify hook fires and the voice agent can resume.
+          const speakSec = totalDuration > 0 ? totalDuration : 4;
+          const timerId = window.setTimeout(() => {
+            pendingChunkTimeoutsRef.current.delete(timerId);
+            isAISpeakingRef.current = false;
+            notifyAIFinishedRef.current();
+          }, Math.round(speakSec * 1000));
+          pendingChunkTimeoutsRef.current.add(timerId);
+        }
+      } catch (err) {
+        if ((err as { name?: string })?.name !== 'AbortError') {
+          console.error('[chat] soul /chat_stream_audio failed:', err);
+        }
+        isAISpeakingRef.current = false;
+      } finally {
+        if (streamAbortRef.current === ac) streamAbortRef.current = null;
+        setIsSending(false);
+      }
+      return;
+    }
+
     try {
       const result = await chatViaSoul(trimmed, {
         systemExtension: systemExt,
@@ -717,7 +874,7 @@ export function App() {
     } finally {
       setIsSending(false);
     }
-  }, [isSending, persona, memory, attachedImages, dispatchChatResult, startEscalationPolling]);
+  }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream]);
 
   // Slash-command animation dispatcher — hands a ready-to-go UE
   // descriptor to the dock so it can fire `/dance`, `/kiss`, `/hello`

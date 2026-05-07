@@ -148,3 +148,112 @@ export async function chatViaSoul(
   }
   return (await res.json()) as SoulChatResult;
 }
+
+
+// ---------------------------------------------------------------------
+// Streaming chat (Kokoro local only)
+// ---------------------------------------------------------------------
+//
+// Soul's `/chat_stream_audio` runs LLM once, then streams sentence-sized
+// chunks via NDJSON. Each chunk is shaped like a slimmer SoulChatResult
+// covering one slice of the reply. App.tsx schedules each chunk for
+// dispatch to UE based on cumulative audio duration so playback is
+// gapless even when chunks arrive in bursts.
+
+export interface SoulChatChunk extends SoulChatResult {
+  /** Position in the streamed reply. Last chunk has is_final=true and
+   *  no audio/frames — just the cumulative timing summary. */
+  chunk_idx: number;
+  is_final: boolean;
+  /** Where this chunk begins relative to the start of the full reply.
+   *  The renderer adds firstChunkArrivedAt to compute wall-clock dispatch
+   *  time. */
+  start_offset_s?: number;
+  total_duration?: number;
+  total_n_frames?: number;
+  n_chunks?: number;
+  /** Set on the final chunk when soul detected an LLM-driven escalation
+   *  request. The streaming endpoint can't host the escalation flow yet,
+   *  so callers fall back to chatViaSoul() with the same message. */
+  _escalation_request?: boolean;
+}
+
+/** Runs the streaming chat pipeline. Yields each chunk as soul emits
+ *  it (via `for await ... of`). Honors AbortSignal so a fresh user
+ *  turn / voice barge-in can cancel an in-flight stream cleanly.
+ *
+ *  Forces tts_provider=kokoro on the wire — soul rejects this endpoint
+ *  for any other provider in v1. Caller is responsible for falling back
+ *  to chatViaSoul() when this isn't appropriate. */
+export async function* streamChatViaSoul(
+  message: string,
+  opts: SoulChatOptions & { signal?: AbortSignal } = {},
+): AsyncGenerator<SoulChatChunk, void, void> {
+  const body: Record<string, unknown> = { message };
+  if (opts.history) body.history = opts.history;
+  if (opts.voiceId) body.voice_id = opts.voiceId;
+  if (opts.lipsyncModel) body.lipsync_model = opts.lipsyncModel;
+  if (opts.systemExtension) body.system_extension = opts.systemExtension;
+  if (opts.images && opts.images.length > 0) body.images = opts.images;
+
+  try {
+    const keys = await fetchApiKeys();
+    if (keys.llm_model) body.llm_model = keys.llm_model;
+    if (keys.llm_api_key && keys.llm_provider !== 'ollama') {
+      body.llm_api_key = keys.llm_api_key;
+    }
+    body.tts_provider = 'kokoro';
+    if (keys.kokoro_voice) body.voice_id = keys.kokoro_voice;
+  } catch (err) {
+    console.warn('[soulChat] failed to read api keys (streaming)', err);
+    body.tts_provider = 'kokoro';
+  }
+
+  const res = await fetch(`${SOUL_URL}/chat_stream_audio`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: opts.signal,
+  });
+  if (!res.ok || !res.body) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`soul /chat_stream_audio ${res.status}: ${errText.slice(0, 200)}`);
+  }
+
+  // NDJSON parsing — chunks may arrive split mid-line, so we accumulate
+  // and split on '\n'. The trailing fragment after the last newline is
+  // an in-progress chunk; we hold it until more bytes arrive.
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl = buffer.indexOf('\n');
+      while (nl >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (line) {
+          try {
+            yield JSON.parse(line) as SoulChatChunk;
+          } catch (err) {
+            console.warn('[soulChat] bad NDJSON line', err, line.slice(0, 200));
+          }
+        }
+        nl = buffer.indexOf('\n');
+      }
+    }
+    const tail = buffer.trim();
+    if (tail) {
+      try {
+        yield JSON.parse(tail) as SoulChatChunk;
+      } catch (err) {
+        console.warn('[soulChat] bad NDJSON tail', err, tail.slice(0, 200));
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* already released */ }
+  }
+}
