@@ -234,6 +234,7 @@ export function ConnectionsStep({
       || field === 'Model'
       || field === 'Agentic model'
       || field === 'OpenAI key for agentic'
+      || field === 'Gemini API key for grounded search'
       || (field.endsWith(' API key') && field !== 'ElevenLabs API key');
     return mode === 'llm' ? isLlmField : !isLlmField;
   });
@@ -260,6 +261,8 @@ export function ConnectionsStep({
     values.agentic_use_same_as_chat,
     values.agentic_model,
     values.agentic_api_key,
+    values.grounding_search_enabled,
+    values.gemini_search_api_key,
   ] : mode === 'voice' ? [
     values.elevenlabs_api_key,
     values.tts_provider,
@@ -277,6 +280,8 @@ export function ConnectionsStep({
     values.agentic_use_same_as_chat,
     values.agentic_model,
     values.agentic_api_key,
+    values.grounding_search_enabled,
+    values.gemini_search_api_key,
   ]);
 
   const handleCheckKeys = async () => {
@@ -290,7 +295,8 @@ export function ConnectionsStep({
       // (and agentic, when enabled) succeed; voice page passes
       // when TTS readiness succeeds.
       const llmOk = result.llm.ok
-        && (!values.agentic_enabled || (result.agentic?.ok ?? true));
+        && (!values.agentic_enabled || (result.agentic?.ok ?? true))
+        && (!values.grounding_search_enabled || (result.gemini_search?.ok ?? true));
       const voiceOk = result.tts?.ok ?? result.elevenlabs?.ok ?? false;
       const scopeOk = mode === 'llm' ? llmOk
                     : mode === 'voice' ? voiceOk
@@ -508,6 +514,7 @@ export function ConnectionsStep({
             onCheck={handleCheckKeys}
             scope={mode}
             agenticEnabled={values.agentic_enabled}
+            groundingEnabled={values.grounding_search_enabled}
           />
         ))}
       </div>
@@ -527,6 +534,7 @@ function CheckKeysBar({
   onCheck,
   scope = 'all',
   agenticEnabled = false,
+  groundingEnabled = false,
 }: {
   check: {
     state: 'idle' | 'checking' | 'done';
@@ -543,6 +551,9 @@ function CheckKeysBar({
    *  result.agentic. When the soul-side probe lands, this row will
    *  show the OpenAI-key check outcome. */
   agenticEnabled?: boolean;
+  /** When true AND scope includes LLM, render a Web-search (Gemini)
+   *  row from result.gemini_search. */
+  groundingEnabled?: boolean;
 }) {
   const checking = check.state === 'checking';
   const result = check.result;
@@ -733,6 +744,12 @@ function CheckKeysBar({
             <KeyResultRow
               label="Agentic (OpenAI)"
               outcome={result.agentic ?? { ok: false, error: 'not probed yet' }}
+            />
+          )}
+          {(scope === 'all' || scope === 'llm') && groundingEnabled && (
+            <KeyResultRow
+              label="Web search (Gemini)"
+              outcome={result.gemini_search ?? { ok: false, error: 'not probed yet' }}
             />
           )}
           {(scope === 'all' || scope === 'voice') && (

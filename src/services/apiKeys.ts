@@ -317,6 +317,10 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
       missing.push('OpenAI key for agentic');
     }
   }
+  // Gemini grounded-search gate: only enforced when the user opted in.
+  if (profile.grounding_search_enabled && !profile.gemini_search_api_key) {
+    missing.push('Gemini API key for grounded search');
+  }
   return missing;
 }
 
@@ -356,6 +360,9 @@ export interface KeyValidationResult {
    *  request. Probes the OpenAI key + model used for the escalation
    *  loop. Wizard renders a third row when this is set. */
   agentic?: KeyValidationOutcome;
+  /** Optional — only present when `grounding_search_enabled` was true.
+   *  Probes the Gemini key used for the escalation web_search tool. */
+  gemini_search?: KeyValidationOutcome;
 }
 
 /** Soul probes each provider's API with the supplied keys in parallel.
@@ -389,6 +396,9 @@ export async function validateKeys(
                             && profile.llm_provider === 'openai'
                               ? profile.llm_api_key
                               : profile.agentic_api_key,
+      // Gemini grounded-search — soul probes the key when enabled.
+      grounding_search_enabled: profile.grounding_search_enabled,
+      gemini_search_api_key:    profile.gemini_search_api_key,
     }),
   });
   if (!res.ok) {

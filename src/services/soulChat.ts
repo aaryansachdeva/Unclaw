@@ -149,6 +149,13 @@ export async function chatViaSoul(
       body.agentic_model = reuseChat ? keys.llm_model : keys.agentic_model;
       body.agentic_api_key = reuseChat ? keys.llm_api_key : keys.agentic_api_key;
     }
+    // Gemini grounded-search BYOK. Only forwarded when the user opted
+    // in via the wizard. Without this, the escalation web_search tool
+    // would silently bill the dev's quota (or fail outright on a
+    // shipped build with no env key).
+    if (keys.grounding_search_enabled && keys.gemini_search_api_key) {
+      body.gemini_search_api_key = keys.gemini_search_api_key;
+    }
   } catch (err) {
     console.warn('[soulChat] failed to read api keys', err);
   }
@@ -313,6 +320,13 @@ export async function* streamChatViaSoul(
         && !!keys.llm_api_key;
       body.agentic_model = reuseChat ? keys.llm_model : keys.agentic_model;
       body.agentic_api_key = reuseChat ? keys.llm_api_key : keys.agentic_api_key;
+    }
+    // Gemini grounded-search BYOK. Only forwarded when the user opted
+    // in via the wizard. Without this, the escalation web_search tool
+    // would silently bill the dev's quota (or fail outright on a
+    // shipped build with no env key).
+    if (keys.grounding_search_enabled && keys.gemini_search_api_key) {
+      body.gemini_search_api_key = keys.gemini_search_api_key;
     }
   } catch (err) {
     console.warn('[soulChat] failed to read api keys (streaming)', err);
