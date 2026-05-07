@@ -256,9 +256,9 @@ export interface SoulChatChunk extends SoulChatResult {
  *  it (via `for await ... of`). Honors AbortSignal so a fresh user
  *  turn / voice barge-in can cancel an in-flight stream cleanly.
  *
- *  Forces tts_provider=kokoro on the wire — soul rejects this endpoint
- *  for any other provider in v1. Caller is responsible for falling back
- *  to chatViaSoul() when this isn't appropriate. */
+ *  tts_provider must be `kokoro` or `qwen3` — soul rejects the endpoint
+ *  for cloud / custom-endpoint providers. Caller (App.tsx's
+ *  `useStreaming` gate) is responsible for routing those to chatViaSoul. */
 export async function* streamChatViaSoul(
   message: string,
   opts: SoulChatOptions & { signal?: AbortSignal } = {},
@@ -276,8 +276,17 @@ export async function* streamChatViaSoul(
     if (keys.llm_api_key && keys.llm_provider !== 'ollama') {
       body.llm_api_key = keys.llm_api_key;
     }
-    body.tts_provider = 'kokoro';
-    if (keys.kokoro_voice) body.voice_id = keys.kokoro_voice;
+    // Forward whichever local provider the user picked. Soul's
+    // /chat_stream_audio gates on tts_provider in {kokoro, qwen3};
+    // the App.tsx caller restricts streaming to those two before
+    // calling us, so anything else here is a bug upstream.
+    body.tts_provider = keys.tts_provider;
+    if (keys.tts_provider === 'kokoro' && keys.kokoro_voice) {
+      body.voice_id = keys.kokoro_voice;
+    }
+    if (keys.tts_provider === 'qwen3' && keys.qwen3_voice) {
+      body.voice_id = keys.qwen3_voice;
+    }
   } catch (err) {
     console.warn('[soulChat] failed to read api keys (streaming)', err);
     body.tts_provider = 'kokoro';

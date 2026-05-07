@@ -99,11 +99,12 @@ export function getProvider(id: LLMProviderId | null | undefined): ProviderInfo 
 }
 
 
-/** TTS provider the user picked. ElevenLabs is the cloud / BYOK key
- *  path; Kokoro is the local / open-weight option (no key, ~325 MB
- *  one-time download, soul runs the model in-process or forwards to
- *  a user-supplied endpoint). */
-export type TtsProviderId = 'elevenlabs' | 'kokoro';
+/** TTS provider the user picked.
+ *  - elevenlabs: cloud / BYOK API key
+ *  - kokoro: local 82M open-weight model (~325 MB), soul in-process
+ *  - qwen3: local 0.6B model in an isolated subprocess venv (~5 GB
+ *           total install: torch+transformers deps + HF model + voice). */
+export type TtsProviderId = 'elevenlabs' | 'kokoro' | 'qwen3';
 
 /** Sub-mode when `tts_provider === 'kokoro'`. `recommended` = soul
  *  downloads + runs Kokoro locally; `custom` = user has Kokoro
@@ -141,6 +142,10 @@ export interface ApiKeysProfile {
    *  whichever Kokoro path runs (local or remote). Falls back to
    *  af_heart if null. */
   kokoro_voice: string | null;
+  /** Selected Qwen3-TTS voice id (e.g. 'grace_qwen3'). Only consulted
+   *  when `tts_provider === 'qwen3'`. Defaults to the Grace clone soul
+   *  downloads during install. */
+  qwen3_voice: string | null;
   /** Gemini API key — used ONLY for Google Search grounding (a separate
    *  feature from the chat provider). When `grounding_search_enabled` is
    *  true and this key is set, escalation calls can include
@@ -170,6 +175,7 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   // users get persona-consistent voice out of the box if they pick
   // Kokoro; they can still flip to any of the bundled 54 voices.
   kokoro_voice:             'grace_kokoro',
+  qwen3_voice:              'grace_qwen3',
   gemini_search_api_key:    null,
   grounding_search_enabled: false,
   sync_across_devices:      false,
@@ -264,6 +270,11 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
     // wizard's Check Keys step calls /validate_keys which probes that
     // state and surfaces "not installed" as a per-row failure with an
     // Install Kokoro button — no field-level entry needed here.
+  } else if (profile.tts_provider === 'qwen3') {
+    // Same shape as Kokoro recommended: install state checked at
+    // Check-Keys time, install panel surfaces a hard failure when
+    // the venv / model / voice aren't on disk yet. No field-level
+    // requirement at this layer.
   } else {
     if (!profile.elevenlabs_api_key) missing.push('ElevenLabs API key');
   }

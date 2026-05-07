@@ -779,9 +779,16 @@ export function App() {
     let useStreaming = false;
     try {
       const keys = await fetchApiKeys();
-      useStreaming = keys.tts_provider === 'kokoro'
-        && keys.kokoro_mode === 'recommended'
-        && pendingImages.length === 0;
+      // Stream when the user picked a provider that has a local
+      // chunk-by-chunk synthesis path:
+      //   * kokoro recommended (in-process kokoro-onnx)
+      //   * qwen3 (subprocess service)
+      // Custom Kokoro endpoint, ElevenLabs, and image-bearing turns
+      // (which auto-route through escalation) all stay on /chat.
+      const localStreamingTts =
+        (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'recommended')
+        || keys.tts_provider === 'qwen3';
+      useStreaming = localStreamingTts && pendingImages.length === 0;
     } catch { /* fall through to non-streaming */ }
 
     if (useStreaming) {

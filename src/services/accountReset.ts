@@ -19,6 +19,8 @@ import { clearApiKeys } from './apiKeys';
 import { signOut } from './auth';
 import { deleteVaultBlob } from './keysSync';
 import { deleteSettings, deleteCloudSettings } from './userSettings';
+import { uninstallKokoro } from './kokoro';
+import { uninstallQwen3 } from './qwen3';
 
 /** localStorage keys owned by the renderer. Listed explicitly so the
  *  reset is conservative — we don't accidentally nuke something the
@@ -97,6 +99,17 @@ export async function resetEverything(
     report.soulProfile = true;
   } catch (err) {
     console.warn('[accountReset] deleteSettings threw', err);
+  }
+
+  // 2b. Local — wipe TTS provider installs (kokoro model + voices,
+  //     qwen3 venv + model + voices). Best-effort; the user can
+  //     re-install via the wizard after the reset. Failures here
+  //     don't gate the rest of the reset path.
+  try { await uninstallKokoro(); } catch (err) {
+    console.warn('[accountReset] uninstallKokoro threw', err);
+  }
+  try { await uninstallQwen3(); } catch (err) {
+    console.warn('[accountReset] uninstallQwen3 threw', err);
   }
 
   // 3. Cloud (auth-required) — vault + settings in parallel; failures

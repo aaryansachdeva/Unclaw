@@ -39,6 +39,16 @@ import {
   RECOMMENDED_VOICES,
   type KokoroStatus,
 } from '../../services/kokoro';
+import {
+  fetchQwen3Status,
+  startQwen3Install,
+  RECOMMENDED_VOICES as QWEN3_VOICES,
+  labelForVoice as labelForQwen3Voice,
+  phaseLabel as qwen3PhaseLabel,
+  INSTALL_PHASES as QWEN3_PHASES,
+  type Qwen3Status,
+  type Qwen3InstallPhase,
+} from '../../services/qwen3';
 
 interface Props {
   values: ApiKeysProfile;
@@ -828,6 +838,7 @@ function VoiceSection({
           options={[
             { id: 'elevenlabs', label: 'ElevenLabs (cloud)' },
             { id: 'kokoro',     label: 'Kokoro (local, free)' },
+            { id: 'qwen3',      label: 'Qwen3-TTS (local, premium)' },
           ]}
         />
       </FieldLabel>
@@ -891,6 +902,17 @@ function VoiceSection({
             />
           </FieldLabel>
         </>
+      )}
+
+      {/* Qwen3 branch — install panel (multi-stage) + voice dropdown.
+          No mode picker since v1 is local-only; we may add a custom
+          endpoint variant later (mirrored on Kokoro's pattern). */}
+      {values.tts_provider === 'qwen3' && (
+        <Qwen3Section
+          values={values}
+          onChange={onChange}
+          agentName={agentName}
+        />
       )}
     </div>
   );
@@ -1157,6 +1179,368 @@ function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+
+// ---------------------------------------------------------------------
+// Qwen3 section — provider branch UI for Qwen3-TTS.
+//
+// Self-contained: polls /tts/qwen3/status on its own (different cadence
+// from VoiceSection's Kokoro polling), drives /tts/qwen3/install, and
+// renders the install panel + voice picker. Soul does the actual work
+// (uv venv + dep install + model download + voice download); the
+// renderer just shows progress and handles state transitions.
+// ---------------------------------------------------------------------
+
+function Qwen3Section({
+  values,
+  onChange,
+  agentName,
+}: {
+  values: ApiKeysProfile;
+  onChange: (next: ApiKeysProfile) => void;
+  agentName?: string | null;
+}) {
+  const [status, setStatus] = useState<Qwen3Status | null>(null);
+  const pollRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (values.tts_provider !== 'qwen3') return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const s = await fetchQwen3Status();
+        if (cancelled) return;
+        setStatus(s);
+        // Tighten the cadence while a download is in flight, drop to
+        // a slow heartbeat once installed (so we still notice if the
+        // service crashes externally).
+        const next = s.state === 'downloading' ? 1500 : 30_000;
+        pollRef.current = window.setTimeout(tick, next);
+      } catch {
+        if (!cancelled) pollRef.current = window.setTimeout(tick, 3000);
+      }
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      if (pollRef.current !== null) {
+        window.clearTimeout(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [values.tts_provider]);
+
+  const handleInstall = async () => {
+    try {
+      const s = await startQwen3Install();
+      setStatus(s);
+      const tick = async () => {
+        try {
+          const next = await fetchQwen3Status();
+          setStatus(next);
+          if (next.state === 'downloading') {
+            pollRef.current = window.setTimeout(tick, 1500);
+          }
+        } catch { /* outer effect retries */ }
+      };
+      void tick();
+    } catch (err) {
+      console.warn('[qwen3] install failed', err);
+    }
+  };
+
+  const setVoice = (id: string) => {
+    onChange({ ...values, qwen3_voice: id || null });
+  };
+
+  // Voice catalogue — show whatever soul reports as installed; fall
+  // back to the curated list before /status returns. Re-label
+  // grace_qwen3 with the user's chosen agent name (e.g. "Aria
+  // (offline)") so the dropdown reads consistently with their pick.
+  const voiceOptions = useMemo(() => {
+    const trimmedName = (agentName ?? '').trim() || 'Grace';
+    const ids = (status?.voices && status.voices.length > 0)
+      ? status.voices
+      : QWEN3_VOICES.map((v) => v.id);
+    return ids.map((id) => ({
+      id,
+      label: id === 'grace_qwen3'
+        ? `${trimmedName} (offline)`
+        : labelForQwen3Voice(id),
+    }));
+  }, [status?.voices, agentName]);
+
+  return (
+    <>
+      <Qwen3InstallPanel status={status} onInstall={handleInstall} />
+      <FieldLabel text="Voice">
+        <Dropdown
+          value={values.qwen3_voice ?? ''}
+          onChange={setVoice}
+          placeholder="Pick a voice"
+          options={voiceOptions}
+        />
+      </FieldLabel>
+    </>
+  );
+}
+
+
+function Qwen3InstallPanel({
+  status,
+  onInstall,
+}: {
+  status: Qwen3Status | null;
+  onInstall: () => void;
+}) {
+  const state = status?.state ?? 'idle';
+  const error = status?.error ?? null;
+  const progress = status?.progress;
+
+  const showInstallButton = state === 'idle' || state === 'error';
+
+  // Pre-flight gates. Surface these before the user can hit Install
+  // so a too-small disk or a saturated GPU produces a clear "no" up
+  // front, not a 4 GB-in cliff failure.
+  const diskOk = (status?.free_disk_gb ?? 0) >= (status?.min_free_disk_gb ?? 0);
+  const vramOk = (status?.free_vram_gb ?? 0) >= (status?.min_free_vram_gb ?? 0);
+  const installBlocked = !diskOk || !vramOk;
+
+  // Stage progress — figure out which phases have completed already.
+  // Soul reports the CURRENT phase; we mark all earlier phases done.
+  const currentPhaseIdx = progress
+    ? QWEN3_PHASES.indexOf(progress.phase as Qwen3InstallPhase)
+    : -1;
+
+  const pct = progress && progress.bytes_total > 0
+    ? Math.min(100, Math.max(0, (progress.bytes_done / progress.bytes_total) * 100))
+    : 0;
+
+  let header: string;
+  if (state === 'installed') header = 'Qwen3-TTS is installed and ready.';
+  else if (state === 'downloading') header = 'Setting up Qwen3-TTS…';
+  else if (state === 'error') header = 'Install failed.';
+  else header = 'Qwen3-TTS is not installed yet.';
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        padding: '12px 14px',
+        background: state === 'installed'
+          ? 'rgba(96, 178, 96, 0.06)'
+          : 'rgba(255, 255, 255, 0.025)',
+        border: state === 'installed'
+          ? '1px solid rgba(96, 178, 96, 0.32)'
+          : '1px solid var(--glass-border)',
+        borderRadius: 10,
+        transition: 'background 0.18s var(--ease-out-quart), border-color 0.18s var(--ease-out-quart)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {state === 'installed' ? (
+          <CheckCircle2 size={15} strokeWidth={2} aria-hidden color="#7fc97f" />
+        ) : state === 'error' ? (
+          <AlertCircle size={15} strokeWidth={2} aria-hidden color="var(--accent)" />
+        ) : (
+          <Download size={15} strokeWidth={2} aria-hidden color="var(--text-secondary)" />
+        )}
+        <span style={{
+          fontSize: 13,
+          color: 'var(--text-primary)',
+          fontWeight: 500,
+          flex: 1,
+        }}>
+          {header}
+        </span>
+        {showInstallButton && (
+          <button
+            type="button"
+            onClick={onInstall}
+            disabled={installBlocked}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '7px 14px',
+              borderRadius: 10,
+              border: 'none',
+              background: installBlocked ? 'rgba(255,255,255,0.08)' : '#ffffff',
+              color: installBlocked
+                ? 'var(--text-ghost)'
+                : 'rgba(20, 20, 20, 0.92)',
+              fontFamily: 'inherit',
+              fontSize: 12.5,
+              fontWeight: 600,
+              letterSpacing: '0.005em',
+              cursor: installBlocked ? 'not-allowed' : 'pointer',
+              boxShadow: installBlocked
+                ? 'none'
+                : '0 4px 14px -4px rgba(196, 68, 68, 0.45), 0 2px 6px rgba(0, 0, 0, 0.25)',
+              transition: 'transform 0.12s var(--ease-out-quart)',
+            }}
+            onMouseEnter={(e) => {
+              if (installBlocked) return;
+              e.currentTarget.style.transform = 'translateY(-1px)';
+            }}
+            onMouseLeave={(e) => {
+              if (installBlocked) return;
+              e.currentTarget.style.transform = 'translateY(0)';
+            }}
+            title={installBlocked
+              ? 'Free up disk / GPU memory and try again'
+              : 'Downloads ~5 GB and sets up an isolated Python environment'}
+          >
+            <Download size={13} strokeWidth={2.2} />
+            {state === 'error' ? 'Retry install' : 'Install Qwen3-TTS'}
+          </button>
+        )}
+      </div>
+
+      {/* Pre-flight gate warnings — render under the header when the
+          checks fail, so the user sees WHY the Install button is
+          disabled. Each row tells them how much they have and how
+          much is needed. */}
+      {showInstallButton && installBlocked && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {!diskOk && (
+            <span style={{ fontSize: 11, color: 'var(--accent)' }}>
+              Need {status?.min_free_disk_gb} GB free disk;
+              {' '}only {status?.free_disk_gb} GB available.
+            </span>
+          )}
+          {!vramOk && (
+            <span style={{ fontSize: 11, color: 'var(--accent)' }}>
+              Need {status?.min_free_vram_gb} GB free GPU memory;
+              {' '}only {status?.free_vram_gb} GB available — close UE
+              / other GPU apps and re-check.
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Stage list during install. Each phase gets a row; the active
+          one shows the bar + detail line, finished ones get a check,
+          pending ones stay dimmed. ~5 rows max — fits without scroll. */}
+      {state === 'downloading' && progress && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {QWEN3_PHASES.map((phase, idx) => {
+            const isActive = idx === currentPhaseIdx;
+            const isDone = idx < currentPhaseIdx;
+            const isPending = idx > currentPhaseIdx;
+            return (
+              <div
+                key={phase}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 3,
+                  opacity: isPending ? 0.45 : 1,
+                  transition: 'opacity 0.18s var(--ease-out-quart)',
+                }}
+              >
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  fontSize: 11.5,
+                  color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  fontWeight: isActive ? 500 : 400,
+                }}>
+                  {isDone ? (
+                    <CheckCircle2 size={11} strokeWidth={2.4} color="#7fc97f" />
+                  ) : isActive ? (
+                    <Loader2
+                      size={11}
+                      strokeWidth={2.4}
+                      style={{ animation: 'spin 1s linear infinite' }}
+                    />
+                  ) : (
+                    <span style={{
+                      width: 11, height: 11, borderRadius: '50%',
+                      border: '1px solid var(--glass-border)',
+                      flexShrink: 0,
+                    }} />
+                  )}
+                  <span style={{ flex: 1 }}>{qwen3PhaseLabel(phase)}</span>
+                </div>
+
+                {/* Per-stage progress bar + detail, only for the
+                    active stage. The detail line is the live log
+                    tail soul forwards from the underlying tool
+                    (uv, snapshot_download). */}
+                {isActive && (
+                  <div style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 3,
+                    marginLeft: 19,
+                  }}>
+                    {progress.bytes_total > 0 && (
+                      <div style={{
+                        position: 'relative',
+                        width: '100%',
+                        height: 4,
+                        background: 'rgba(255, 255, 255, 0.06)',
+                        borderRadius: 2,
+                        overflow: 'hidden',
+                      }}>
+                        <div style={{
+                          position: 'absolute',
+                          inset: 0,
+                          width: `${pct}%`,
+                          background: 'var(--accent)',
+                          borderRadius: 2,
+                          transition: 'width 0.25s var(--ease-out-quart)',
+                        }} />
+                      </div>
+                    )}
+                    {progress.detail && (
+                      <span style={{
+                        fontSize: 10.5,
+                        color: 'var(--text-ghost)',
+                        letterSpacing: '0.005em',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        fontFamily: 'monospace',
+                      }}>
+                        {progress.detail}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {state === 'error' && error && (
+        <span style={{
+          fontSize: 11.5,
+          color: 'var(--accent)',
+          lineHeight: 1.4,
+        }}>
+          {error}
+        </span>
+      )}
+
+      {state === 'installed' && status && (
+        <span style={{
+          fontSize: 11,
+          color: 'var(--text-secondary)',
+          letterSpacing: '0.01em',
+        }}>
+          {status.voices.length} voice{status.voices.length === 1 ? '' : 's'} available
+          {status.service_running ? ' · service running' : ' · service starts on first chat'}.
+        </span>
+      )}
+    </div>
+  );
 }
 
 
