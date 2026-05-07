@@ -777,6 +777,7 @@ export function App() {
     // audio duration so playback is gapless even when chunks arrive
     // in bursts (and well before the full reply has been synthesized).
     let useStreaming = false;
+    let streamingProvider: 'kokoro' | 'qwen3' | null = null;
     try {
       const keys = await fetchApiKeys();
       // Stream when the user picked a provider that has a local
@@ -785,10 +786,13 @@ export function App() {
       //   * qwen3 (subprocess service)
       // Custom Kokoro endpoint, ElevenLabs, and image-bearing turns
       // (which auto-route through escalation) all stay on /chat.
-      const localStreamingTts =
-        (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'recommended')
-        || keys.tts_provider === 'qwen3';
-      useStreaming = localStreamingTts && pendingImages.length === 0;
+      if (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'recommended') {
+        useStreaming = pendingImages.length === 0;
+        streamingProvider = 'kokoro';
+      } else if (keys.tts_provider === 'qwen3') {
+        useStreaming = pendingImages.length === 0;
+        streamingProvider = 'qwen3';
+      }
     } catch { /* fall through to non-streaming */ }
 
     if (useStreaming) {
@@ -836,7 +840,13 @@ export function App() {
           // of butting up against each other; ~150 ms matches the
           // pause length the LLM-formatted text usually implies via
           // sentence-final punctuation.
-          const INTER_CHUNK_GAP_MS = 800;
+          // Provider-specific gap. Both providers now chunk on
+          // sentence boundaries (Kokoro splits TEXT directly, Qwen3
+          // pre-splits in soul/qwen3_runtime), so gaps land on
+          // natural pauses either way. Qwen3's voice-clone prosody
+          // already includes more natural conversational pacing —
+          // a smaller gap reads as a breath instead of a held pause.
+          const INTER_CHUNK_GAP_MS = streamingProvider === 'qwen3' ? 300 : 800;
           const playAt = firstChunkArrivedAt
             + ((chunk.start_offset_s ?? 0) * 1000)
             + (chunk.chunk_idx * INTER_CHUNK_GAP_MS);
@@ -866,7 +876,13 @@ export function App() {
           // scheduler inserted (n_chunks - 1 gaps × 150 ms each). Once
           // that's elapsed the notify hook fires and the voice agent
           // can resume.
-          const INTER_CHUNK_GAP_MS = 800;
+          // Provider-specific gap. Both providers now chunk on
+          // sentence boundaries (Kokoro splits TEXT directly, Qwen3
+          // pre-splits in soul/qwen3_runtime), so gaps land on
+          // natural pauses either way. Qwen3's voice-clone prosody
+          // already includes more natural conversational pacing —
+          // a smaller gap reads as a breath instead of a held pause.
+          const INTER_CHUNK_GAP_MS = streamingProvider === 'qwen3' ? 300 : 800;
           const gapsMs = Math.max(0, totalChunks - 1) * INTER_CHUNK_GAP_MS;
           const speakMs = (totalDuration > 0 ? totalDuration * 1000 : 4000) + gapsMs;
           const timerId = window.setTimeout(() => {
