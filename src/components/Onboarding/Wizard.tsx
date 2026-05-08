@@ -23,7 +23,6 @@ import { WelcomeStep } from './WelcomeStep';
 import { ConnectionsStep } from './ConnectionsStep';
 import type { VibeValues } from './VibeStep';
 import {
-  fetchOnboardingWelcome,
   DEFAULT_VIBE,
   type UserSettings,
   type UserSchedule,
@@ -257,41 +256,12 @@ export function Wizard({
     ? canFinish
     : true;
 
-  // Voice intro plays EXACTLY ONCE per wizard mount, on first-run only.
-  // Critical: the previous version had `onChatResult` in the dep array,
-  // and because that callback's identity changed across App renders,
-  // the effect re-fired repeatedly — each refire hit /onboarding/welcome
-  // (Groq + ElevenLabs tokens). The ref guard below makes the network
-  // call unconditional-once: even if React re-runs this effect for any
-  // reason, the fetch is locked behind a flag that flips on first run.
-  const welcomeFiredRef = useRef(false);
-  useEffect(() => {
-    if (!firstRun) return;
-    if (welcomeFiredRef.current) return;
-    // Mute at mount → never even POST /onboarding/welcome. We still
-    // mark the ref as fired so toggling mute mid-onboarding doesn't
-    // queue the welcome line later in the session — by then the user
-    // has moved past the welcome step and replaying it would feel
-    // out of place.
-    welcomeFiredRef.current = true;
-    if (mutedRef.current) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const result = await fetchOnboardingWelcome();
-        if (!cancelled) onChatResult(result);
-      } catch (err) {
-        console.warn('[onboarding] welcome failed', err);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // onChatResult intentionally omitted from deps — the ref guard
-    // above is what makes "fire once" guaranteed; including the
-    // callback here would re-arm the effect every time App re-rendered.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [firstRun]);
+  // No synthesized welcome line at wizard mount. The pre-gen MP3s
+  // (nice-to-meet-you / keys-wrong / excited-to-start) already cover
+  // every audible moment — synthesizing the welcome here would burn
+  // a TTS round-trip on a fixed line, AND it has to fire BEFORE the
+  // user has finished BYOK setup (so there's no key to use). Drop it
+  // and let the visual WelcomeStep speak for itself.
 
   const handleAdvance = () => {
     // Per-step gate. Identity needs a name to move forward; Connections
