@@ -185,9 +185,6 @@ export interface ApiKeysProfile {
   /** When true (and gemini_search_api_key is set), grounded search is
    *  active for queries that need live data. Free tier: 500/day. */
   grounding_search_enabled: boolean;
-  /** Cosmetic toggle — when true, the UI tells the user keys will be
-   *  synced (encrypted) across their devices. No actual sync yet. */
-  sync_across_devices: boolean;
 }
 
 
@@ -217,7 +214,6 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   agentic_api_key:          null,
   gemini_search_api_key:    null,
   grounding_search_enabled: false,
-  sync_across_devices:      false,
 };
 
 

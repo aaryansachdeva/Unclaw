@@ -15,7 +15,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Eye, EyeOff, Lock, Search, ExternalLink, Zap,
+  Eye, EyeOff, Search, ExternalLink, Zap,
   AlertCircle, CheckCircle2, ShieldCheck, Loader2, Download,
 } from 'lucide-react';
 import { StepHeader } from './StepHeader';
@@ -207,10 +207,6 @@ export function ConnectionsStep({
 
   const setGeminiSearchKey = (key: string) => {
     onChange({ ...values, gemini_search_api_key: key || null });
-  };
-
-  const setSync = (sync: boolean) => {
-    onChange({ ...values, sync_across_devices: sync });
   };
 
   const setGrounding = (enabled: boolean) => {
@@ -457,13 +453,6 @@ export function ConnectionsStep({
           dimWhen={!groundingActive}
         />
 
-        <Toggle
-          value={values.sync_across_devices}
-          onChange={setSync}
-          icon={<Lock size={11} strokeWidth={2} aria-hidden style={{ opacity: 0.7 }} />}
-          title="Sync across devices"
-          helper="Encrypted before it leaves this device. You can change this later."
-        />
         </>
         )}
 
