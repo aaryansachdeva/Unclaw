@@ -132,6 +132,13 @@ export interface ApiKeysProfile {
   /** ElevenLabs API key for TTS. Required only when
    *  `tts_provider === 'elevenlabs'`. */
   elevenlabs_api_key: string | null;
+  /** ElevenLabs voice id. Defaults to Grace (the persona-canonical
+   *  cloned voice). Power users can override with their own voice id
+   *  from the ElevenLabs voice library. Only consulted when
+   *  `tts_provider === 'elevenlabs'`. Without this the request would
+   *  fall back to soul's default (Rachel) which sounds nothing like
+   *  Grace and reads as "wrong voice" to the user. */
+  elevenlabs_voice: string | null;
   /** Kokoro sub-mode. Only consulted when `tts_provider === 'kokoro'`. */
   kokoro_mode: KokoroMode;
   /** Custom Kokoro endpoint URL (e.g. http://localhost:8880 for a
@@ -191,6 +198,11 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   ollama_base_url:          null,
   tts_provider:             'elevenlabs',
   elevenlabs_api_key:       null,
+  // Grace's cloned voice on ElevenLabs (the persona-canonical voice).
+  // Power users can override with their own voice id; existing users
+  // who saved a profile before this field existed get this default
+  // via migrateApiKeys' spread-with-defaults pattern.
+  elevenlabs_voice:         'zmcVlqmyk3Jpn5AVYcAL',
   kokoro_mode:              'recommended',
   kokoro_endpoint:          null,
   // Default to the KVoiceWalk-evolved Grace clone (`grace_kokoro.pt`),

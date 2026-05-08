@@ -124,8 +124,12 @@ export async function chatViaSoul(
     // picked Kokoro we send the provider tag + (optionally) the
     // custom endpoint URL so soul forwards instead of running locally.
     body.tts_provider = keys.tts_provider;
-    if (keys.tts_provider === 'elevenlabs' && keys.elevenlabs_api_key) {
-      body.elevenlabs_api_key = keys.elevenlabs_api_key;
+    if (keys.tts_provider === 'elevenlabs') {
+      if (keys.elevenlabs_api_key) body.elevenlabs_api_key = keys.elevenlabs_api_key;
+      // Forward the user's ElevenLabs voice id (defaults to Grace).
+      // Without this soul falls back to its env ELEVENLABS_VOICE which
+      // is Rachel — the wrong voice for our persona.
+      if (keys.elevenlabs_voice) body.voice_id = keys.elevenlabs_voice;
     }
     if (keys.tts_provider === 'kokoro') {
       if (keys.kokoro_voice) body.voice_id = keys.kokoro_voice;

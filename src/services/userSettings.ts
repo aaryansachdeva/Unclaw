@@ -123,8 +123,9 @@ async function _onboardingBodyFromKeys(): Promise<Record<string, unknown>> {
   const body: Record<string, unknown> = {
     tts_provider: keys.tts_provider,
     voice_id:
-      keys.tts_provider === 'kokoro' ? keys.kokoro_voice :
-      keys.tts_provider === 'qwen3'  ? keys.qwen3_voice :
+      keys.tts_provider === 'kokoro'     ? keys.kokoro_voice :
+      keys.tts_provider === 'qwen3'      ? keys.qwen3_voice :
+      keys.tts_provider === 'elevenlabs' ? keys.elevenlabs_voice :
       undefined,
   };
   if (keys.tts_provider === 'elevenlabs' && keys.elevenlabs_api_key) {
