@@ -256,12 +256,22 @@ export function Wizard({
     ? canFinish
     : true;
 
-  // No synthesized welcome line at wizard mount. The pre-gen MP3s
-  // (nice-to-meet-you / keys-wrong / excited-to-start) already cover
-  // every audible moment — synthesizing the welcome here would burn
-  // a TTS round-trip on a fixed line, AND it has to fire BEFORE the
-  // user has finished BYOK setup (so there's no key to use). Drop it
-  // and let the visual WelcomeStep speak for itself.
+  // Welcome line plays EXACTLY ONCE per wizard mount, on first-run.
+  // Uses the pre-gen MP3 (Grace voice, baked at build time) instead of
+  // a live TTS round-trip — fires BEFORE the user has set BYOK up, so
+  // there's no key available to synthesize with. The ref guard makes
+  // it unconditional-once even if React re-runs the effect.
+  const welcomeFiredRef = useRef(false);
+  useEffect(() => {
+    if (!firstRun) return;
+    if (welcomeFiredRef.current) return;
+    welcomeFiredRef.current = true;
+    if (mutedRef.current) return;
+    playLine('welcome');
+    // playLine is defined per-render and is intentionally omitted —
+    // the ref guard guarantees fire-once regardless of identity churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firstRun]);
 
   const handleAdvance = () => {
     // Per-step gate. Identity needs a name to move forward; Connections

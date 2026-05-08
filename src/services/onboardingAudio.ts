@@ -21,7 +21,11 @@ import type { SoulChatResult } from './soulChat';
 
 const SOUL_URL = 'http://127.0.0.1:8765';
 
-export type PreGenLine = 'nice-to-meet-you' | 'keys-wrong' | 'excited-to-start';
+export type PreGenLine =
+  | 'welcome'
+  | 'nice-to-meet-you'
+  | 'keys-wrong'
+  | 'excited-to-start';
 
 /** Per-clip mood + behavior for the Text2Face pass. The mood prompt
  *  goes into soul's T2F so the face matches the line; the behavior
@@ -29,6 +33,10 @@ export type PreGenLine = 'nice-to-meet-you' | 'keys-wrong' | 'excited-to-start';
  *  phrasing is intentionally short — Text2Face was trained to render
  *  one clean feeling, not a stack of adjectives. */
 const META: Record<PreGenLine, { mood: string; behavior: string }> = {
+  'welcome': {
+    mood: 'slight smile',
+    behavior: 'engaged',
+  },
   'nice-to-meet-you': {
     mood: 'smile',
     behavior: 'engaged',
