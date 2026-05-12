@@ -1,17 +1,51 @@
 {
   "name": "unclaw",
-  "version": "1.0.0",
-  "description": "AI assistant pixel streaming companion",
+  "version": "1.0.2",
+  "description": "Unclaw",
   "main": "dist/electron/main.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "start": "electron ."
+    "start": "electron .",
+    "dist:win": "electron-vite build && electron-builder --win nsis",
+    "dist": "npm run dist:win"
   },
   "keywords": [],
-  "author": "",
+  "author": "Foton Labs",
   "license": "ISC",
+  "build": {
+    "appId": "app.unclaw.unclaw",
+    "productName": "Unclaw",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "Unclaw Setup ${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Unclaw",
+      "uninstallDisplayName": "Unclaw",
+      "include": null
+    }
+  },
   "dependencies": {
     "@epicgames-ps/lib-pixelstreamingfrontend-ue5.6": "^0.2.5",
     "@react-three/fiber": "^9.6.1",
@@ -31,6 +65,7 @@
     "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.27",
     "electron": "^41.1.1",
+    "electron-builder": "^25.1.8",
     "electron-vite": "^5.0.0",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.2",

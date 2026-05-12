@@ -171,8 +171,54 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
                 textTransform: 'uppercase',
                 color: 'var(--text-ghost)',
               }}>
-                Waiting for UnClaw Engine
+                Waiting for Unclaw-Soul
               </span>
+            </motion.div>
+
+            {/* Download link — small, ghost, drifts in after a beat so it
+                doesn't compete with the logo on quick reconnects. Pinned
+                to the bottom of the loading screen, not stacked under the
+                status, so it reads as a quiet helper rather than a CTA. */}
+            <motion.div
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 1.2, ease: [0.16, 1, 0.3, 1] }}
+              style={{
+                position: 'absolute',
+                bottom: '32px',
+                left: 0,
+                right: 0,
+                textAlign: 'center',
+                fontSize: '11px',
+                color: 'var(--text-ghost)',
+                letterSpacing: '0.02em',
+                zIndex: 1,
+              }}
+            >
+              Don't have it?{' '}
+              <a
+                href="https://unclaw.io"
+                onClick={(e) => {
+                  e.preventDefault();
+                  window.electronAPI?.authOpenExternal('https://unclaw.io');
+                }}
+                style={{
+                  color: 'var(--accent)',
+                  textDecoration: 'none',
+                  fontWeight: 500,
+                  letterSpacing: '0.06em',
+                  cursor: 'pointer',
+                  transition: 'color 0.2s ease, text-shadow 0.2s ease',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.textShadow = '0 0 8px rgba(196,68,68,0.4)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.textShadow = 'none';
+                }}
+              >
+                UNCLAW.IO
+              </a>
             </motion.div>
           </motion.div>
         )}
