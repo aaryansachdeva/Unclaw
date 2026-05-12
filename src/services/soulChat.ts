@@ -147,12 +147,28 @@ export async function chatViaSoul(
     // is OpenAI, we pass the chat key as the agentic key.
     body.agentic_enabled = keys.agentic_enabled;
     if (keys.agentic_enabled) {
-      const reuseChat = keys.agentic_use_same_as_chat
-        && keys.llm_provider === 'openai'
-        && !!keys.llm_api_key;
-      body.agentic_model = reuseChat ? keys.llm_model : keys.agentic_model;
-      body.agentic_api_key = reuseChat ? keys.llm_api_key : keys.agentic_api_key;
+      // agentic_provider drives the soul-side fork between OpenAI
+      // Responses-API escalation and Ollama-tools local escalation.
+      // For local: no agentic_model / agentic_api_key are sent — the
+      // chat model itself runs the loop with the full MCP toolset.
+      body.agentic_provider = keys.agentic_provider;
+      if (keys.agentic_provider === 'ollama') {
+        // Leave agentic_model / agentic_api_key unset; soul ignores
+        // them on the local path.
+      } else {
+        const reuseChat = keys.agentic_use_same_as_chat
+          && keys.llm_provider === 'openai'
+          && !!keys.llm_api_key;
+        body.agentic_model = reuseChat ? keys.llm_model : keys.agentic_model;
+        body.agentic_api_key = reuseChat ? keys.llm_api_key : keys.agentic_api_key;
+      }
     }
+    // Reasoning depth. Soul translates per-family (Ollama `think`,
+    // Groq `reasoning_effort`, OpenAI Responses `reasoning.effort`).
+    // Always sent — soul defaults to 'none' if missing, but being
+    // explicit avoids surprises when the renderer's local default
+    // drifts from soul's default in the future.
+    if (keys.thinking_effort) body.thinking_effort = keys.thinking_effort;
     // Gemini grounded-search BYOK. Only forwarded when the user opted
     // in via the wizard. Without this, the escalation web_search tool
     // would silently bill the dev's quota (or fail outright on a
@@ -316,15 +332,20 @@ export async function* streamChatViaSoul(
     }
     // Agentic BYOK threading — same logic as chatViaSoul. Soul reads
     // these on the streaming endpoint too so escalation kicked off
-    // mid-stream uses the wizard's pick (model + key).
+    // mid-stream uses the wizard's pick (model + key + provider).
     body.agentic_enabled = keys.agentic_enabled;
     if (keys.agentic_enabled) {
-      const reuseChat = keys.agentic_use_same_as_chat
-        && keys.llm_provider === 'openai'
-        && !!keys.llm_api_key;
-      body.agentic_model = reuseChat ? keys.llm_model : keys.agentic_model;
-      body.agentic_api_key = reuseChat ? keys.llm_api_key : keys.agentic_api_key;
+      body.agentic_provider = keys.agentic_provider;
+      if (keys.agentic_provider !== 'ollama') {
+        const reuseChat = keys.agentic_use_same_as_chat
+          && keys.llm_provider === 'openai'
+          && !!keys.llm_api_key;
+        body.agentic_model = reuseChat ? keys.llm_model : keys.agentic_model;
+        body.agentic_api_key = reuseChat ? keys.llm_api_key : keys.agentic_api_key;
+      }
     }
+    // Reasoning depth (see chatViaSoul for the per-family mapping).
+    if (keys.thinking_effort) body.thinking_effort = keys.thinking_effort;
     // Gemini grounded-search BYOK. Only forwarded when the user opted
     // in via the wizard. Without this, the escalation web_search tool
     // would silently bill the dev's quota (or fail outright on a

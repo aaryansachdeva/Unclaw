@@ -24,11 +24,15 @@ import {
   LLM_PROVIDERS,
   getProvider,
   missingRequiredKeyFields,
+  modelSupportsThinking,
+  modelSupportsTools,
   validateKeys,
   type ApiKeysProfile,
+  type AgenticProvider,
   type KeyValidationResult,
   type LLMProviderId,
   type KokoroMode,
+  type ThinkingEffort,
   type TtsProviderId,
 } from '../../services/apiKeys';
 import { fetchOllamaModels, type SoulProviderModel } from '../../services/providers';
@@ -183,6 +187,16 @@ export function ConnectionsStep({
     } else {
       nextModel = next?.models[0]?.id ?? null;
     }
+    // Auto-coerce agentic_provider: 'ollama' is only valid when chat
+    // is on Ollama. Switching to a cloud provider with agentic still
+    // pointing at 'ollama' would leave the wizard in an inconsistent
+    // state where Finish allows it but soul rejects on first chat.
+    const nextAgenticProvider: AgenticProvider =
+      id === 'ollama' ? values.agentic_provider : 'openai';
+    // Auto-downgrade thinking_effort when the new model can't honor it.
+    const nextThinking: ThinkingEffort = modelSupportsThinking(nextModel)
+      ? values.thinking_effort
+      : 'none';
     onChange({
       ...values,
       llm_provider: id,
@@ -190,11 +204,38 @@ export function ConnectionsStep({
       // Wipe the old key when switching to a no-key provider — leaving
       // it on disk would be surprising.
       llm_api_key: next?.requiresApiKey ? values.llm_api_key : null,
+      agentic_provider: nextAgenticProvider,
+      thinking_effort: nextThinking,
     });
   };
 
   const setModel = (modelId: string) => {
-    onChange({ ...values, llm_model: modelId || null });
+    const id = modelId || null;
+    // Auto-downgrade thinking_effort if the new model isn't thinking-
+    // capable. Avoids leaving stale 'high' on disk after switching from
+    // a Qwen3 to a Llama, for example.
+    const nextThinking: ThinkingEffort = modelSupportsThinking(id)
+      ? values.thinking_effort
+      : 'none';
+    // Auto-coerce agentic_provider from 'ollama' to 'openai' when the
+    // new local model doesn't advertise tools — running the agentic
+    // loop on a non-tool model would 502 on first escalation.
+    const nextAgenticProvider: AgenticProvider =
+      values.agentic_provider === 'ollama'
+        && values.llm_provider === 'ollama'
+        && !modelSupportsTools(id)
+        ? 'openai'
+        : values.agentic_provider;
+    onChange({
+      ...values,
+      llm_model: id,
+      thinking_effort: nextThinking,
+      agentic_provider: nextAgenticProvider,
+    });
+  };
+
+  const setThinkingEffort = (effort: ThinkingEffort) => {
+    onChange({ ...values, thinking_effort: effort });
   };
 
   const setLlmKey = (key: string) => {
@@ -405,6 +446,17 @@ export function ConnectionsStep({
               autoComplete="off"
             />
           </FieldLabel>
+        )}
+
+        {/* Reasoning depth — only surfaced when the picked model
+            actually advertises a thinking mode. Hidden by default so
+            users on Gemma 3 / Llama / gpt-4o don't see a no-op control. */}
+        {modelSupportsThinking(values.llm_model) && (
+          <ThinkingEffortSection
+            value={values.thinking_effort}
+            onChange={setThinkingEffort}
+            modelLabel={values.llm_model ?? ''}
+          />
         )}
 
         <AgenticSection values={values} onChange={onChange} />
@@ -1311,6 +1363,66 @@ const AGENTIC_OPENAI_MODELS: ReadonlyArray<{ id: string; label: string; hint?: s
   { id: 'openai:gpt-5.4-nano',  label: 'GPT-5.4 Nano',  hint: 'cheapest' },
 ];
 
+
+// ---------------------------------------------------------------------
+// Thinking-effort lever — only rendered when the picked LLM model
+// actually advertises a reasoning mode (modelSupportsThinking returns
+// true). Soul translates the level per-family on /chat:
+//   * Ollama `think: bool` for Qwen3 / DeepSeek-R1 / Phi-4-reasoning /
+//     Magistral / Gemma 4. 'none' → false, anything else → true.
+//   * Ollama `think: "low" | "medium" | "high"` for gpt-oss only.
+//   * Groq `reasoning_effort` for gpt-oss on the cloud path.
+//   * OpenAI Responses-API `reasoning.effort` for gpt-5.4-* on escalation.
+//
+// Always 4 options so the user sees a consistent control even though
+// the per-family wire mapping varies. Defaults to 'none' for predictability.
+// ---------------------------------------------------------------------
+
+const THINKING_OPTIONS: ReadonlyArray<{ id: ThinkingEffort; label: string; hint?: string }> = [
+  { id: 'none',   label: 'Off',     hint: 'fastest' },
+  { id: 'low',    label: 'Low' },
+  { id: 'medium', label: 'Medium', hint: 'balanced' },
+  { id: 'high',   label: 'High',   hint: 'deepest' },
+];
+
+function ThinkingEffortSection({
+  value,
+  onChange,
+  modelLabel,
+}: {
+  value: ThinkingEffort;
+  onChange: (effort: ThinkingEffort) => void;
+  modelLabel: string;
+}) {
+  // Strip the wire prefix for display ("ollama:qwen3:8b" → "qwen3:8b").
+  const display = modelLabel.replace(/^ollama:/, '').replace(/^openai:/, '');
+  return (
+    <FieldLabel
+      text="Reasoning depth"
+      trailing={
+        <span style={{
+          fontSize: 10,
+          color: 'var(--text-secondary)',
+          letterSpacing: '0.04em',
+          fontWeight: 500,
+        }}>
+          on {display}
+        </span>
+      }
+    >
+      <Dropdown
+        value={value}
+        onChange={(v) => onChange((v as ThinkingEffort) || 'none')}
+        placeholder="Off"
+        options={THINKING_OPTIONS.map((o) => ({
+          id: o.id, label: o.label, hint: o.hint,
+        }))}
+      />
+    </FieldLabel>
+  );
+}
+
+
 function AgenticSection({
   values,
   onChange,
@@ -1321,7 +1433,19 @@ function AgenticSection({
   const [showKey, setShowKey] = useState(false);
 
   const setEnabled = (b: boolean) => {
-    onChange({ ...values, agentic_enabled: b });
+    // When enabling agentic, if chat is on a tools-capable local
+    // model, default the backend to 'ollama' so the user gets the
+    // zero-config local experience by default. They can flip to
+    // 'openai' explicitly via the backend toggle below.
+    if (b && values.llm_provider === 'ollama' && modelSupportsTools(values.llm_model)) {
+      onChange({
+        ...values,
+        agentic_enabled: true,
+        agentic_provider: values.agentic_provider || 'ollama',
+      });
+    } else {
+      onChange({ ...values, agentic_enabled: b });
+    }
   };
   const setUseSame = (b: boolean) => {
     onChange({ ...values, agentic_use_same_as_chat: b });
@@ -1332,14 +1456,32 @@ function AgenticSection({
   const setKey = (k: string) => {
     onChange({ ...values, agentic_api_key: k || null });
   };
+  const setAgenticProvider = (p: AgenticProvider) => {
+    onChange({ ...values, agentic_provider: p });
+  };
 
-  // Whether the chat provider is OpenAI — "use same as chat" is
-  // only meaningful in that case (escalation needs an OpenAI model
-  // either way; if chat is already OpenAI we can borrow its key).
   const chatIsOpenAI = values.llm_provider === 'openai';
-  // Effective "reuse chat" state. Even if user toggled the checkbox,
-  // it only takes effect when chat IS OpenAI.
-  const effectiveReuse = values.agentic_use_same_as_chat && chatIsOpenAI;
+  const chatIsOllama = values.llm_provider === 'ollama';
+  // Local agentic only makes sense when the chat model itself can
+  // tool-call. Otherwise the local-tier UI is hidden and the user
+  // gets the legacy OpenAI-only path. (The setProvider/setModel
+  // helpers in ConnectionsStep auto-coerce agentic_provider back to
+  // 'openai' when the chat model loses tools support, so this
+  // condition mirrors the wizard's invariants.)
+  const localAgenticAvailable =
+    chatIsOllama && modelSupportsTools(values.llm_model);
+  const usingLocal = values.agentic_provider === 'ollama' && localAgenticAvailable;
+  // "Use same as chat" is only meaningful when chat is OpenAI AND
+  // we're on the OpenAI agentic path (not local).
+  const effectiveReuse =
+    values.agentic_use_same_as_chat && chatIsOpenAI && !usingLocal;
+
+  const helperWhenOn = usingLocal
+    ? 'Your local Ollama model handles tool-use too. No cloud key needed.'
+    : 'Lets the assistant browse, search, and use tools for harder questions. Uses an OpenAI model for the agentic loop.';
+  const helperWhenOff = localAgenticAvailable
+    ? 'Off by default. Turn on for live web search, page-reading, and multi-step research. Runs locally on your Ollama model.'
+    : 'Off by default. Turn on for live web search, page-reading, and multi-step research. Needs an OpenAI key.';
 
   return (
     <div style={{
@@ -1356,15 +1498,34 @@ function AgenticSection({
         onChange={setEnabled}
         icon={<Zap size={11} strokeWidth={2} aria-hidden style={{ opacity: 0.7 }} />}
         title="Enable agentic features"
-        helper={values.agentic_enabled
-          ? 'Lets the assistant browse, search, and use tools for harder questions. Uses an OpenAI model for the agentic loop.'
-          : 'Off by default. Turn on for live web search, page-reading, and multi-step research. Needs an OpenAI key.'}
+        helper={values.agentic_enabled ? helperWhenOn : helperWhenOff}
         dimWhen={!values.agentic_enabled}
       />
 
       {values.agentic_enabled && (
         <>
-          {chatIsOpenAI && (
+          {/* Backend picker: only shown when local is a real option.
+              When chat isn't on a tools-capable Ollama model, the
+              backend is implicitly OpenAI and the picker is hidden. */}
+          {localAgenticAvailable && (
+            <FieldLabel
+              text="Agentic backend"
+              trailing={null}
+            >
+              <Dropdown
+                value={values.agentic_provider}
+                onChange={(v) => setAgenticProvider((v as AgenticProvider) || 'openai')}
+                placeholder="Choose"
+                options={[
+                  { id: 'ollama', label: 'Local (your Ollama model)', hint: 'no key' },
+                  { id: 'openai', label: 'Cloud (OpenAI)',           hint: 'more capable' },
+                ]}
+              />
+            </FieldLabel>
+          )}
+
+          {/* OpenAI-specific fields — hidden when running local. */}
+          {!usingLocal && chatIsOpenAI && (
             <Toggle
               value={values.agentic_use_same_as_chat}
               onChange={setUseSame}
@@ -1376,7 +1537,7 @@ function AgenticSection({
             />
           )}
 
-          {!effectiveReuse && (
+          {!usingLocal && !effectiveReuse && (
             <FieldLabel
               text="Agentic model"
               trailing={!chatIsOpenAI ? (
@@ -1394,7 +1555,7 @@ function AgenticSection({
             </FieldLabel>
           )}
 
-          {!effectiveReuse && !chatIsOpenAI && (
+          {!usingLocal && !effectiveReuse && !chatIsOpenAI && (
             <FieldLabel text="OpenAI API key">
               <SecretInput
                 value={values.agentic_api_key ?? ''}
@@ -1405,6 +1566,25 @@ function AgenticSection({
                 autoComplete="off"
               />
             </FieldLabel>
+          )}
+
+          {/* Local notice — replaces the model/key controls when the
+              user is running agentic on their Ollama model. */}
+          {usingLocal && (
+            <div style={{
+              fontSize: 11.5,
+              color: 'var(--text-secondary)',
+              lineHeight: 1.45,
+              padding: '8px 10px',
+              borderRadius: 7,
+              border: '1px solid var(--glass-border)',
+              background: 'rgba(255,255,255,0.02)',
+            }}>
+              Escalation runs on the same Ollama model you picked for chat,
+              with the full tool set (web search, memory, filesystem, browser).
+              No cloud key is needed. Tools-capable models work best at 7B+;
+              larger models cope with multi-step reasoning more reliably.
+            </div>
           )}
         </>
       )}

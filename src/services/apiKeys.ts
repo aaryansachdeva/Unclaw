@@ -13,6 +13,27 @@ export type LLMProviderId =
   | 'openai'    // OpenAI Cloud — gpt-4o-mini default, gpt-5.4 family
   | 'ollama';   // Local Ollama daemon — any locally-pulled model
 
+/** Reasoning depth lever sent to soul on every /chat request. Soul
+ *  translates per-family:
+ *    * Ollama `think` — bool for Qwen3/DeepSeek-R1/Phi-4-reasoning/
+ *      Magistral/Gemma 4; level string ("low"|"medium"|"high") for
+ *      gpt-oss; absent for Gemma 3 / Llama (no-op).
+ *    * Groq `reasoning_effort` for gpt-oss; `reasoning_format=hidden`
+ *      for qwen3/kimi.
+ *    * OpenAI escalation `reasoning.effort` (Responses API).
+ *  'none' = thinking off (or as off as the family allows — gpt-oss
+ *  can't be fully turned off and falls back to "low" upstream). */
+export type ThinkingEffort = 'none' | 'low' | 'medium' | 'high';
+
+/** Which provider runs the agentic / escalation loop when
+ *  `agentic_enabled` is true.
+ *    * 'openai' (default) — soul's existing OpenAI Responses-API
+ *      loop with full MCP toolset + web search.
+ *    * 'ollama' — soul runs the same loop locally against the user's
+ *      Ollama chat model, requiring no cloud key. Only valid when the
+ *      chat model is itself an Ollama tool-capable model. */
+export type AgenticProvider = 'openai' | 'ollama';
+
 
 export interface ProviderModel {
   /** Wire id used in API calls. For ollama, this is the prefixed form
@@ -96,6 +117,64 @@ const VALID_PROVIDER_IDS: ReadonlySet<string> = new Set(
 export function getProvider(id: LLMProviderId | null | undefined): ProviderInfo | null {
   if (!id) return null;
   return LLM_PROVIDERS.find((p) => p.id === id) ?? null;
+}
+
+
+/** Heuristic family check: does this model id advertise a reasoning /
+ *  thinking mode? Used to gate the thinking-effort dropdown so users
+ *  don't see a no-op control on Gemma 3 / Llama / plain chat models.
+ *
+ *  Conservative — pattern-matches against the prefixed wire form
+ *  (e.g. 'ollama:qwen3:8b', 'openai:gpt-5.4-mini', 'openai/gpt-oss-20b').
+ *  Soul also feature-detects via Ollama's /api/show capabilities
+ *  before sending `think`; this client-side check is just for UI
+ *  gating. */
+export function modelSupportsThinking(modelId: string | null | undefined): boolean {
+  if (!modelId) return false;
+  const m = modelId.toLowerCase();
+  // gpt-oss (level string on Ollama; reasoning_effort on Groq).
+  if (m.includes('gpt-oss')) return true;
+  // OpenAI cloud reasoning family. gpt-5.4-* honors reasoning.effort
+  // on the Responses API (escalation), gpt-4o-* does not.
+  if (m.startsWith('openai:gpt-5')) return true;
+  // Bool-thinking Ollama families.
+  if (m.includes('qwen3') && !m.includes('qwen3.5')) return true;
+  if (m.includes('deepseek-r1') || m.includes('deepseek-v3.1')) return true;
+  if (m.includes('phi4-reasoning') || m.includes('phi4-mini-reasoning')) return true;
+  if (m.includes('magistral')) return true;
+  if (m.includes('gemma4')) return true;
+  return false;
+}
+
+
+/** Heuristic family check: does this model id support native tool
+ *  calling? Used to gate the local-agentic toggle so users on a
+ *  non-tool model see a clear "your model can't do this" hint
+ *  instead of an enabled toggle that 502s on first agentic request.
+ *
+ *  Cloud providers all support tools through Chat Completions /
+ *  Responses APIs. For Ollama, this is a name-pattern guess; soul
+ *  re-checks via /api/show capabilities at request time and falls
+ *  back to a structured-text path if the model lies. */
+export function modelSupportsTools(modelId: string | null | undefined): boolean {
+  if (!modelId) return false;
+  const m = modelId.toLowerCase();
+  // Cloud (OpenAI native function calling, Groq OpenAI-compat).
+  if (m.startsWith('openai:')) return true;
+  if (m.includes('gpt-oss')) return true;
+  if (m.includes('qwen/qwen3')) return true;
+  if (m.includes('llama-3')) return true;
+  // Ollama families with verified tool support.
+  if (m.startsWith('ollama:')) {
+    if (m.includes('qwen3')) return true;
+    if (m.includes('gemma3') && !m.includes(':1b')) return true;  // 1b too small
+    if (m.includes('gemma4')) return true;
+    if (m.includes('deepseek-r1')) return true;
+    if (m.includes('phi4-reasoning') || m.includes('phi4-mini-reasoning')) return true;
+    if (m.includes('magistral')) return true;
+    if (m.includes('llama3.1') || m.includes('llama3.2') || m.includes('llama3.3')) return true;
+  }
+  return false;
 }
 
 
@@ -185,6 +264,17 @@ export interface ApiKeysProfile {
   /** When true (and gemini_search_api_key is set), grounded search is
    *  active for queries that need live data. Free tier: 500/day. */
   grounding_search_enabled: boolean;
+  /** Reasoning depth lever for the LLM. Defaults to 'none' so the
+   *  chat path stays fast by default; users opt in to deeper thinking
+   *  for harder questions. Models that don't advertise thinking
+   *  treat this as a no-op. See [[ThinkingEffort]] above for the
+   *  per-family translation soul performs. */
+  thinking_effort: ThinkingEffort;
+  /** Backend that runs the agentic loop. Defaults to 'openai' for
+   *  back-compat with the existing wizard. When the chat provider is
+   *  Ollama AND the model supports tools, the wizard flips this to
+   *  'ollama' so escalation runs locally with no cloud key. */
+  agentic_provider: AgenticProvider;
 }
 
 
@@ -214,6 +304,8 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   agentic_api_key:          null,
   gemini_search_api_key:    null,
   grounding_search_enabled: false,
+  thinking_effort:          'none',
+  agentic_provider:         'openai',
 };
 
 
@@ -315,14 +407,26 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
   }
   // Agentic gates: only enforced when the user opted in.
   if (profile.agentic_enabled) {
-    const reuseChat = profile.agentic_use_same_as_chat
-      && profile.llm_provider === 'openai'
-      && !!profile.llm_api_key;
-    if (!profile.agentic_model && !reuseChat) {
-      missing.push('Agentic model');
-    }
-    if (!reuseChat && !profile.agentic_api_key) {
-      missing.push('OpenAI key for agentic');
+    if (profile.agentic_provider === 'ollama') {
+      // Local agentic: chat must be on a tools-capable Ollama model.
+      // No agentic_model / agentic_api_key needed — the chat model is
+      // the agentic model.
+      if (profile.llm_provider !== 'ollama') {
+        missing.push('Local agentic needs Ollama as the chat provider');
+      } else if (!modelSupportsTools(profile.llm_model)) {
+        missing.push('Local agentic needs a tools-capable Ollama model');
+      }
+    } else {
+      // OpenAI agentic (existing behavior).
+      const reuseChat = profile.agentic_use_same_as_chat
+        && profile.llm_provider === 'openai'
+        && !!profile.llm_api_key;
+      if (!profile.agentic_model && !reuseChat) {
+        missing.push('Agentic model');
+      }
+      if (!reuseChat && !profile.agentic_api_key) {
+        missing.push('OpenAI key for agentic');
+      }
     }
   }
   // Gemini grounded-search gate: only enforced when the user opted in.
