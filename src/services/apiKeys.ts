@@ -13,27 +13,6 @@ export type LLMProviderId =
   | 'openai'    // OpenAI Cloud — gpt-4o-mini default, gpt-5.4 family
   | 'ollama';   // Local Ollama daemon — any locally-pulled model
 
-/** Reasoning depth lever sent to soul on every /chat request. Soul
- *  translates per-family:
- *    * Ollama `think` — bool for Qwen3/DeepSeek-R1/Phi-4-reasoning/
- *      Magistral/Gemma 4; level string ("low"|"medium"|"high") for
- *      gpt-oss; absent for Gemma 3 / Llama (no-op).
- *    * Groq `reasoning_effort` for gpt-oss; `reasoning_format=hidden`
- *      for qwen3/kimi.
- *    * OpenAI escalation `reasoning.effort` (Responses API).
- *  'none' = thinking off (or as off as the family allows — gpt-oss
- *  can't be fully turned off and falls back to "low" upstream). */
-export type ThinkingEffort = 'none' | 'low' | 'medium' | 'high';
-
-/** Which provider runs the agentic / escalation loop when
- *  `agentic_enabled` is true.
- *    * 'openai' (default) — soul's existing OpenAI Responses-API
- *      loop with full MCP toolset + web search.
- *    * 'ollama' — soul runs the same loop locally against the user's
- *      Ollama chat model, requiring no cloud key. Only valid when the
- *      chat model is itself an Ollama tool-capable model. */
-export type AgenticProvider = 'openai' | 'ollama';
-
 
 export interface ProviderModel {
   /** Wire id used in API calls. For ollama, this is the prefixed form
@@ -117,147 +96,6 @@ const VALID_PROVIDER_IDS: ReadonlySet<string> = new Set(
 export function getProvider(id: LLMProviderId | null | undefined): ProviderInfo | null {
   if (!id) return null;
   return LLM_PROVIDERS.find((p) => p.id === id) ?? null;
-}
-
-
-// ============================================================================
-// Model-capability registry — fetched from soul's /capabilities on load
-// ============================================================================
-//
-// Both sides need the same per-model decisions: does it support
-// thinking? can it tool-call? at what parameter size? Soul exposes
-// `GET /capabilities` as the single source of truth (see
-// MODEL_CAPABILITIES in soul/server.py). We fetch it once at startup,
-// cache it in module scope, and use it for every UI gating decision.
-//
-// A small fallback table mirrors the soul-side default so the renderer
-// can still function before the fetch resolves (or if the user's soul
-// is older than this catalog).
-
-const SOUL_URL = 'http://127.0.0.1:8765';
-
-export type ThinkingProtocol =
-  | 'bool'           // Ollama think:bool — Qwen3, DeepSeek-R1, Phi-4-r, Magistral
-  | 'levels'         // Ollama think:"low"|"medium"|"high" — gpt-oss only
-  | 'template_only'  // Template control tokens, no JSON field — Gemma 4
-  | 'responses_api'  // OpenAI Responses API reasoning.effort — gpt-5/o1/o3
-  | 'groq_effort'    // Groq reasoning_effort + reasoning_format=hidden
-  | 'groq_hidden'    // Groq reasoning_format=hidden only (no effort knob)
-  | 'none';
-
-export interface ModelCapability {
-  family_pattern: string;
-  thinking_protocol: ThinkingProtocol;
-  tool_call_min_b: number | null;
-  qwen3_tools_guard: boolean;
-  groq_extras: string | null;
-}
-
-// Mirror of soul's MODEL_CAPABILITIES at the time of writing — used
-// only as a fallback when the /capabilities fetch fails or hasn't
-// resolved yet. Keep this in rough sync with soul/server.py; the
-// runtime fetch is the source of truth.
-const FALLBACK_CAPABILITIES: ModelCapability[] = [
-  { family_pattern: 'qwen3.5',  thinking_protocol: 'bool',   tool_call_min_b: 1.0,  qwen3_tools_guard: true,  groq_extras: null },
-  { family_pattern: 'qwen3',    thinking_protocol: 'bool',   tool_call_min_b: 1.0,  qwen3_tools_guard: true,  groq_extras: 'groq_hidden' },
-  { family_pattern: 'deepseek-r1',         thinking_protocol: 'bool', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'deepseek-v3.1',       thinking_protocol: 'bool', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'phi4-reasoning',      thinking_protocol: 'bool', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'phi4-mini-reasoning', thinking_protocol: 'bool', tool_call_min_b: 0.5, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'magistral',           thinking_protocol: 'bool', tool_call_min_b: 7.0, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'gpt-oss',             thinking_protocol: 'levels', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: 'groq_effort' },
-  { family_pattern: 'gemma4',              thinking_protocol: 'template_only', tool_call_min_b: 4.0, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'gemma3',              thinking_protocol: 'none', tool_call_min_b: 4.0, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'llama-3.3',           thinking_protocol: 'none', tool_call_min_b: 70.0, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'llama3',              thinking_protocol: 'none', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'gpt-5',  thinking_protocol: 'responses_api', tool_call_min_b: null, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'o1',     thinking_protocol: 'responses_api', tool_call_min_b: null, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'o3',     thinking_protocol: 'responses_api', tool_call_min_b: null, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'gpt-4o', thinking_protocol: 'none',          tool_call_min_b: null, qwen3_tools_guard: false, groq_extras: null },
-  { family_pattern: 'kimi',   thinking_protocol: 'groq_hidden',   tool_call_min_b: null, qwen3_tools_guard: false, groq_extras: 'groq_hidden' },
-];
-
-let _capabilitiesCache: ModelCapability[] = FALLBACK_CAPABILITIES;
-let _capabilitiesFetched = false;
-
-/** Fetch /capabilities from soul. Idempotent — only the first call
- *  hits the wire; subsequent calls resolve immediately from the
- *  cache. Best-effort: on fetch failure we keep using the fallback
- *  table baked into this file. Call at app startup. */
-export async function loadCapabilitiesFromSoul(): Promise<void> {
-  if (_capabilitiesFetched) return;
-  _capabilitiesFetched = true;
-  try {
-    const r = await fetch(`${SOUL_URL}/capabilities`);
-    if (!r.ok) return;
-    const data = await r.json() as { families?: ModelCapability[] };
-    if (Array.isArray(data.families) && data.families.length > 0) {
-      _capabilitiesCache = data.families;
-    }
-  } catch {
-    // Soul not running / older soul without the endpoint — fallback
-    // table stays in effect. Wizard still works.
-  }
-}
-
-/** Lookup the first-matching capability row for a model id. Mirrors
- *  soul's _model_capability(). Returns null when no row matches. */
-function _capabilityFor(modelId: string | null | undefined): ModelCapability | null {
-  if (!modelId) return null;
-  const m = modelId.toLowerCase();
-  for (const row of _capabilitiesCache) {
-    if (m.includes(row.family_pattern)) return row;
-  }
-  return null;
-}
-
-/** Parse "0.8b" / "2b" / "8b" / "70b" / "e2b" out of an Ollama model
- *  id. Returns parameter count in billions, or null when no tag-like
- *  suffix is found. Used to gate tools by the family's min_b. */
-function _parseModelSizeB(modelId: string): number | null {
-  // Strip provider prefix.
-  const stripped = modelId.replace(/^ollama:/, '').replace(/^openai:/, '');
-  // Match the FIRST size-like token: e?<number>b. e.g. "qwen3:8b" →
-  // 8, "gemma4:e2b" → 2, "phi4-mini-reasoning:0.5b" → 0.5.
-  const m = stripped.match(/[:\-]e?(\d+(?:\.\d+)?)b\b/i);
-  return m ? parseFloat(m[1]) : null;
-}
-
-/** Does this model id advertise a reasoning / thinking mode that the
- *  WIZARD can offer a user-facing control for? Hides the dropdown
- *  for protocols we can't actually drive from the JSON request body
- *  (template_only) or for non-reasoning families. */
-export function modelSupportsThinking(modelId: string | null | undefined): boolean {
-  const cap = _capabilityFor(modelId);
-  if (!cap) return false;
-  // Show the dropdown for any protocol where the JSON field actually
-  // does something. template_only (Gemma 4) is excluded — the model
-  // honors thinking via control tokens in the system prompt, but we
-  // don't currently inject those, and sending JSON think corrupts
-  // the output. Add a separate UI affordance when we wire template
-  // tokens in.
-  return cap.thinking_protocol === 'bool'
-      || cap.thinking_protocol === 'levels'
-      || cap.thinking_protocol === 'responses_api'
-      || cap.thinking_protocol === 'groq_effort';
-}
-
-/** Does this family support native tool calling? Used to gate the
- *  local-agentic toggle. For Ollama models we ALSO check that the
- *  declared size meets the family's tool_call_min_b — soul mirrors
- *  this check at runtime via /api/show. */
-export function modelSupportsTools(modelId: string | null | undefined): boolean {
-  if (!modelId) return false;
-  const cap = _capabilityFor(modelId);
-  if (!cap) return false;
-  // Non-Ollama (cloud) entries with tool_call_min_b=null = cloud
-  // providers where tool support is universal (handled per-request
-  // by the provider's chat-completions / Responses APIs).
-  if (cap.tool_call_min_b === null) return true;
-  // Ollama families: enforce the size floor where parseable.
-  const sizeB = _parseModelSizeB(modelId);
-  if (sizeB === null) return true;  // size unknown → assume capable
-  return sizeB >= cap.tool_call_min_b;
 }
 
 
@@ -347,26 +185,6 @@ export interface ApiKeysProfile {
   /** When true (and gemini_search_api_key is set), grounded search is
    *  active for queries that need live data. Free tier: 500/day. */
   grounding_search_enabled: boolean;
-  /** Reasoning depth lever for the LLM on the CHAT tier (the
-   *  conversational model the user hears reply to them). Defaults to
-   *  'none' so the chat path stays fast by default; users opt in to
-   *  deeper thinking for harder questions. Models that don't
-   *  advertise thinking treat this as a no-op. See [[ThinkingEffort]]
-   *  above for the per-family translation soul performs. */
-  thinking_effort: ThinkingEffort;
-  /** Reasoning depth lever for the AGENTIC tier (the escalation
-   *  loop that runs tool-use for harder questions). Independent
-   *  from `thinking_effort` so users can keep chat snappy and let
-   *  agentic take its time. Ollama keeps the model in VRAM across
-   *  requests regardless of per-request `think` value, so switching
-   *  between tiers costs nothing. Falls back to `thinking_effort`
-   *  server-side when null/empty. */
-  agentic_thinking_effort: ThinkingEffort;
-  /** Backend that runs the agentic loop. Defaults to 'openai' for
-   *  back-compat with the existing wizard. When the chat provider is
-   *  Ollama AND the model supports tools, the wizard flips this to
-   *  'ollama' so escalation runs locally with no cloud key. */
-  agentic_provider: AgenticProvider;
 }
 
 
@@ -396,12 +214,6 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   agentic_api_key:          null,
   gemini_search_api_key:    null,
   grounding_search_enabled: false,
-  thinking_effort:          'none',
-  // Agentic tier defaults to 'medium' — it's the reasoning path,
-  // takes its time. User can flip it lower for cheap quick-wins or
-  // higher for hard agentic problems.
-  agentic_thinking_effort:  'medium',
-  agentic_provider:         'openai',
 };
 
 
@@ -503,26 +315,14 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
   }
   // Agentic gates: only enforced when the user opted in.
   if (profile.agentic_enabled) {
-    if (profile.agentic_provider === 'ollama') {
-      // Local agentic: chat must be on a tools-capable Ollama model.
-      // No agentic_model / agentic_api_key needed — the chat model is
-      // the agentic model.
-      if (profile.llm_provider !== 'ollama') {
-        missing.push('Local agentic needs Ollama as the chat provider');
-      } else if (!modelSupportsTools(profile.llm_model)) {
-        missing.push('Local agentic needs a tools-capable Ollama model');
-      }
-    } else {
-      // OpenAI agentic (existing behavior).
-      const reuseChat = profile.agentic_use_same_as_chat
-        && profile.llm_provider === 'openai'
-        && !!profile.llm_api_key;
-      if (!profile.agentic_model && !reuseChat) {
-        missing.push('Agentic model');
-      }
-      if (!reuseChat && !profile.agentic_api_key) {
-        missing.push('OpenAI key for agentic');
-      }
+    const reuseChat = profile.agentic_use_same_as_chat
+      && profile.llm_provider === 'openai'
+      && !!profile.llm_api_key;
+    if (!profile.agentic_model && !reuseChat) {
+      missing.push('Agentic model');
+    }
+    if (!reuseChat && !profile.agentic_api_key) {
+      missing.push('OpenAI key for agentic');
     }
   }
   // Gemini grounded-search gate: only enforced when the user opted in.
@@ -542,6 +342,8 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
 // OpenAI's /models, Ollama's /api/tags, ElevenLabs's /v1/user) IN
 // PARALLEL and returns per-key results. Surfaces a typo as a precise
 // error during onboarding instead of as a 502 on first chat.
+
+const SOUL_URL = 'http://127.0.0.1:8765';
 
 export interface KeyValidationOutcome {
   ok: boolean;
@@ -592,15 +394,11 @@ export async function validateKeys(
         profile.tts_provider === 'kokoro' && profile.kokoro_mode === 'custom'
           ? (profile.kokoro_endpoint || null)
           : null,
-      // Agentic — soul probes the OpenAI key + model when enabled and
-      // backend is cloud; for local-Ollama backend there's no probe
-      // (the model itself is on localhost and either reachable or not,
-      // which the LLM probe already covers). Forwarding the provider
-      // tag tells soul which probe path to take — without it, soul
-      // defaults to OpenAI and fails validation for local-agentic
-      // users who have no cloud key.
+      // Agentic — soul probes the OpenAI key + model when enabled.
+      // When `agentic_use_same_as_chat` is on AND chat is OpenAI,
+      // the chat key is reused; otherwise the dedicated agentic key
+      // is sent. Soul does the right thing on its end.
       agentic_enabled:     profile.agentic_enabled,
-      agentic_provider:    profile.agentic_provider,
       agentic_model:       profile.agentic_model,
       agentic_api_key:     profile.agentic_use_same_as_chat
                             && profile.llm_provider === 'openai'

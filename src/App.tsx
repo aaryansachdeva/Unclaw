@@ -38,7 +38,7 @@ import {
 } from './services/auth';
 import { resetEverything } from './services/accountReset';
 import { fetchSettings } from './services/userSettings';
-import { fetchApiKeys, loadCapabilitiesFromSoul } from './services/apiKeys';
+import { fetchApiKeys } from './services/apiKeys';
 import { SignInScreen } from './components/Auth/SignInScreen';
 import { Wizard } from './components/Onboarding/Wizard';
 import { personalityFor } from './personalities';
@@ -111,77 +111,6 @@ export function App() {
   // Caps at 2 visible. Empty array = no escalation in flight.
   const [statusHistory, setStatusHistory] = useState<Array<{ id: number; text: string }>>([]);
   const statusIdRef = useRef(0);
-
-  // True when the current /chat request looks like it's hitting a
-  // cold local model (Ollama loading weights into VRAM on first
-  // inference, or after the keep-alive eviction). Surfaces a subtle
-  // "warming up…" indicator above the input bar so the user knows
-  // the latency is the model loading, not a hang. Flips back to
-  // false the moment the request returns OR the request wouldn't be
-  // a cold start (cloud, or recent successful chat keeping the
-  // model warm in VRAM).
-  const [warmingUp, setWarmingUp] = useState(false);
-  // Set by handleSendMessage based on the user's llm_provider just
-  // before kicking off the request. Used by the warmup-timer effect
-  // below — only Ollama (local) cold starts; cloud providers always
-  // get the same indicator-less path even if they're slow.
-  const lastChatIsLocalRef = useRef(false);
-  // Wall-clock of the last successful chat completion. The warmup
-  // effect uses this to decide "is this likely a cold start?":
-  //   * 0 (never completed) → cold (first ever chat, model not
-  //     loaded yet)
-  //   * within KEEP_ALIVE_MS → warm (Ollama hasn't evicted model)
-  //   * older than KEEP_ALIVE_MS → cold (model may have been
-  //     evicted by Ollama's default 5-min keep-alive)
-  // Without this check, normal Ollama inferences (which routinely
-  // take 2-4s once the model IS in VRAM) trip the 1.5s threshold
-  // and the indicator becomes noise on every reply.
-  const lastChatCompleteTsRef = useRef(0);
-  // Ollama's default keep-alive is 5 minutes — past that the model
-  // gets evicted from VRAM and the next inference is genuinely a
-  // cold start. Be slightly stricter (4 min) so a borderline-eviction
-  // case still shows the indicator.
-  const OLLAMA_KEEP_ALIVE_MS = 4 * 60 * 1000;
-  // Show warmingUp after this delay if the request hasn't returned
-  // AND we believe it's a cold start. Bumped from 1.5s → 2.5s so
-  // genuinely-warm inferences (which still cross 1.5s on small
-  // models) don't trip it; the cold-start check above is the
-  // primary gate.
-  const WARMUP_INDICATOR_DELAY_MS = 2500;
-  useEffect(() => {
-    if (!isSending || !lastChatIsLocalRef.current) {
-      setWarmingUp(false);
-      return;
-    }
-    const sinceLast = Date.now() - lastChatCompleteTsRef.current;
-    const likelyColdStart =
-      lastChatCompleteTsRef.current === 0
-      || sinceLast > OLLAMA_KEEP_ALIVE_MS;
-    if (!likelyColdStart) {
-      // Recent successful chat → model is still in VRAM → no warmup
-      // expected → don't show the indicator.
-      setWarmingUp(false);
-      return;
-    }
-    const handle = window.setTimeout(
-      () => setWarmingUp(true),
-      WARMUP_INDICATOR_DELAY_MS,
-    );
-    return () => {
-      window.clearTimeout(handle);
-      setWarmingUp(false);
-    };
-  }, [isSending]);
-
-  // Fetch soul's /capabilities catalog once at app start. The
-  // modelSupportsThinking / modelSupportsTools helpers in apiKeys.ts
-  // read from the cached result so dropdown gating matches whatever
-  // soul actually does at dispatch time. Best-effort: if soul isn't
-  // running yet (offline, starting up), the fallback table in
-  // apiKeys.ts handles it.
-  useEffect(() => {
-    void loadCapabilitiesFromSoul();
-  }, []);
 
   // Pending screenshot stack — base64 PNGs captured via the global
   // shortcut (Ctrl+Shift+G) or the trigger button. The user can stack
@@ -864,11 +793,6 @@ export function App() {
     let streamingProvider: 'kokoro' | 'qwen3' | null = null;
     try {
       const keys = await fetchApiKeys();
-      // Note for the warming-up indicator: only Ollama can cold-start
-      // (model loading into VRAM). The effect that watches isSending
-      // reads this ref AFTER it's been set here, then schedules the
-      // indicator with a 1.5s grace.
-      lastChatIsLocalRef.current = keys.llm_provider === 'ollama';
       // Stream when the user picked a provider that has a local
       // chunk-by-chunk synthesis path:
       //   * kokoro recommended (in-process kokoro-onnx)
@@ -988,12 +912,6 @@ export function App() {
         isAISpeakingRef.current = false;
       } finally {
         if (streamAbortRef.current === ac) streamAbortRef.current = null;
-        // Stamp the last-successful-chat timestamp so the warmup-
-        // indicator effect knows the model is in VRAM. Subsequent
-        // chats within the keep-alive window won't show the
-        // "warming up…" indicator — only post-eviction or first-
-        // ever inferences will.
-        if (lastChatIsLocalRef.current) lastChatCompleteTsRef.current = Date.now();
         setIsSending(false);
       }
       return;
@@ -1019,7 +937,6 @@ export function App() {
       console.error('[chat] soul /chat failed:', err);
       isAISpeakingRef.current = false;
     } finally {
-      if (lastChatIsLocalRef.current) lastChatCompleteTsRef.current = Date.now();
       setIsSending(false);
     }
   }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream]);
@@ -1769,36 +1686,6 @@ export function App() {
                   </motion.span>
                 );
               })}
-              {/* Warming-up indicator. Surfaces when a local-model
-                  request has been in flight longer than the warmup
-                  delay (~1.5s), suggesting the model is loading
-                  into VRAM. Same visual register as the escalation
-                  status pills (italic, secondary text colour, fade
-                  in from below) so the user reads it as a status
-                  hint, not an error or a chat reply. Hidden once
-                  the response arrives. Suppressed during escalation
-                  (the agentic loop has its own status pills above). */}
-              {!chatPaneOpen && warmingUp && !escalating && (
-                <motion.span
-                  key="warming-up-indicator"
-                  layout
-                  initial={{ opacity: 0, y: 10, filter: 'blur(3px)' }}
-                  animate={{ opacity: 0.85, y: 0, filter: 'blur(0px)' }}
-                  exit={{ opacity: 0, y: -10, filter: 'blur(3px)' }}
-                  transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 500,
-                    fontStyle: 'italic',
-                    letterSpacing: '0.01em',
-                    color: 'var(--text-secondary)',
-                    textShadow: '0 1px 3px rgba(0, 0, 0, 0.6)',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  warming up the model…
-                </motion.span>
-              )}
             </AnimatePresence>
           </div>
 
