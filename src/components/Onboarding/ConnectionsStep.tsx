@@ -1464,6 +1464,9 @@ function AgenticSection({
   const setAgenticProvider = (p: AgenticProvider) => {
     onChange({ ...values, agentic_provider: p });
   };
+  const setAgenticThinking = (effort: ThinkingEffort) => {
+    onChange({ ...values, agentic_thinking_effort: effort });
+  };
 
   const chatIsOpenAI = values.llm_provider === 'openai';
   const chatIsOllama = values.llm_provider === 'ollama';
@@ -1480,6 +1483,16 @@ function AgenticSection({
   // we're on the OpenAI agentic path (not local).
   const effectiveReuse =
     values.agentic_use_same_as_chat && chatIsOpenAI && !usingLocal;
+
+  // Which model actually runs the escalation loop. Drives whether
+  // we surface the agentic-tier thinking dropdown (only shown for
+  // reasoning-capable models).
+  const effectiveAgenticModel: string | null = usingLocal
+    ? values.llm_model
+    : effectiveReuse
+      ? values.llm_model
+      : values.agentic_model;
+  const agenticSupportsThinking = modelSupportsThinking(effectiveAgenticModel);
 
   const helperWhenOn = usingLocal
     ? 'Your local Ollama model handles tool-use too. No cloud key needed.'
@@ -1578,6 +1591,38 @@ function AgenticSection({
                 visible={showKey}
                 onToggleVisible={() => setShowKey((v) => !v)}
                 autoComplete="off"
+              />
+            </FieldLabel>
+          )}
+
+          {/* Agentic-tier reasoning depth. Independent from the
+              chat-tier `thinking_effort` lever above the AgenticSection.
+              Hidden when the effective agentic model doesn't advertise
+              thinking (Gemma 3, Llama, gpt-4o on the chat path, etc.).
+              Ollama keeps the model in VRAM across requests with
+              different `think` values — zero perf cost to have chat
+              fast + agentic deep. */}
+          {agenticSupportsThinking && (
+            <FieldLabel
+              text="Agentic reasoning depth"
+              trailing={
+                <span style={{
+                  fontSize: 10,
+                  color: 'var(--text-secondary)',
+                  letterSpacing: '0.04em',
+                  fontWeight: 500,
+                }}>
+                  on {(effectiveAgenticModel ?? '').replace(/^ollama:/, '').replace(/^openai:/, '')}
+                </span>
+              }
+            >
+              <Dropdown
+                value={values.agentic_thinking_effort}
+                onChange={(v) => setAgenticThinking((v as ThinkingEffort) || 'medium')}
+                placeholder="Medium"
+                options={THINKING_OPTIONS.map((o) => ({
+                  id: o.id, label: o.label, hint: o.hint,
+                }))}
               />
             </FieldLabel>
           )}

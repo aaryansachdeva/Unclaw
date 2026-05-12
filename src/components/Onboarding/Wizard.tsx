@@ -202,6 +202,21 @@ export function Wizard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [identity.name]);
 
+  // True while the Wizard is mounted; flipped false in the unmount
+  // effect below. The async closures inside playLine check this
+  // BEFORE handing the result to onChatResult — without the check,
+  // a fetch in flight when the user closes the wizard (advances past
+  // Finish, hits Cancel, App-level state forces unmount) would still
+  // dispatch the audio through UE after the wizard is gone, so the
+  // user would hear an onboarding line in a non-onboarding context.
+  const wizardMountedRef = useRef(true);
+  useEffect(() => {
+    wizardMountedRef.current = true;
+    return () => {
+      wizardMountedRef.current = false;
+    };
+  }, []);
+
   // Best-effort dispatch of a pre-generated onboarding audio clip
   // through soul + UE. Failures (soul offline, asset missing) are
   // swallowed — they shouldn't block the user advancing through the
@@ -213,11 +228,20 @@ export function Wizard({
   // Mute short-circuits at the top — we don't even POST the audio to
   // soul, so the lipsync + T2F passes are skipped entirely. The
   // MetaHuman's last pushed face frame just keeps showing.
+  //
+  // Mount-state guard around onChatResult ensures we don't play
+  // onboarding audio outside the wizard if the user closes it while
+  // a request is in flight.
   const playLine = (line: PreGenLine) => {
     if (mutedRef.current) return;
     void (async () => {
       try {
         const result = await playPreGenAudio(line);
+        if (!wizardMountedRef.current) {
+          console.debug(`[onboarding] pre-gen "${line}" arrived after `
+                        + 'wizard unmounted — dropping');
+          return;
+        }
         onChatResult(result);
       } catch (err) {
         console.warn(`[onboarding] pre-gen "${line}" failed`, err);

@@ -163,12 +163,18 @@ export async function chatViaSoul(
         body.agentic_api_key = reuseChat ? keys.llm_api_key : keys.agentic_api_key;
       }
     }
-    // Reasoning depth. Soul translates per-family (Ollama `think`,
-    // Groq `reasoning_effort`, OpenAI Responses `reasoning.effort`).
-    // Always sent — soul defaults to 'none' if missing, but being
+    // Reasoning depth. Two independent levers:
+    //   * thinking_effort         → CHAT tier (conversational model)
+    //   * agentic_thinking_effort → AGENTIC tier (escalation loop)
+    // Soul translates per-family (Ollama `think`, Groq
+    // `reasoning_effort`, OpenAI Responses `reasoning.effort`).
+    // Always sent — soul defaults gracefully if missing, but being
     // explicit avoids surprises when the renderer's local default
     // drifts from soul's default in the future.
     if (keys.thinking_effort) body.thinking_effort = keys.thinking_effort;
+    if (keys.agentic_thinking_effort) {
+      body.agentic_thinking_effort = keys.agentic_thinking_effort;
+    }
     // Gemini grounded-search BYOK. Only forwarded when the user opted
     // in via the wizard. Without this, the escalation web_search tool
     // would silently bill the dev's quota (or fail outright on a
@@ -345,7 +351,11 @@ export async function* streamChatViaSoul(
       }
     }
     // Reasoning depth (see chatViaSoul for the per-family mapping).
+    // Two independent levers — chat tier vs agentic tier.
     if (keys.thinking_effort) body.thinking_effort = keys.thinking_effort;
+    if (keys.agentic_thinking_effort) {
+      body.agentic_thinking_effort = keys.agentic_thinking_effort;
+    }
     // Gemini grounded-search BYOK. Only forwarded when the user opted
     // in via the wizard. Without this, the escalation web_search tool
     // would silently bill the dev's quota (or fail outright on a

@@ -100,10 +100,16 @@ export async function playPreGenAudio(line: PreGenLine): Promise<SoulChatResult>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       audio_base64,
-      prompt: meta.mood,
+      // Empty prompt = soul does lipsync-only, no Text2Face overlay.
+      // Pre-gen lines deliberately skip the mood-driven face animation:
+      // the audio is fixed copy that doesn't need a generated facial
+      // expression riding on top. The face stays at its neutral base
+      // pose; only the mouth moves with the audio. The per-clip mood
+      // in META is still used downstream for the renderer-side
+      // bookkeeping (Turn metadata, etc.).
+      prompt: '',
       // Use the engine's current lipsync_model + face defaults; we
-      // explicitly want the same face quality as a chat reply, not the
-      // bare /generate defaults which lean conservative.
+      // explicitly want the same lipsync quality as a chat reply.
     }),
   });
   if (!res.ok) {

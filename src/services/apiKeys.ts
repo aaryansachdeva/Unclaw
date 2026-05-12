@@ -272,12 +272,21 @@ export interface ApiKeysProfile {
   /** When true (and gemini_search_api_key is set), grounded search is
    *  active for queries that need live data. Free tier: 500/day. */
   grounding_search_enabled: boolean;
-  /** Reasoning depth lever for the LLM. Defaults to 'none' so the
-   *  chat path stays fast by default; users opt in to deeper thinking
-   *  for harder questions. Models that don't advertise thinking
-   *  treat this as a no-op. See [[ThinkingEffort]] above for the
-   *  per-family translation soul performs. */
+  /** Reasoning depth lever for the LLM on the CHAT tier (the
+   *  conversational model the user hears reply to them). Defaults to
+   *  'none' so the chat path stays fast by default; users opt in to
+   *  deeper thinking for harder questions. Models that don't
+   *  advertise thinking treat this as a no-op. See [[ThinkingEffort]]
+   *  above for the per-family translation soul performs. */
   thinking_effort: ThinkingEffort;
+  /** Reasoning depth lever for the AGENTIC tier (the escalation
+   *  loop that runs tool-use for harder questions). Independent
+   *  from `thinking_effort` so users can keep chat snappy and let
+   *  agentic take its time. Ollama keeps the model in VRAM across
+   *  requests regardless of per-request `think` value, so switching
+   *  between tiers costs nothing. Falls back to `thinking_effort`
+   *  server-side when null/empty. */
+  agentic_thinking_effort: ThinkingEffort;
   /** Backend that runs the agentic loop. Defaults to 'openai' for
    *  back-compat with the existing wizard. When the chat provider is
    *  Ollama AND the model supports tools, the wizard flips this to
@@ -313,6 +322,10 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   gemini_search_api_key:    null,
   grounding_search_enabled: false,
   thinking_effort:          'none',
+  // Agentic tier defaults to 'medium' — it's the reasoning path,
+  // takes its time. User can flip it lower for cheap quick-wins or
+  // higher for hard agentic problems.
+  agentic_thinking_effort:  'medium',
   agentic_provider:         'openai',
 };
 

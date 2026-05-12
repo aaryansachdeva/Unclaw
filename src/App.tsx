@@ -112,6 +112,39 @@ export function App() {
   const [statusHistory, setStatusHistory] = useState<Array<{ id: number; text: string }>>([]);
   const statusIdRef = useRef(0);
 
+  // True when the current /chat request looks like it's hitting a
+  // cold local model (Ollama loading weights into VRAM on first
+  // inference, or after a 5-minute idle eviction). Surfaces a
+  // subtle "warming up…" indicator above the input bar so the user
+  // knows the latency is the model loading, not a hang. Flips back
+  // to false the moment the request returns OR the request was a
+  // cloud call that wouldn't experience a cold start.
+  const [warmingUp, setWarmingUp] = useState(false);
+  // Set by handleSendMessage based on the user's llm_provider just
+  // before kicking off the request. Used by the warmup-timer effect
+  // below — only Ollama (local) cold starts; cloud providers always
+  // get the same indicator-less path even if they're slow.
+  const lastChatIsLocalRef = useRef(false);
+  // Show warmingUp after this delay if the request hasn't returned.
+  // 1500ms is short enough that cold-start users see the indicator
+  // quickly but long enough that normal warm-cache local inferences
+  // (which complete in <1s once the model is in VRAM) never trip it.
+  const WARMUP_INDICATOR_DELAY_MS = 1500;
+  useEffect(() => {
+    if (!isSending || !lastChatIsLocalRef.current) {
+      setWarmingUp(false);
+      return;
+    }
+    const handle = window.setTimeout(
+      () => setWarmingUp(true),
+      WARMUP_INDICATOR_DELAY_MS,
+    );
+    return () => {
+      window.clearTimeout(handle);
+      setWarmingUp(false);
+    };
+  }, [isSending]);
+
   // Pending screenshot stack — base64 PNGs captured via the global
   // shortcut (Ctrl+Shift+G) or the trigger button. The user can stack
   // multiple captures by hitting the shortcut several times before
@@ -793,6 +826,11 @@ export function App() {
     let streamingProvider: 'kokoro' | 'qwen3' | null = null;
     try {
       const keys = await fetchApiKeys();
+      // Note for the warming-up indicator: only Ollama can cold-start
+      // (model loading into VRAM). The effect that watches isSending
+      // reads this ref AFTER it's been set here, then schedules the
+      // indicator with a 1.5s grace.
+      lastChatIsLocalRef.current = keys.llm_provider === 'ollama';
       // Stream when the user picked a provider that has a local
       // chunk-by-chunk synthesis path:
       //   * kokoro recommended (in-process kokoro-onnx)
@@ -1686,6 +1724,36 @@ export function App() {
                   </motion.span>
                 );
               })}
+              {/* Warming-up indicator. Surfaces when a local-model
+                  request has been in flight longer than the warmup
+                  delay (~1.5s), suggesting the model is loading
+                  into VRAM. Same visual register as the escalation
+                  status pills (italic, secondary text colour, fade
+                  in from below) so the user reads it as a status
+                  hint, not an error or a chat reply. Hidden once
+                  the response arrives. Suppressed during escalation
+                  (the agentic loop has its own status pills above). */}
+              {!chatPaneOpen && warmingUp && !escalating && (
+                <motion.span
+                  key="warming-up-indicator"
+                  layout
+                  initial={{ opacity: 0, y: 10, filter: 'blur(3px)' }}
+                  animate={{ opacity: 0.85, y: 0, filter: 'blur(0px)' }}
+                  exit={{ opacity: 0, y: -10, filter: 'blur(3px)' }}
+                  transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+                  style={{
+                    fontSize: 14,
+                    fontWeight: 500,
+                    fontStyle: 'italic',
+                    letterSpacing: '0.01em',
+                    color: 'var(--text-secondary)',
+                    textShadow: '0 1px 3px rgba(0, 0, 0, 0.6)',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  warming up the model…
+                </motion.span>
+              )}
             </AnimatePresence>
           </div>
 
