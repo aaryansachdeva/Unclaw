@@ -1435,13 +1435,18 @@ function AgenticSection({
   const setEnabled = (b: boolean) => {
     // When enabling agentic, if chat is on a tools-capable local
     // model, default the backend to 'ollama' so the user gets the
-    // zero-config local experience by default. They can flip to
-    // 'openai' explicitly via the backend toggle below.
+    // zero-config local experience without needing a cloud key. They
+    // can flip to 'openai' explicitly via the backend picker below.
+    //
+    // NOTE: `values.agentic_provider || 'ollama'` would NOT work here:
+    // agentic_provider's DEFAULT_API_KEYS value is the non-falsy
+    // string 'openai', so `'openai' || 'ollama'` evaluates to 'openai'.
+    // We need an explicit local-eligibility check.
     if (b && values.llm_provider === 'ollama' && modelSupportsTools(values.llm_model)) {
       onChange({
         ...values,
         agentic_enabled: true,
-        agentic_provider: values.agentic_provider || 'ollama',
+        agentic_provider: 'ollama',
       });
     } else {
       onChange({ ...values, agentic_enabled: b });
@@ -1555,7 +1560,16 @@ function AgenticSection({
             </FieldLabel>
           )}
 
-          {!usingLocal && !effectiveReuse && !chatIsOpenAI && (
+          {/* OpenAI key field. Shown whenever the user is on the cloud
+              agentic path AND isn't reusing the chat key. That means
+              EITHER the chat provider isn't OpenAI (key required), OR
+              the user is on OpenAI chat but explicitly opted out of
+              reuse via the "Use the same model as conversational"
+              checkbox (separate key still required). The earlier
+              `!chatIsOpenAI` guard hid the field in the second case,
+              leaving missingRequiredKeyFields demanding a key the UI
+              never surfaced. */}
+          {!usingLocal && !effectiveReuse && (
             <FieldLabel text="OpenAI API key">
               <SecretInput
                 value={values.agentic_api_key ?? ''}

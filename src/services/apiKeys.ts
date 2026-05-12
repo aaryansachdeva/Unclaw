@@ -164,12 +164,20 @@ export function modelSupportsTools(modelId: string | null | undefined): boolean 
   if (m.includes('gpt-oss')) return true;
   if (m.includes('qwen/qwen3')) return true;
   if (m.includes('llama-3')) return true;
-  // Ollama families with verified tool support.
+  // Ollama families with verified tool support. Small models (< 1B
+  // params) advertise the `tools` capability but fail mid-call —
+  // soul has `_OLLAMA_TOOLS_MIN_PARAM_B = 1.0` as a runtime gate that
+  // would fall back to the structured-text path for sub-1B models.
+  // Mirror that gate here so the wizard doesn't surface agentic for
+  // a model soul will silently downgrade.
   if (m.startsWith('ollama:')) {
-    if (m.includes('qwen3')) return true;
-    if (m.includes('gemma3') && !m.includes(':1b')) return true;  // 1b too small
+    const isSubOneBillion =
+      m.includes(':0.6b') || m.includes(':0.8b') ||
+      m.includes(':0.9b') || m.includes(':1b');
+    if (m.includes('qwen3') && !isSubOneBillion) return true;
+    if (m.includes('gemma3') && !m.includes(':1b')) return true;
     if (m.includes('gemma4')) return true;
-    if (m.includes('deepseek-r1')) return true;
+    if (m.includes('deepseek-r1') && !isSubOneBillion) return true;
     if (m.includes('phi4-reasoning') || m.includes('phi4-mini-reasoning')) return true;
     if (m.includes('magistral')) return true;
     if (m.includes('llama3.1') || m.includes('llama3.2') || m.includes('llama3.3')) return true;
@@ -498,11 +506,15 @@ export async function validateKeys(
         profile.tts_provider === 'kokoro' && profile.kokoro_mode === 'custom'
           ? (profile.kokoro_endpoint || null)
           : null,
-      // Agentic — soul probes the OpenAI key + model when enabled.
-      // When `agentic_use_same_as_chat` is on AND chat is OpenAI,
-      // the chat key is reused; otherwise the dedicated agentic key
-      // is sent. Soul does the right thing on its end.
+      // Agentic — soul probes the OpenAI key + model when enabled and
+      // backend is cloud; for local-Ollama backend there's no probe
+      // (the model itself is on localhost and either reachable or not,
+      // which the LLM probe already covers). Forwarding the provider
+      // tag tells soul which probe path to take — without it, soul
+      // defaults to OpenAI and fails validation for local-agentic
+      // users who have no cloud key.
       agentic_enabled:     profile.agentic_enabled,
+      agentic_provider:    profile.agentic_provider,
       agentic_model:       profile.agentic_model,
       agentic_api_key:     profile.agentic_use_same_as_chat
                             && profile.llm_provider === 'openai'
