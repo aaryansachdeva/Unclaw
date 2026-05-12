@@ -21,7 +21,7 @@
 import type { SoulChatResult } from './soulChat';
 
 const SOUL_URL = 'http://127.0.0.1:8765';
-const CLOUD_URL = 'https://unclaw-api.aryansachdeva1999.workers.dev';
+const CLOUD_URL = 'https://api.unclaw.io';
 
 export type UserSchedule = 'early_bird' | 'night_owl' | 'mixed';
 

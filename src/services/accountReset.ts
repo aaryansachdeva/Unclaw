@@ -7,17 +7,19 @@
 //   * Local — Electron safeStorage: API keys + auth token
 //   * Local — soul backend: /settings (DELETE)
 //   * Local — localStorage: chat memory keys, pane width, guest-mode flag
-//   * Cloud — UnClaw Worker: /sync/keys (DELETE), /settings (DELETE)
-//   * Cloud — UnClaw Worker: /auth/logout (revoke session)
+//   * Cloud — Unclaw Worker: /settings (DELETE)
+//   * Cloud — Unclaw Worker: /auth/logout (revoke session)
+//
+// API keys live LOCAL ONLY (Electron safeStorage at <userData>/apiKeys.bin).
+// There is no cloud key vault — the previous /sync/keys path was removed
+// before launch.
 //
 // Each step is best-effort: a network failure on the cloud side still
 // leaves the local side cleared, so the next launch is guaranteed to
-// behave as a fresh install. If the user signs back in afterward, the
-// cloud side will look empty (or stale) and re-sync from soul.
+// behave as a fresh install.
 
 import { clearApiKeys } from './apiKeys';
 import { signOut } from './auth';
-import { deleteVaultBlob } from './keysSync';
 import { deleteSettings, deleteCloudSettings } from './userSettings';
 import { uninstallKokoro } from './kokoro';
 import { uninstallQwen3 } from './qwen3';
@@ -64,7 +66,6 @@ export interface AccountResetReport {
    *  enough that they'd never reach this dict, but we capture them too. */
   apiKeys: boolean;
   soulProfile: boolean;
-  cloudVault: boolean | 'skipped';
   cloudProfile: boolean | 'skipped';
   signOut: boolean | 'skipped';
 }
@@ -80,7 +81,6 @@ export async function resetEverything(
   const report: AccountResetReport = {
     apiKeys: false,
     soulProfile: false,
-    cloudVault: 'skipped',
     cloudProfile: 'skipped',
     signOut: 'skipped',
   };
@@ -112,16 +112,13 @@ export async function resetEverything(
     console.warn('[accountReset] uninstallQwen3 threw', err);
   }
 
-  // 3. Cloud (auth-required) — vault + settings in parallel; failures
-  //    are silent. If the user is in guest mode (`token == null`)
-  //    these are skipped entirely.
+  // 3. Cloud (auth-required) — wipe the user's profile settings.
+  //    Failures are silent. If the user is in guest mode (`token == null`)
+  //    this is skipped entirely. There is no cloud API-key vault to clean
+  //    up; keys live local-only via safeStorage and step 1 already wiped
+  //    them.
   if (token) {
-    const [vaultOk, settingsOk] = await Promise.all([
-      deleteVaultBlob().catch(() => false),
-      deleteCloudSettings(token).catch(() => false),
-    ]);
-    report.cloudVault = vaultOk;
-    report.cloudProfile = settingsOk;
+    report.cloudProfile = await deleteCloudSettings(token).catch(() => false);
   }
 
   // 4. Cloud — revoke the session, then wipe the local token.

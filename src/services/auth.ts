@@ -12,7 +12,7 @@
 // the token (auth:get-token) and either resumes the session or shows
 // the SignInScreen.
 
-const API_URL = 'https://unclaw-api.aryansachdeva1999.workers.dev';
+const API_URL = 'https://api.unclaw.io';
 // Loopback HTTP redirect — Google's Desktop OAuth client and Discord
 // both accept this pattern. Port + path must match what the Electron
 // main process binds in `auth:start-oauth-loopback` and what's
