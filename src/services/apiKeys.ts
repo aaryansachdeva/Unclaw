@@ -166,7 +166,7 @@ const FALLBACK_CAPABILITIES: ModelCapability[] = [
   { family_pattern: 'phi4-mini-reasoning', thinking_protocol: 'bool', tool_call_min_b: 0.5, qwen3_tools_guard: false, groq_extras: null },
   { family_pattern: 'magistral',           thinking_protocol: 'bool', tool_call_min_b: 7.0, qwen3_tools_guard: false, groq_extras: null },
   { family_pattern: 'gpt-oss',             thinking_protocol: 'levels', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: 'groq_effort' },
-  { family_pattern: 'gemma4',              thinking_protocol: 'template_only', tool_call_min_b: 2.0, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'gemma4',              thinking_protocol: 'template_only', tool_call_min_b: 6.0, qwen3_tools_guard: false, groq_extras: null },
   { family_pattern: 'gemma3',              thinking_protocol: 'none', tool_call_min_b: 4.0, qwen3_tools_guard: false, groq_extras: null },
   { family_pattern: 'llama-3.3',           thinking_protocol: 'none', tool_call_min_b: 70.0, qwen3_tools_guard: false, groq_extras: null },
   { family_pattern: 'llama3',              thinking_protocol: 'none', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: null },
