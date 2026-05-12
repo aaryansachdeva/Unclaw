@@ -79,8 +79,14 @@ async function blobToBase64(blob: Blob): Promise<string> {
  *  Throws if soul is unreachable or the asset is missing — caller
  *  should treat that as best-effort and not block the user flow. */
 export async function playPreGenAudio(line: PreGenLine): Promise<SoulChatResult> {
-  // Vite serves `public/` at the renderer root in both dev and prod.
-  const assetUrl = `/onboarding-audio/${line}.mp3`;
+  // RELATIVE path (`./`), not absolute (`/`). Vite serves `public/` at
+  // the renderer root in dev (so `/onboarding-audio/...` works), but in
+  // packaged Electron the renderer loads via `file://` and a leading
+  // `/` resolves to the FILESYSTEM root (e.g. `file:///C:/onboarding-
+  // audio/welcome.mp3` — not what we want). `./onboarding-audio/...`
+  // resolves relative to `index.html` in both contexts. The audio MP3s
+  // are siblings of index.html in the build output, so this lands them.
+  const assetUrl = `./onboarding-audio/${line}.mp3`;
   const fetched = await fetch(assetUrl);
   if (!fetched.ok) {
     throw new Error(`onboarding audio missing: ${assetUrl} (${fetched.status})`);

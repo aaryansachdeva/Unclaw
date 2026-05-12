@@ -149,7 +149,7 @@ export class VoiceController {
           await this.vad.init();
           console.info('[voice] Silero VAD ready');
         } catch (err) {
-          console.error('[voice] Silero load failed (check /silero_vad.onnx and /ort/* are served):', err);
+          console.error('[voice] Silero load failed (check ./silero_vad.onnx + ORT wasm CDN reachable):', err);
           throw err;
         }
       })();
@@ -201,9 +201,11 @@ export class VoiceController {
       }
 
       try {
-        await this.ctx.audioWorklet.addModule('/voice-worklet.js');
+        // RELATIVE path (`./`), not absolute (`/`). See vadEngine.ts +
+        // services/onboardingAudio.ts for the same Electron file:// trap.
+        await this.ctx.audioWorklet.addModule('./voice-worklet.js');
       } catch (err) {
-        console.error('[voice] worklet load failed (is /voice-worklet.js served?):', err);
+        console.error('[voice] worklet load failed (is ./voice-worklet.js served?):', err);
         throw err;
       }
       const source = this.ctx.createMediaStreamSource(this.mediaStream);

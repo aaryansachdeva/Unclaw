@@ -19,7 +19,9 @@
 
 const SOUL_WS_URL = 'ws://127.0.0.1:8765/transcribe-stream';
 const SAMPLE_RATE = 16_000;
-const WORKLET_URL = '/voice-worklet.js';
+// RELATIVE path (`./`), not absolute (`/`). See vadEngine.ts for the
+// same Electron file:// trap.
+const WORKLET_URL = './voice-worklet.js';
 
 export type StreamingMode = 'push' | 'continuous';
 

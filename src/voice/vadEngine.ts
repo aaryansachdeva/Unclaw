@@ -40,7 +40,13 @@ ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VER
 // Vite dev don't ship by default, so leave it off.
 ort.env.wasm.numThreads = 1;
 
-const MODEL_URL = '/silero_vad.onnx';
+// RELATIVE path (`./`), not absolute (`/`). Vite serves `public/` at the
+// renderer root in dev (so `/silero_vad.onnx` resolves correctly), but
+// packaged Electron loads via `file://` and a leading `/` resolves to the
+// FILESYSTEM ROOT (e.g. `file:///C:/silero_vad.onnx` — not what we want).
+// `./` resolves relative to index.html where this file lives in the build
+// output. Same gotcha as src/services/onboardingAudio.ts.
+const MODEL_URL = './silero_vad.onnx';
 
 let sessionPromise: Promise<ort.InferenceSession> | null = null;
 function getSession(): Promise<ort.InferenceSession> {
