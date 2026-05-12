@@ -120,69 +120,144 @@ export function getProvider(id: LLMProviderId | null | undefined): ProviderInfo 
 }
 
 
-/** Heuristic family check: does this model id advertise a reasoning /
- *  thinking mode? Used to gate the thinking-effort dropdown so users
- *  don't see a no-op control on Gemma 3 / Llama / plain chat models.
- *
- *  Conservative — pattern-matches against the prefixed wire form
- *  (e.g. 'ollama:qwen3:8b', 'openai:gpt-5.4-mini', 'openai/gpt-oss-20b').
- *  Soul also feature-detects via Ollama's /api/show capabilities
- *  before sending `think`; this client-side check is just for UI
- *  gating. */
-export function modelSupportsThinking(modelId: string | null | undefined): boolean {
-  if (!modelId) return false;
-  const m = modelId.toLowerCase();
-  // gpt-oss (level string on Ollama; reasoning_effort on Groq).
-  if (m.includes('gpt-oss')) return true;
-  // OpenAI cloud reasoning family. gpt-5.4-* honors reasoning.effort
-  // on the Responses API (escalation), gpt-4o-* does not.
-  if (m.startsWith('openai:gpt-5')) return true;
-  // Bool-thinking Ollama families.
-  if (m.includes('qwen3') && !m.includes('qwen3.5')) return true;
-  if (m.includes('deepseek-r1') || m.includes('deepseek-v3.1')) return true;
-  if (m.includes('phi4-reasoning') || m.includes('phi4-mini-reasoning')) return true;
-  if (m.includes('magistral')) return true;
-  if (m.includes('gemma4')) return true;
-  return false;
+// ============================================================================
+// Model-capability registry — fetched from soul's /capabilities on load
+// ============================================================================
+//
+// Both sides need the same per-model decisions: does it support
+// thinking? can it tool-call? at what parameter size? Soul exposes
+// `GET /capabilities` as the single source of truth (see
+// MODEL_CAPABILITIES in soul/server.py). We fetch it once at startup,
+// cache it in module scope, and use it for every UI gating decision.
+//
+// A small fallback table mirrors the soul-side default so the renderer
+// can still function before the fetch resolves (or if the user's soul
+// is older than this catalog).
+
+const SOUL_URL = 'http://127.0.0.1:8765';
+
+export type ThinkingProtocol =
+  | 'bool'           // Ollama think:bool — Qwen3, DeepSeek-R1, Phi-4-r, Magistral
+  | 'levels'         // Ollama think:"low"|"medium"|"high" — gpt-oss only
+  | 'template_only'  // Template control tokens, no JSON field — Gemma 4
+  | 'responses_api'  // OpenAI Responses API reasoning.effort — gpt-5/o1/o3
+  | 'groq_effort'    // Groq reasoning_effort + reasoning_format=hidden
+  | 'groq_hidden'    // Groq reasoning_format=hidden only (no effort knob)
+  | 'none';
+
+export interface ModelCapability {
+  family_pattern: string;
+  thinking_protocol: ThinkingProtocol;
+  tool_call_min_b: number | null;
+  qwen3_tools_guard: boolean;
+  groq_extras: string | null;
 }
 
+// Mirror of soul's MODEL_CAPABILITIES at the time of writing — used
+// only as a fallback when the /capabilities fetch fails or hasn't
+// resolved yet. Keep this in rough sync with soul/server.py; the
+// runtime fetch is the source of truth.
+const FALLBACK_CAPABILITIES: ModelCapability[] = [
+  { family_pattern: 'qwen3.5',  thinking_protocol: 'bool',   tool_call_min_b: 1.0,  qwen3_tools_guard: true,  groq_extras: null },
+  { family_pattern: 'qwen3',    thinking_protocol: 'bool',   tool_call_min_b: 1.0,  qwen3_tools_guard: true,  groq_extras: 'groq_hidden' },
+  { family_pattern: 'deepseek-r1',         thinking_protocol: 'bool', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'deepseek-v3.1',       thinking_protocol: 'bool', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'phi4-reasoning',      thinking_protocol: 'bool', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'phi4-mini-reasoning', thinking_protocol: 'bool', tool_call_min_b: 0.5, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'magistral',           thinking_protocol: 'bool', tool_call_min_b: 7.0, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'gpt-oss',             thinking_protocol: 'levels', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: 'groq_effort' },
+  { family_pattern: 'gemma4',              thinking_protocol: 'template_only', tool_call_min_b: 2.0, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'gemma3',              thinking_protocol: 'none', tool_call_min_b: 4.0, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'llama-3.3',           thinking_protocol: 'none', tool_call_min_b: 70.0, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'llama3',              thinking_protocol: 'none', tool_call_min_b: 1.0, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'gpt-5',  thinking_protocol: 'responses_api', tool_call_min_b: null, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'o1',     thinking_protocol: 'responses_api', tool_call_min_b: null, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'o3',     thinking_protocol: 'responses_api', tool_call_min_b: null, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'gpt-4o', thinking_protocol: 'none',          tool_call_min_b: null, qwen3_tools_guard: false, groq_extras: null },
+  { family_pattern: 'kimi',   thinking_protocol: 'groq_hidden',   tool_call_min_b: null, qwen3_tools_guard: false, groq_extras: 'groq_hidden' },
+];
 
-/** Heuristic family check: does this model id support native tool
- *  calling? Used to gate the local-agentic toggle so users on a
- *  non-tool model see a clear "your model can't do this" hint
- *  instead of an enabled toggle that 502s on first agentic request.
- *
- *  Cloud providers all support tools through Chat Completions /
- *  Responses APIs. For Ollama, this is a name-pattern guess; soul
- *  re-checks via /api/show capabilities at request time and falls
- *  back to a structured-text path if the model lies. */
+let _capabilitiesCache: ModelCapability[] = FALLBACK_CAPABILITIES;
+let _capabilitiesFetched = false;
+
+/** Fetch /capabilities from soul. Idempotent — only the first call
+ *  hits the wire; subsequent calls resolve immediately from the
+ *  cache. Best-effort: on fetch failure we keep using the fallback
+ *  table baked into this file. Call at app startup. */
+export async function loadCapabilitiesFromSoul(): Promise<void> {
+  if (_capabilitiesFetched) return;
+  _capabilitiesFetched = true;
+  try {
+    const r = await fetch(`${SOUL_URL}/capabilities`);
+    if (!r.ok) return;
+    const data = await r.json() as { families?: ModelCapability[] };
+    if (Array.isArray(data.families) && data.families.length > 0) {
+      _capabilitiesCache = data.families;
+    }
+  } catch {
+    // Soul not running / older soul without the endpoint — fallback
+    // table stays in effect. Wizard still works.
+  }
+}
+
+/** Lookup the first-matching capability row for a model id. Mirrors
+ *  soul's _model_capability(). Returns null when no row matches. */
+function _capabilityFor(modelId: string | null | undefined): ModelCapability | null {
+  if (!modelId) return null;
+  const m = modelId.toLowerCase();
+  for (const row of _capabilitiesCache) {
+    if (m.includes(row.family_pattern)) return row;
+  }
+  return null;
+}
+
+/** Parse "0.8b" / "2b" / "8b" / "70b" / "e2b" out of an Ollama model
+ *  id. Returns parameter count in billions, or null when no tag-like
+ *  suffix is found. Used to gate tools by the family's min_b. */
+function _parseModelSizeB(modelId: string): number | null {
+  // Strip provider prefix.
+  const stripped = modelId.replace(/^ollama:/, '').replace(/^openai:/, '');
+  // Match the FIRST size-like token: e?<number>b. e.g. "qwen3:8b" →
+  // 8, "gemma4:e2b" → 2, "phi4-mini-reasoning:0.5b" → 0.5.
+  const m = stripped.match(/[:\-]e?(\d+(?:\.\d+)?)b\b/i);
+  return m ? parseFloat(m[1]) : null;
+}
+
+/** Does this model id advertise a reasoning / thinking mode that the
+ *  WIZARD can offer a user-facing control for? Hides the dropdown
+ *  for protocols we can't actually drive from the JSON request body
+ *  (template_only) or for non-reasoning families. */
+export function modelSupportsThinking(modelId: string | null | undefined): boolean {
+  const cap = _capabilityFor(modelId);
+  if (!cap) return false;
+  // Show the dropdown for any protocol where the JSON field actually
+  // does something. template_only (Gemma 4) is excluded — the model
+  // honors thinking via control tokens in the system prompt, but we
+  // don't currently inject those, and sending JSON think corrupts
+  // the output. Add a separate UI affordance when we wire template
+  // tokens in.
+  return cap.thinking_protocol === 'bool'
+      || cap.thinking_protocol === 'levels'
+      || cap.thinking_protocol === 'responses_api'
+      || cap.thinking_protocol === 'groq_effort';
+}
+
+/** Does this family support native tool calling? Used to gate the
+ *  local-agentic toggle. For Ollama models we ALSO check that the
+ *  declared size meets the family's tool_call_min_b — soul mirrors
+ *  this check at runtime via /api/show. */
 export function modelSupportsTools(modelId: string | null | undefined): boolean {
   if (!modelId) return false;
-  const m = modelId.toLowerCase();
-  // Cloud (OpenAI native function calling, Groq OpenAI-compat).
-  if (m.startsWith('openai:')) return true;
-  if (m.includes('gpt-oss')) return true;
-  if (m.includes('qwen/qwen3')) return true;
-  if (m.includes('llama-3')) return true;
-  // Ollama families with verified tool support. Small models (< 1B
-  // params) advertise the `tools` capability but fail mid-call —
-  // soul has `_OLLAMA_TOOLS_MIN_PARAM_B = 1.0` as a runtime gate that
-  // would fall back to the structured-text path for sub-1B models.
-  // Mirror that gate here so the wizard doesn't surface agentic for
-  // a model soul will silently downgrade.
-  if (m.startsWith('ollama:')) {
-    const isSubOneBillion =
-      m.includes(':0.6b') || m.includes(':0.8b') ||
-      m.includes(':0.9b') || m.includes(':1b');
-    if (m.includes('qwen3') && !isSubOneBillion) return true;
-    if (m.includes('gemma3') && !m.includes(':1b')) return true;
-    if (m.includes('gemma4')) return true;
-    if (m.includes('deepseek-r1') && !isSubOneBillion) return true;
-    if (m.includes('phi4-reasoning') || m.includes('phi4-mini-reasoning')) return true;
-    if (m.includes('magistral')) return true;
-    if (m.includes('llama3.1') || m.includes('llama3.2') || m.includes('llama3.3')) return true;
-  }
-  return false;
+  const cap = _capabilityFor(modelId);
+  if (!cap) return false;
+  // Non-Ollama (cloud) entries with tool_call_min_b=null = cloud
+  // providers where tool support is universal (handled per-request
+  // by the provider's chat-completions / Responses APIs).
+  if (cap.tool_call_min_b === null) return true;
+  // Ollama families: enforce the size floor where parseable.
+  const sizeB = _parseModelSizeB(modelId);
+  if (sizeB === null) return true;  // size unknown → assume capable
+  return sizeB >= cap.tool_call_min_b;
 }
 
 
@@ -467,8 +542,6 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
 // OpenAI's /models, Ollama's /api/tags, ElevenLabs's /v1/user) IN
 // PARALLEL and returns per-key results. Surfaces a typo as a precise
 // error during onboarding instead of as a 502 on first chat.
-
-const SOUL_URL = 'http://127.0.0.1:8765';
 
 export interface KeyValidationOutcome {
   ok: boolean;

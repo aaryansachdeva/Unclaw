@@ -38,7 +38,7 @@ import {
 } from './services/auth';
 import { resetEverything } from './services/accountReset';
 import { fetchSettings } from './services/userSettings';
-import { fetchApiKeys } from './services/apiKeys';
+import { fetchApiKeys, loadCapabilitiesFromSoul } from './services/apiKeys';
 import { SignInScreen } from './components/Auth/SignInScreen';
 import { Wizard } from './components/Onboarding/Wizard';
 import { personalityFor } from './personalities';
@@ -114,24 +114,52 @@ export function App() {
 
   // True when the current /chat request looks like it's hitting a
   // cold local model (Ollama loading weights into VRAM on first
-  // inference, or after a 5-minute idle eviction). Surfaces a
-  // subtle "warming up…" indicator above the input bar so the user
-  // knows the latency is the model loading, not a hang. Flips back
-  // to false the moment the request returns OR the request was a
-  // cloud call that wouldn't experience a cold start.
+  // inference, or after the keep-alive eviction). Surfaces a subtle
+  // "warming up…" indicator above the input bar so the user knows
+  // the latency is the model loading, not a hang. Flips back to
+  // false the moment the request returns OR the request wouldn't be
+  // a cold start (cloud, or recent successful chat keeping the
+  // model warm in VRAM).
   const [warmingUp, setWarmingUp] = useState(false);
   // Set by handleSendMessage based on the user's llm_provider just
   // before kicking off the request. Used by the warmup-timer effect
   // below — only Ollama (local) cold starts; cloud providers always
   // get the same indicator-less path even if they're slow.
   const lastChatIsLocalRef = useRef(false);
-  // Show warmingUp after this delay if the request hasn't returned.
-  // 1500ms is short enough that cold-start users see the indicator
-  // quickly but long enough that normal warm-cache local inferences
-  // (which complete in <1s once the model is in VRAM) never trip it.
-  const WARMUP_INDICATOR_DELAY_MS = 1500;
+  // Wall-clock of the last successful chat completion. The warmup
+  // effect uses this to decide "is this likely a cold start?":
+  //   * 0 (never completed) → cold (first ever chat, model not
+  //     loaded yet)
+  //   * within KEEP_ALIVE_MS → warm (Ollama hasn't evicted model)
+  //   * older than KEEP_ALIVE_MS → cold (model may have been
+  //     evicted by Ollama's default 5-min keep-alive)
+  // Without this check, normal Ollama inferences (which routinely
+  // take 2-4s once the model IS in VRAM) trip the 1.5s threshold
+  // and the indicator becomes noise on every reply.
+  const lastChatCompleteTsRef = useRef(0);
+  // Ollama's default keep-alive is 5 minutes — past that the model
+  // gets evicted from VRAM and the next inference is genuinely a
+  // cold start. Be slightly stricter (4 min) so a borderline-eviction
+  // case still shows the indicator.
+  const OLLAMA_KEEP_ALIVE_MS = 4 * 60 * 1000;
+  // Show warmingUp after this delay if the request hasn't returned
+  // AND we believe it's a cold start. Bumped from 1.5s → 2.5s so
+  // genuinely-warm inferences (which still cross 1.5s on small
+  // models) don't trip it; the cold-start check above is the
+  // primary gate.
+  const WARMUP_INDICATOR_DELAY_MS = 2500;
   useEffect(() => {
     if (!isSending || !lastChatIsLocalRef.current) {
+      setWarmingUp(false);
+      return;
+    }
+    const sinceLast = Date.now() - lastChatCompleteTsRef.current;
+    const likelyColdStart =
+      lastChatCompleteTsRef.current === 0
+      || sinceLast > OLLAMA_KEEP_ALIVE_MS;
+    if (!likelyColdStart) {
+      // Recent successful chat → model is still in VRAM → no warmup
+      // expected → don't show the indicator.
       setWarmingUp(false);
       return;
     }
@@ -144,6 +172,16 @@ export function App() {
       setWarmingUp(false);
     };
   }, [isSending]);
+
+  // Fetch soul's /capabilities catalog once at app start. The
+  // modelSupportsThinking / modelSupportsTools helpers in apiKeys.ts
+  // read from the cached result so dropdown gating matches whatever
+  // soul actually does at dispatch time. Best-effort: if soul isn't
+  // running yet (offline, starting up), the fallback table in
+  // apiKeys.ts handles it.
+  useEffect(() => {
+    void loadCapabilitiesFromSoul();
+  }, []);
 
   // Pending screenshot stack — base64 PNGs captured via the global
   // shortcut (Ctrl+Shift+G) or the trigger button. The user can stack
@@ -950,6 +988,12 @@ export function App() {
         isAISpeakingRef.current = false;
       } finally {
         if (streamAbortRef.current === ac) streamAbortRef.current = null;
+        // Stamp the last-successful-chat timestamp so the warmup-
+        // indicator effect knows the model is in VRAM. Subsequent
+        // chats within the keep-alive window won't show the
+        // "warming up…" indicator — only post-eviction or first-
+        // ever inferences will.
+        if (lastChatIsLocalRef.current) lastChatCompleteTsRef.current = Date.now();
         setIsSending(false);
       }
       return;
@@ -975,6 +1019,7 @@ export function App() {
       console.error('[chat] soul /chat failed:', err);
       isAISpeakingRef.current = false;
     } finally {
+      if (lastChatIsLocalRef.current) lastChatCompleteTsRef.current = Date.now();
       setIsSending(false);
     }
   }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream]);
