@@ -154,6 +154,12 @@ export async function chatViaSoul(
       body.agentic_model = reuseChat ? keys.llm_model : keys.agentic_model;
       body.agentic_api_key = reuseChat ? keys.llm_api_key : keys.agentic_api_key;
     }
+    // Per-tier thinking effort. Soul translates per-family — gpt-oss
+    // takes level strings natively, Qwen 3.x takes bool, Gemma 4 takes
+    // a system-prompt token, Llama families omit. Sending both fields
+    // is always safe; soul ignores them for families that don't think.
+    body.chat_thinking_effort = keys.chat_thinking_effort;
+    body.agentic_thinking_effort = keys.agentic_thinking_effort;
     // Gemini grounded-search BYOK. Only forwarded when the user opted
     // in via the wizard. Without this, the escalation web_search tool
     // would silently bill the dev's quota (or fail outright on a
@@ -327,6 +333,9 @@ export async function* streamChatViaSoul(
       body.agentic_model = reuseChat ? keys.llm_model : keys.agentic_model;
       body.agentic_api_key = reuseChat ? keys.llm_api_key : keys.agentic_api_key;
     }
+    // Per-tier thinking effort — same as chatViaSoul.
+    body.chat_thinking_effort = keys.chat_thinking_effort;
+    body.agentic_thinking_effort = keys.agentic_thinking_effort;
     // Gemini grounded-search BYOK. Only forwarded when the user opted
     // in via the wizard. Without this, the escalation web_search tool
     // would silently bill the dev's quota (or fail outright on a

@@ -44,6 +44,10 @@ export interface DropdownOption {
   /** Optional secondary metadata rendered to the right of the label
    *  (e.g. "fast", "4.0 GB"). Greys out so the label still leads. */
   hint?: string;
+  /** Optional accent-tinted chip rendered between label and hint (e.g.
+   *  "Optimized"). Used to mark options we've validated end-to-end so
+   *  the user can pick with confidence. */
+  badge?: string;
 }
 
 interface Props {
@@ -272,16 +276,31 @@ export function Dropdown({
           }}
         >
           {selected ? (
-            selected.hint ? (
-              <>
-                <span>{selected.label}</span>
+            <>
+              <span>{selected.label}</span>
+              {selected.badge && (
+                <span
+                  style={{
+                    marginLeft: 8,
+                    padding: '1px 6px',
+                    borderRadius: 4,
+                    background: 'rgba(196, 68, 68, 0.18)',
+                    color: 'var(--accent)',
+                    fontSize: 10,
+                    fontWeight: 600,
+                    letterSpacing: '0.04em',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {selected.badge}
+                </span>
+              )}
+              {selected.hint && (
                 <span style={{ color: 'var(--text-ghost)', marginLeft: 8 }}>
                   {selected.hint}
                 </span>
-              </>
-            ) : (
-              selected.label
-            )
+              )}
+            </>
           ) : (
             placeholder
           )}
@@ -400,6 +419,23 @@ export function Dropdown({
                     >
                       {opt.label}
                     </span>
+                    {opt.badge && (
+                      <span
+                        style={{
+                          padding: '1px 6px',
+                          borderRadius: 4,
+                          background: 'rgba(196, 68, 68, 0.18)',
+                          color: 'var(--accent)',
+                          fontSize: 9.5,
+                          fontWeight: 600,
+                          letterSpacing: '0.04em',
+                          textTransform: 'uppercase',
+                          flexShrink: 0,
+                        }}
+                      >
+                        {opt.badge}
+                      </span>
+                    )}
                     {opt.hint && (
                       <span
                         style={{

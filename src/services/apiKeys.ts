@@ -21,38 +21,144 @@ export type LLMProviderId =
  *  model (see modelSupportsTools). */
 export type AgenticProvider = 'openai' | 'ollama';
 
+/** Per-tier thinking lever. Resolved per-family on the soul side:
+ *  - 'none'   → omit `think` field; for Gemma 4 also omit the system-
+ *               prompt `<|think|>` token. For gpt-oss (no real off)
+ *               falls through to 'low'.
+ *  - 'low'/'medium'/'high' → enable thinking. Levels apply natively
+ *               to gpt-oss; for Qwen / DeepSeek they coerce to
+ *               `think: true`; for Gemma 4 they prepend `<|think|>`.
+ *  Chat default = 'none' (snappy conversational); agentic default =
+ *  'medium' (escalation is the reasoning path). */
+export type ThinkingEffort = 'none' | 'low' | 'medium' | 'high';
+
+/** Per-family configuration mirror — kept in sync with soul's
+ *  `_FAMILY_INFO`. We use this for the wizard's "Optimized" badge
+ *  and the thinking-dropdown gating. Source of truth is the soul
+ *  Python; the renderer just needs enough to drive UI.
+ *
+ *  Keys are substrings of the (case-folded, prefix-stripped) model
+ *  tag. Lookup walks longest-first so 'qwen3.6' matches before 'qwen3',
+ *  'llama3.3' before 'llama3', etc. */
+type LocalFamilyInfo = {
+  /** Show "Optimized" badge — we've validated tool calling + thinking
+   *  on this family with per-family helpers (native-token fallback
+   *  parsers etc.). */
+  optimized: boolean;
+  /** Family supports a `<think>` block / chain-of-thought. Drives the
+   *  thinking-effort dropdown's visibility. */
+  thinks: boolean;
+  /** Effective tool-call minimum size in B (name-parsed). Sub-floor
+   *  variants drop the local-agentic picker. */
+  toolMinB: number;
+};
+
+const _LOCAL_FAMILIES: ReadonlyArray<readonly [string, LocalFamilyInfo]> = [
+  // Qwen
+  ['qwen3.6',     { optimized: true,  thinks: true,  toolMinB: 1.0 }],
+  ['qwen3.5',     { optimized: true,  thinks: true,  toolMinB: 8.0 }],
+  ['qwen3-coder', { optimized: true,  thinks: true,  toolMinB: 8.0 }],
+  ['qwen3',       { optimized: true,  thinks: true,  toolMinB: 4.0 }],
+  ['qwen2.5',     { optimized: false, thinks: false, toolMinB: 7.0 }],
+  // Gemma
+  ['gemma4',      { optimized: true,  thinks: true,  toolMinB: 4.0 }],
+  ['gemma3',      { optimized: true,  thinks: false, toolMinB: 4.0 }],
+  // Llama
+  ['llama4',      { optimized: true,  thinks: false, toolMinB: 16.0 }],
+  ['llama3.3',    { optimized: true,  thinks: false, toolMinB: 70.0 }],
+  ['llama3.2',    { optimized: false, thinks: false, toolMinB: 3.0 }],
+  ['llama3.1',    { optimized: true,  thinks: false, toolMinB: 70.0 }],
+  // OpenAI gpt-oss (local)
+  ['gpt-oss',     { optimized: false, thinks: true,  toolMinB: 1.0 }],
+  // DeepSeek
+  ['deepseek-r1', { optimized: false, thinks: true,  toolMinB: 7.0 }],
+  ['deepseek-v3', { optimized: false, thinks: true,  toolMinB: 7.0 }],
+  // Phi
+  ['phi4-mini',   { optimized: false, thinks: true,  toolMinB: 1.0 }],
+  ['phi4',        { optimized: false, thinks: false, toolMinB: 7.0 }],
+  // Mistral / Magistral
+  ['magistral',   { optimized: false, thinks: true,  toolMinB: 7.0 }],
+  ['mistral',     { optimized: false, thinks: false, toolMinB: 7.0 }],
+  // Cohere
+  ['command-r',   { optimized: false, thinks: false, toolMinB: 7.0 }],
+];
+
+/** Find the matching local family for an Ollama-prefixed model id. */
+function _identifyLocalFamily(modelId: string | null | undefined): LocalFamilyInfo | null {
+  if (!modelId) return null;
+  let tag = modelId.toLowerCase();
+  if (tag.startsWith('ollama:')) tag = tag.slice('ollama:'.length);
+  if (tag.startsWith('openai:') || tag.startsWith('openai/') || tag.includes('/')) {
+    return null;
+  }
+  const base = tag.split(':')[0];
+  for (const [key, info] of _LOCAL_FAMILIES) {
+    if (base.includes(key)) return info;
+  }
+  return null;
+}
+
+/** Parse parameter count (B) from the model tag's size suffix.
+ *  qwen3:8b → 8, gemma4:e4b → 4, llama3.3:70b-instruct-q4_0 → 70,
+ *  bare `mistral` → null (caller may fall back to runtime cap). */
+function _parseSizeB(modelId: string | null | undefined): number | null {
+  if (!modelId) return null;
+  const m = modelId.toLowerCase().match(/:e?(\d+(?:\.\d+)?)b\b/);
+  return m ? parseFloat(m[1]) : null;
+}
+
 /** Does this model support the agentic tool-calling loop?
  *
  *  Cloud (OpenAI / Groq) — yes; their function-calling is universal.
  *
- *  Ollama — yes only for known tools-capable families (llama 3.x, qwen3,
- *  qwen2.5, mistral, phi4-mini, gemma3, gemma4, deepseek-r1, command-r)
- *  AND with a parameter-count ≥ 1.0B. Soul applies the same 1.0B floor
- *  at runtime via `_OLLAMA_TOOLS_MIN_PARAM_B`, so flagging sub-1B here
- *  prevents the wizard from offering a local agentic route soul would
- *  silently downgrade.
+ *  Ollama — must match a known local family AND meet the family's
+ *  size floor (name-parsed). Gemma 4 e2b (2B effective) doesn't pass
+ *  the gemma4 floor of 4B even though Ollama's MoE-total /api/show
+ *  says 5.1B — name-parsed wins because that's the active-expert
+ *  count, which is what predicts tool-call quality.
  *
- *  This is intentionally a small, hand-curated allow-list. Adding a new
- *  Ollama family is one-line. Cloud is permissive by default (any
- *  openai:/groq:/<vendor>/<model> form passes). */
+ *  This is intentionally a small, hand-curated allow-list. Adding a
+ *  new Ollama family is a one-line append to `_LOCAL_FAMILIES`. */
 export function modelSupportsTools(modelId: string | null | undefined): boolean {
   if (!modelId) return false;
   // Cloud — OpenAI prefixed, Groq prefixed (or Groq's bare `<vendor>/<model>` form).
   if (modelId.startsWith('openai:') || modelId.startsWith('openai/')) return true;
   if (modelId.includes('/') && !modelId.startsWith('ollama:')) return true;
   if (!modelId.startsWith('ollama:')) return false;
-  const tag = modelId.toLowerCase();
-  // Param-count gate. Match the LAST `:<num>b` (e.g. `:8b`, `:1.5b`,
-  // `:7b-instruct-q4_0`) and also MoE-style `:e<num>b` (gemma4:e4b → 4).
-  const sizeMatch = tag.match(/:e?(\d+(?:\.\d+)?)b\b/i);
-  if (sizeMatch) {
-    const sizeB = parseFloat(sizeMatch[1]);
-    if (sizeB < 1.0) return false;
-  }
-  // Tools-capable families. Conservative allow-list — false negatives
-  // are easy to fix (the user picks a different model); false positives
-  // surface as failed tool calls at runtime.
-  return /(?:llama-?3|qwen3|qwen2\.5|mistral|phi4-mini|gemma3|gemma4|deepseek-r1|command-r)/.test(tag);
+  const family = _identifyLocalFamily(modelId);
+  if (!family) return false;
+  const size = _parseSizeB(modelId);
+  // No size suffix → trust the family (Ollama runtime will gate again).
+  if (size === null) return true;
+  return size >= family.toolMinB;
+}
+
+/** Does this model support thinking / reasoning? Drives the
+ *  thinking-effort dropdown's visibility. Cloud OpenAI reasoning
+ *  models (gpt-5.4 / o1 / o3) are handled separately by the
+ *  escalation backend, so this returns false for them — the chat
+ *  thinking lever only governs the LOCAL chat path. */
+export function modelSupportsThinking(modelId: string | null | undefined): boolean {
+  if (!modelId) return false;
+  if (!modelId.startsWith('ollama:')) return false;
+  const family = _identifyLocalFamily(modelId);
+  return !!family?.thinks;
+}
+
+/** Does this model have a per-family validated implementation in soul
+ *  (native-token fallback parser if needed, per-family thinking
+ *  protocol, size floor tuned)? Drives the "Optimized" badge in the
+ *  wizard's model dropdown. */
+export function isOptimizedLocalModel(modelId: string | null | undefined): boolean {
+  if (!modelId) return false;
+  if (!modelId.startsWith('ollama:')) return false;
+  const family = _identifyLocalFamily(modelId);
+  if (!family?.optimized) return false;
+  // Below the family's tool floor it's NOT really optimized for
+  // tool-calling use cases — don't mislead the user.
+  const size = _parseSizeB(modelId);
+  if (size !== null && size < family.toolMinB) return false;
+  return true;
 }
 
 
@@ -230,6 +336,12 @@ export interface ApiKeysProfile {
   /** When true (and gemini_search_api_key is set), grounded search is
    *  active for queries that need live data. Free tier: 500/day. */
   grounding_search_enabled: boolean;
+  /** Per-tier thinking effort. Chat default 'none' for snappy
+   *  conversational; agentic default 'medium' since escalation is the
+   *  reasoning path. Only consulted for models that support thinking
+   *  (see `modelSupportsThinking`); hidden in the wizard otherwise. */
+  chat_thinking_effort: ThinkingEffort;
+  agentic_thinking_effort: ThinkingEffort;
 }
 
 
@@ -260,6 +372,8 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   agentic_api_key:          null,
   gemini_search_api_key:    null,
   grounding_search_enabled: false,
+  chat_thinking_effort:     'none',
+  agentic_thinking_effort:  'medium',
 };
 
 

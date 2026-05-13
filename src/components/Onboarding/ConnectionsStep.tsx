@@ -24,13 +24,16 @@ import {
   LLM_PROVIDERS,
   getProvider,
   missingRequiredKeyFields,
+  modelSupportsThinking,
   modelSupportsTools,
+  isOptimizedLocalModel,
   validateKeys,
   type ApiKeysProfile,
   type AgenticProvider,
   type KeyValidationResult,
   type LLMProviderId,
   type KokoroMode,
+  type ThinkingEffort,
   type TtsProviderId,
 } from '../../services/apiKeys';
 import { fetchOllamaModels, type SoulProviderModel } from '../../services/providers';
@@ -165,6 +168,10 @@ export function ConnectionsStep({
         id: m.id,
         label: m.tag ?? m.label ?? m.id,
         hint: m.size_gb ? `${m.size_gb} GB` : undefined,
+        // "Optimized" chip for families we've validated end-to-end —
+        // per-family native-token fallback parsers, thinking protocol,
+        // and size floor all tuned. See isOptimizedLocalModel.
+        badge: isOptimizedLocalModel(m.id) ? 'Optimized' : undefined,
       }));
     }
     return provider?.models ?? [];
@@ -413,6 +420,7 @@ export function ConnectionsStep({
                 id: m.id,
                 label: m.label,
                 hint: m.hint,
+                badge: (m as { badge?: string }).badge,
               }))}
             />
           </FieldLabel>
@@ -430,6 +438,23 @@ export function ConnectionsStep({
               visible={showLlmKey}
               onToggleVisible={() => setShowLlmKey((v) => !v)}
               autoComplete="off"
+            />
+          </FieldLabel>
+        )}
+
+        {/* Chat thinking lever — only shown for models that support it.
+            Default 'none' for snappy conversational chat; the agentic
+            tier has its own lever (defaults to 'medium') inside
+            AgenticSection. */}
+        {modelSupportsThinking(values.llm_model) && (
+          <FieldLabel text="Chat thinking">
+            <Dropdown
+              value={values.chat_thinking_effort}
+              onChange={(v) => onChange({
+                ...values,
+                chat_thinking_effort: (v as ThinkingEffort) || 'none',
+              })}
+              options={THINKING_LEVEL_OPTIONS}
             />
           </FieldLabel>
         )}
@@ -1334,6 +1359,13 @@ const AGENTIC_OPENAI_MODELS: ReadonlyArray<{ id: string; label: string; hint?: s
   { id: 'openai:gpt-5.4-nano',  label: 'GPT-5.4 Nano',  hint: 'cheapest' },
 ];
 
+const THINKING_LEVEL_OPTIONS: ReadonlyArray<{ id: ThinkingEffort; label: string; hint?: string }> = [
+  { id: 'none',   label: 'Off',    hint: 'snappiest' },
+  { id: 'low',    label: 'Low',    hint: 'quick'     },
+  { id: 'medium', label: 'Medium', hint: 'balanced'  },
+  { id: 'high',   label: 'High',   hint: 'thorough'  },
+];
+
 function AgenticSection({
   values,
   onChange,
@@ -1453,6 +1485,26 @@ function AgenticSection({
                 visible={showKey}
                 onToggleVisible={() => setShowKey((v) => !v)}
                 autoComplete="off"
+              />
+            </FieldLabel>
+          )}
+
+          {/* Agentic thinking lever — shown when the effective agentic
+              model supports reasoning. On the local path, that means
+              the chat-tier Ollama model supports thinking. On the
+              cloud path, soul's _run_escalation honors this for
+              gpt-5.4-* / o1 / o3 families via reasoning.effort. */}
+          {((isLocal && modelSupportsThinking(values.llm_model))
+            || (!isLocal && values.agentic_model
+                && /(?:gpt-5|o1|o3)/i.test(values.agentic_model))) && (
+            <FieldLabel text="Agentic thinking">
+              <Dropdown
+                value={values.agentic_thinking_effort}
+                onChange={(v) => onChange({
+                  ...values,
+                  agentic_thinking_effort: (v as ThinkingEffort) || 'medium',
+                })}
+                options={THINKING_LEVEL_OPTIONS}
               />
             </FieldLabel>
           )}
