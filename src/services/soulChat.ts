@@ -140,13 +140,14 @@ export async function chatViaSoul(
     if (keys.tts_provider === 'qwen3' && keys.qwen3_voice) {
       body.voice_id = keys.qwen3_voice;
     }
-    // Agentic / escalation BYOK. Soul reads these on /chat and uses
-    // them per-request in _run_escalation (the wizard's pick of model
-    // and key takes effect, env-defaults only kick in for non-BYOK
-    // legacy callers). When agentic_use_same_as_chat is on AND chat
-    // is OpenAI, we pass the chat key as the agentic key.
+    // Agentic / escalation BYOK. Soul reads these on /chat and routes
+    // to either _run_escalation (cloud) or _run_escalation_local based
+    // on agentic_provider. The local path uses the chat-tier Ollama
+    // model for both chat AND agentic, so agentic_model / agentic_api_key
+    // are unused there — we omit them to keep wire payloads small.
     body.agentic_enabled = keys.agentic_enabled;
-    if (keys.agentic_enabled) {
+    body.agentic_provider = keys.agentic_provider;
+    if (keys.agentic_enabled && keys.agentic_provider !== 'ollama') {
       const reuseChat = keys.agentic_use_same_as_chat
         && keys.llm_provider === 'openai'
         && !!keys.llm_api_key;
@@ -316,9 +317,10 @@ export async function* streamChatViaSoul(
     }
     // Agentic BYOK threading — same logic as chatViaSoul. Soul reads
     // these on the streaming endpoint too so escalation kicked off
-    // mid-stream uses the wizard's pick (model + key).
+    // mid-stream uses the wizard's backend pick.
     body.agentic_enabled = keys.agentic_enabled;
-    if (keys.agentic_enabled) {
+    body.agentic_provider = keys.agentic_provider;
+    if (keys.agentic_enabled && keys.agentic_provider !== 'ollama') {
       const reuseChat = keys.agentic_use_same_as_chat
         && keys.llm_provider === 'openai'
         && !!keys.llm_api_key;

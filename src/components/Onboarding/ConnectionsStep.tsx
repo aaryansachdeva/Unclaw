@@ -24,8 +24,10 @@ import {
   LLM_PROVIDERS,
   getProvider,
   missingRequiredKeyFields,
+  modelSupportsTools,
   validateKeys,
   type ApiKeysProfile,
+  type AgenticProvider,
   type KeyValidationResult,
   type LLMProviderId,
   type KokoroMode,
@@ -170,7 +172,14 @@ export function ConnectionsStep({
 
   const setProvider = (id: LLMProviderId | '') => {
     if (!id) {
-      onChange({ ...values, llm_provider: null, llm_model: null });
+      // No provider → chat has no tools, so local agentic can't run.
+      // Coerce agentic_provider back to cloud OpenAI.
+      onChange({
+        ...values,
+        llm_provider: null,
+        llm_model: null,
+        agentic_provider: 'openai',
+      });
       return;
     }
     const next = getProvider(id);
@@ -183,6 +192,12 @@ export function ConnectionsStep({
     } else {
       nextModel = next?.models[0]?.id ?? null;
     }
+    // If the new {provider, model} pair can't host local agentic
+    // (cloud chat, or sub-1B / non-tools-family local), coerce the
+    // agentic backend back to cloud so the wizard can't end up in an
+    // unrunnable state where local-agentic is selected but chat
+    // doesn't support tools.
+    const canRunLocal = id === 'ollama' && modelSupportsTools(nextModel);
     onChange({
       ...values,
       llm_provider: id,
@@ -190,11 +205,20 @@ export function ConnectionsStep({
       // Wipe the old key when switching to a no-key provider — leaving
       // it on disk would be surprising.
       llm_api_key: next?.requiresApiKey ? values.llm_api_key : null,
+      agentic_provider: canRunLocal ? values.agentic_provider : 'openai',
     });
   };
 
   const setModel = (modelId: string) => {
-    onChange({ ...values, llm_model: modelId || null });
+    const next = modelId || null;
+    // Same coercion as setProvider: if the new model can't host local
+    // agentic, flip agentic_provider back to cloud.
+    const canRunLocal = values.llm_provider === 'ollama' && modelSupportsTools(next);
+    onChange({
+      ...values,
+      llm_model: next,
+      agentic_provider: canRunLocal ? values.agentic_provider : 'openai',
+    });
   };
 
   const setLlmKey = (key: string) => {
@@ -230,6 +254,7 @@ export function ConnectionsStep({
       || field === 'Model'
       || field === 'Agentic model'
       || field === 'OpenAI key for agentic'
+      || field === 'Tools-capable Ollama chat model'
       || field === 'Gemini API key for grounded search'
       || (field.endsWith(' API key') && field !== 'ElevenLabs API key');
     return mode === 'llm' ? isLlmField : !isLlmField;
@@ -254,6 +279,7 @@ export function ConnectionsStep({
     values.llm_model,
     values.llm_api_key,
     values.agentic_enabled,
+    values.agentic_provider,
     values.agentic_use_same_as_chat,
     values.agentic_model,
     values.agentic_api_key,
@@ -273,6 +299,7 @@ export function ConnectionsStep({
     values.kokoro_mode,
     values.kokoro_endpoint,
     values.agentic_enabled,
+    values.agentic_provider,
     values.agentic_use_same_as_chat,
     values.agentic_model,
     values.agentic_api_key,
@@ -1279,31 +1306,27 @@ function formatBytes(n: number): string {
 
 // ---------------------------------------------------------------------
 // Agentic features section. Lives on the LLM page next to the chat
-// model. Three nested states:
+// model. Two backends:
 //
-//   1. Toggle off (default)  — escalation disabled. The 20b can't emit
-//                              `escalate`; soul refuses /chat without
-//                              `agentic_enabled` even when the message
-//                              would normally trigger escalation.
-//   2. Toggle on + chat is OpenAI — show "Use same model as chat"
-//                              checkbox. When checked, escalation reuses
-//                              the conversational model + key (single
-//                              field for both). When unchecked, show
-//                              the Agentic model dropdown (key already
-//                              available from chat).
-//   3. Toggle on + chat is NOT OpenAI — show OpenAI key field +
-//                              Agentic model dropdown. Escalation
-//                              still goes through OpenAI's Responses
-//                              API (the only supported agentic
-//                              backend in v1).
+//   * Cloud (OpenAI) — runs the Responses API loop with gpt-5.4-mini /
+//                      -nano. Multi-step browser + memory + web search.
+//                      Requires an OpenAI key (or chat's key if chat is
+//                      already OpenAI).
+//   * Local (Ollama) — runs a Chat-Completions tool loop on the SAME
+//                      Ollama model the user picked for chat. No
+//                      OpenAI key needed; no cloud round-trip. Only
+//                      offered when chat is a tools-capable Ollama
+//                      model (see `modelSupportsTools`).
 //
-// Why OpenAI-only for agentic in v1: the Responses API (with
-// previous_response_id state retention + reasoning preservation +
-// proper tool integration) is what makes the multi-step browser /
-// memory / web-search loop tractable. Groq + Ollama have tool calls
-// but none have an equivalent state-retention API; building one
-// would mean rebuilding the loop with manual state management. Real
-// engineering, deferred to v2.
+// Nested states (cloud branch):
+//   1. Toggle off (default)  — escalation disabled.
+//   2. Toggle on + chat is OpenAI — "Use same as chat" checkbox; when
+//                                    checked, reuse chat model + key.
+//   3. Toggle on + chat is NOT OpenAI — OpenAI key field + agentic
+//                                        model dropdown.
+//
+// Local branch: no model dropdown, no key field — the chat-tier model
+// runs both roles.
 // ---------------------------------------------------------------------
 
 const AGENTIC_OPENAI_MODELS: ReadonlyArray<{ id: string; label: string; hint?: string }> = [
@@ -1323,6 +1346,9 @@ function AgenticSection({
   const setEnabled = (b: boolean) => {
     onChange({ ...values, agentic_enabled: b });
   };
+  const setBackend = (p: AgenticProvider) => {
+    onChange({ ...values, agentic_provider: p });
+  };
   const setUseSame = (b: boolean) => {
     onChange({ ...values, agentic_use_same_as_chat: b });
   };
@@ -1337,9 +1363,16 @@ function AgenticSection({
   // only meaningful in that case (escalation needs an OpenAI model
   // either way; if chat is already OpenAI we can borrow its key).
   const chatIsOpenAI = values.llm_provider === 'openai';
+  // Local-agentic eligibility: chat must be Ollama AND on a tools-
+  // capable model (param-count gated). When false, the backend picker
+  // is hidden and `agentic_provider` is force-coerced to 'openai' by
+  // the parent's setProvider/setModel callbacks.
+  const canRunLocal = values.llm_provider === 'ollama' && modelSupportsTools(values.llm_model);
+  const isLocal = values.agentic_provider === 'ollama' && canRunLocal;
   // Effective "reuse chat" state. Even if user toggled the checkbox,
-  // it only takes effect when chat IS OpenAI.
-  const effectiveReuse = values.agentic_use_same_as_chat && chatIsOpenAI;
+  // it only takes effect when chat IS OpenAI AND we're on the cloud
+  // agentic path.
+  const effectiveReuse = !isLocal && values.agentic_use_same_as_chat && chatIsOpenAI;
 
   return (
     <div style={{
@@ -1357,14 +1390,31 @@ function AgenticSection({
         icon={<Zap size={11} strokeWidth={2} aria-hidden style={{ opacity: 0.7 }} />}
         title="Enable agentic features"
         helper={values.agentic_enabled
-          ? 'Lets the assistant browse, search, and use tools for harder questions. Uses an OpenAI model for the agentic loop.'
-          : 'Off by default. Turn on for live web search, page-reading, and multi-step research. Needs an OpenAI key.'}
+          ? (isLocal
+              ? 'Lets the assistant browse, search, and use tools for harder questions. Runs locally on your Ollama model — no API key.'
+              : 'Lets the assistant browse, search, and use tools for harder questions. Uses an OpenAI model for the agentic loop.')
+          : (canRunLocal
+              ? 'Off by default. Turn on for live web search, page-reading, and multi-step research. Runs locally on your Ollama model — or pick OpenAI.'
+              : 'Off by default. Turn on for live web search, page-reading, and multi-step research. Needs an OpenAI key.')}
         dimWhen={!values.agentic_enabled}
       />
 
       {values.agentic_enabled && (
         <>
-          {chatIsOpenAI && (
+          {canRunLocal && (
+            <FieldLabel text="Agentic backend">
+              <Dropdown
+                value={values.agentic_provider}
+                onChange={(v) => setBackend((v as AgenticProvider) || 'openai')}
+                options={[
+                  { id: 'ollama', label: 'Local (Ollama)',   hint: 'no API key' },
+                  { id: 'openai', label: 'Cloud (OpenAI)',   hint: 'needs key' },
+                ]}
+              />
+            </FieldLabel>
+          )}
+
+          {!isLocal && chatIsOpenAI && (
             <Toggle
               value={values.agentic_use_same_as_chat}
               onChange={setUseSame}
@@ -1376,7 +1426,7 @@ function AgenticSection({
             />
           )}
 
-          {!effectiveReuse && (
+          {!isLocal && !effectiveReuse && (
             <FieldLabel
               text="Agentic model"
               trailing={!chatIsOpenAI ? (
@@ -1394,7 +1444,7 @@ function AgenticSection({
             </FieldLabel>
           )}
 
-          {!effectiveReuse && !chatIsOpenAI && (
+          {!isLocal && !effectiveReuse && !chatIsOpenAI && (
             <FieldLabel text="OpenAI API key">
               <SecretInput
                 value={values.agentic_api_key ?? ''}
