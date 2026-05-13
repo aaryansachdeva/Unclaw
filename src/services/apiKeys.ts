@@ -56,18 +56,26 @@ type LocalFamilyInfo = {
 const _LOCAL_FAMILIES: ReadonlyArray<readonly [string, LocalFamilyInfo]> = [
   // Qwen
   ['qwen3.6',     { optimized: true,  thinks: true,  toolMinB: 1.0 }],
-  ['qwen3.5',     { optimized: true,  thinks: true,  toolMinB: 8.0 }],
+  // Floor dropped 8.0 → 2.0 after 2026-05-13 sweep — qwen3.5:2b nails
+  // tool calling at every thinking level. Soul mirror.
+  ['qwen3.5',     { optimized: true,  thinks: true,  toolMinB: 2.0 }],
   ['qwen3-coder', { optimized: true,  thinks: true,  toolMinB: 8.0 }],
   ['qwen3',       { optimized: true,  thinks: true,  toolMinB: 4.0 }],
   ['qwen2.5',     { optimized: false, thinks: false, toolMinB: 7.0 }],
   // Gemma
   ['gemma4',      { optimized: true,  thinks: true,  toolMinB: 4.0 }],
   ['gemma3',      { optimized: true,  thinks: false, toolMinB: 4.0 }],
-  // Llama
+  // Llama — order matters: 'llama3-groq' before generic 'llama3'
+  // so the Groq tool-use fine-tune matches first.
   ['llama4',      { optimized: true,  thinks: false, toolMinB: 16.0 }],
   ['llama3.3',    { optimized: true,  thinks: false, toolMinB: 70.0 }],
   ['llama3.2',    { optimized: false, thinks: false, toolMinB: 3.0 }],
   ['llama3.1',    { optimized: true,  thinks: false, toolMinB: 70.0 }],
+  // Groq's tool-use fine-tune of Llama 3 8B — Hermes JSON tool_calls.
+  // Validated end-to-end on chat + escalation per 2026-05-13 sweep.
+  ['llama3-groq', { optimized: true,  thinks: false, toolMinB: 8.0 }],
+  // Plain Llama 3.0 base. Conservative 8B floor.
+  ['llama3',      { optimized: false, thinks: false, toolMinB: 8.0 }],
   // OpenAI gpt-oss (local)
   ['gpt-oss',     { optimized: false, thinks: true,  toolMinB: 1.0 }],
   // DeepSeek
