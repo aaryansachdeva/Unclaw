@@ -107,6 +107,16 @@ interface InputBarProps {
    *  prefix), and reported with its natural dimensions so it can be
    *  attached alongside Ctrl+Shift+G screenshots. */
   onPasteImage?: (img: { base64: string; width: number; height: number }) => void;
+  /** Called when the user attaches one or more images via the + button
+   *  (native file picker). Same per-image shape as `onPasteImage`,
+   *  delivered as a batch so multi-select arrives in one update. */
+  onAttachImages?: (imgs: Array<{ base64: string; width: number; height: number }>) => void;
+  /** Whether the active chat model accepts image input. Drives the
+   *  + button's visibility — hidden for text-only models so the user
+   *  isn't tempted to stage an attachment the model can't read. Paste
+   *  remains wired regardless (back-compat with screenshot stacks
+   *  captured before model switch); soul will refuse cleanly. */
+  canAttachImages?: boolean;
   /** Whether the chat-history side pane is currently open. Drives the
    *  expand button's icon (PanelRightOpen ↔ PanelRightClose). */
   chatPaneOpen?: boolean;
@@ -158,6 +168,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onNextPersona,
   personaDisabled = false,
   onPasteImage,
+  onAttachImages,
+  canAttachImages = false,
   chatPaneOpen = false,
   onToggleChatPane,
   comingSoon = false,
@@ -377,6 +389,78 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     slash.select(item);
     textareaRef.current?.focus();
   }, [slash]);
+
+  // Hidden file input + + button click handler. Same canvas-normalize
+  // path the paste handler uses — every selected file becomes a clean
+  // base64 PNG before it reaches the parent. Supports multi-select.
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const handlePickFiles = useCallback(() => {
+    if (!canAttachImages || !onAttachImages) return;
+    fileInputRef.current?.click();
+  }, [canAttachImages, onAttachImages]);
+
+  const handleFileChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files || files.length === 0 || !onAttachImages) {
+        if (e.target) e.target.value = '';
+        return;
+      }
+      const pending = Array.from(files).filter((f) => f.type.startsWith('image/'));
+      if (pending.length === 0) {
+        e.target.value = '';
+        return;
+      }
+
+      // Resolve each file → {base64, width, height} via canvas. All
+      // images normalize to PNG so soul / providers see a uniform
+      // content-type regardless of source.
+      const results: Array<{ base64: string; width: number; height: number }> = [];
+      let remaining = pending.length;
+      const finish = () => {
+        if (remaining > 0) return;
+        if (results.length > 0) onAttachImages(results);
+        if (e.target) e.target.value = '';  // allow re-picking same file
+      };
+
+      for (const file of pending) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result;
+          if (typeof dataUrl !== 'string') {
+            remaining -= 1; finish(); return;
+          }
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+              remaining -= 1; finish(); return;
+            }
+            ctx.drawImage(img, 0, 0);
+            const pngDataUrl = canvas.toDataURL('image/png');
+            const base64 = pngDataUrl.split(',')[1] ?? '';
+            if (base64) {
+              results.push({
+                base64,
+                width: img.naturalWidth,
+                height: img.naturalHeight,
+              });
+            }
+            remaining -= 1;
+            finish();
+          };
+          img.onerror = () => { remaining -= 1; finish(); };
+          img.src = dataUrl;
+        };
+        reader.onerror = () => { remaining -= 1; finish(); };
+        reader.readAsDataURL(file);
+      }
+    },
+    [onAttachImages],
+  );
 
   // Paste-to-attach: when the user Ctrl+Vs into the textarea and the
   // clipboard carries an image (copied from a browser, Snipping Tool,
@@ -887,9 +971,22 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
           {/* Spacer */}
           <div style={{ flex: 1 }} />
 
-          {/* Right action cluster: + button always; send when text,
-              voice when empty (same 36x36 slot crossfades). */}
-          <PlusButton />
+          {/* Right action cluster: + button (image attach) when the
+              chat model supports vision; send when text, voice when
+              empty (same 36x36 slot crossfades). */}
+          {canAttachImages && (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                style={{ display: 'none' }}
+                onChange={handleFileChange}
+              />
+              <PlusButton onClick={handlePickFiles} disabled={inputLocked} />
+            </>
+          )}
           <div
             style={{
               position: 'relative',
@@ -1011,13 +1108,22 @@ function InlineChevron({
 // + button
 // ---------------------------------------------------------------------
 
-function PlusButton() {
+function PlusButton({
+  onClick,
+  disabled = false,
+}: {
+  onClick?: () => void;
+  disabled?: boolean;
+}) {
   return (
     <motion.button
       type="button"
-      whileHover={{ scale: 1.05 }}
-      whileTap={{ scale: 0.92 }}
-      aria-label="Add files and more"
+      whileHover={disabled ? undefined : { scale: 1.05 }}
+      whileTap={disabled ? undefined : { scale: 0.92 }}
+      onClick={onClick}
+      disabled={disabled}
+      aria-label="Attach image"
+      title="Attach image"
       className="glass-btn"
       style={{
         flexShrink: 0,
@@ -1030,9 +1136,12 @@ function PlusButton() {
         alignItems: 'center',
         justifyContent: 'center',
         color: 'var(--text-secondary)',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
         transition: 'background 0.2s var(--ease-out-quart), color 0.2s var(--ease-out-quart)',
       }}
       onMouseEnter={e => {
+        if (disabled) return;
         e.currentTarget.style.background = 'rgba(255,255,255,0.12)';
         e.currentTarget.style.color = 'var(--text-primary)';
       }}

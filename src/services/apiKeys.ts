@@ -63,10 +63,10 @@ const _LOCAL_FAMILIES: ReadonlyArray<readonly [string, LocalFamilyInfo]> = [
   ['qwen3-vl',    { optimized: true,  thinks: true,  vision: true,  toolMinB: 1.0 }],
   ['qwen2.5-vl',  { optimized: false, thinks: false, vision: true,  toolMinB: 3.0 }],
   ['qwen3.6',     { optimized: true,  thinks: true,  vision: false, toolMinB: 1.0 }],
-  // Floor dropped 8.0 → 2.0 after 2026-05-13 sweep — qwen3.5:2b nails
-  // tool calling at every thinking level. vision=false: Ollama's
-  // GGUF + mmproj split blocks qwen3.5 vision; use qwen3-vl instead.
-  ['qwen3.5',     { optimized: true,  thinks: true,  vision: false, toolMinB: 2.0 }],
+  // Floor 8.0 → 2.0 after 2026-05-13 tool-calling sweep. Vision
+  // flipped false → true 2026-05-13 after direct verification on
+  // qwen3.5:9b: synthetic image → accurate description. Soul mirror.
+  ['qwen3.5',     { optimized: true,  thinks: true,  vision: true,  toolMinB: 2.0 }],
   ['qwen3-coder', { optimized: true,  thinks: true,  vision: false, toolMinB: 8.0 }],
   ['qwen3',       { optimized: true,  thinks: true,  vision: false, toolMinB: 4.0 }],
   ['qwen2.5',     { optimized: false, thinks: false, vision: false, toolMinB: 7.0 }],

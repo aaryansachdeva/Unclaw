@@ -38,7 +38,7 @@ import {
 } from './services/auth';
 import { resetEverything } from './services/accountReset';
 import { fetchSettings } from './services/userSettings';
-import { fetchApiKeys } from './services/apiKeys';
+import { fetchApiKeys, modelSupportsVision } from './services/apiKeys';
 import { SignInScreen } from './components/Auth/SignInScreen';
 import { Wizard } from './components/Onboarding/Wizard';
 import { personalityFor } from './personalities';
@@ -123,6 +123,28 @@ export function App() {
     id: number; base64: string; width: number; height: number;
   }>>([]);
   const screenshotIdRef = useRef(0);
+
+  // Active chat model, kept fresh so capability checks
+  // (modelSupportsVision in particular) drive the input bar's
+  // attach-image button visibility. Refreshed on mount and after
+  // the onboarding wizard closes — that's the only time apiKeys
+  // mutates within a session.
+  const [activeLlmModel, setActiveLlmModel] = useState<string | null>(null);
+  const refreshActiveLlmModel = useCallback(async () => {
+    try {
+      const keys = await fetchApiKeys();
+      setActiveLlmModel(keys.llm_model);
+    } catch (err) {
+      console.warn('[apiKeys] failed to read active llm_model', err);
+    }
+  }, []);
+  useEffect(() => {
+    void refreshActiveLlmModel();
+  }, [refreshActiveLlmModel]);
+  const chatModelSupportsVision = useMemo(
+    () => modelSupportsVision(activeLlmModel),
+    [activeLlmModel],
+  );
 
   // Single active widget panel — lifted up so opening one closes the
   // others. The dock and the sheet both subscribe to this state.
@@ -684,6 +706,28 @@ export function App() {
         width: img.width,
         height: img.height,
       }]);
+    },
+    [],
+  );
+
+  // File-picker attach (Plus button on the input bar). InputBar
+  // normalizes via canvas before calling us — same shape as paste.
+  // Supports multiple files at once.
+  const handleAttachImages = useCallback(
+    (imgs: Array<{ base64: string; width: number; height: number }>) => {
+      if (imgs.length === 0) return;
+      setAttachedImages((prev) => [
+        ...prev,
+        ...imgs.map((img) => {
+          screenshotIdRef.current += 1;
+          return {
+            id: screenshotIdRef.current,
+            base64: img.base64,
+            width: img.width,
+            height: img.height,
+          };
+        }),
+      ]);
     },
     [],
   );
@@ -1603,8 +1647,15 @@ export function App() {
             onComplete={(saved) => {
               setProfile(saved);
               setWizardMode(null);
+              // The wizard may have updated the chat model (and thus
+              // vision capability) — re-read apiKeys so the input bar
+              // gates its image-attach button against the new pick.
+              void refreshActiveLlmModel();
             }}
-            onCancel={() => setWizardMode(null)}
+            onCancel={() => {
+              setWizardMode(null);
+              void refreshActiveLlmModel();
+            }}
             onIdentityNameChange={setWizardLiveName}
           />
         )}
@@ -1802,6 +1853,8 @@ export function App() {
                   onNextPersona={handleNextPersona}
                   personaDisabled={!isConnected}
                   onPasteImage={handlePasteImage}
+                  onAttachImages={handleAttachImages}
+                  canAttachImages={chatModelSupportsVision}
                   chatPaneOpen={chatPaneOpen}
                   onToggleChatPane={() => setChatPaneOpen((o) => !o)}
                   comingSoon={persona.id === 'mark'}
