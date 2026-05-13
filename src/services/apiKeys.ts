@@ -48,47 +48,74 @@ type LocalFamilyInfo = {
   /** Family supports a `<think>` block / chain-of-thought. Drives the
    *  thinking-effort dropdown's visibility. */
   thinks: boolean;
+  /** Family accepts image input. Drives the image-attach button in
+   *  chat UI and the "Vision" badge on the wizard's model dropdown.
+   *  Mirrors soul's `_FAMILY_INFO.vision` flag. */
+  vision: boolean;
   /** Effective tool-call minimum size in B (name-parsed). Sub-floor
    *  variants drop the local-agentic picker. */
   toolMinB: number;
 };
 
 const _LOCAL_FAMILIES: ReadonlyArray<readonly [string, LocalFamilyInfo]> = [
-  // Qwen
-  ['qwen3.6',     { optimized: true,  thinks: true,  toolMinB: 1.0 }],
+  // Qwen — dedicated vision variants first so the substring lookup
+  // matches them before the text-only siblings.
+  ['qwen3-vl',    { optimized: true,  thinks: true,  vision: true,  toolMinB: 1.0 }],
+  ['qwen2.5-vl',  { optimized: false, thinks: false, vision: true,  toolMinB: 3.0 }],
+  ['qwen3.6',     { optimized: true,  thinks: true,  vision: false, toolMinB: 1.0 }],
   // Floor dropped 8.0 → 2.0 after 2026-05-13 sweep — qwen3.5:2b nails
-  // tool calling at every thinking level. Soul mirror.
-  ['qwen3.5',     { optimized: true,  thinks: true,  toolMinB: 2.0 }],
-  ['qwen3-coder', { optimized: true,  thinks: true,  toolMinB: 8.0 }],
-  ['qwen3',       { optimized: true,  thinks: true,  toolMinB: 4.0 }],
-  ['qwen2.5',     { optimized: false, thinks: false, toolMinB: 7.0 }],
-  // Gemma
-  ['gemma4',      { optimized: true,  thinks: true,  toolMinB: 4.0 }],
-  ['gemma3',      { optimized: true,  thinks: false, toolMinB: 4.0 }],
-  // Llama — order matters: 'llama3-groq' before generic 'llama3'
-  // so the Groq tool-use fine-tune matches first.
-  ['llama4',      { optimized: true,  thinks: false, toolMinB: 16.0 }],
-  ['llama3.3',    { optimized: true,  thinks: false, toolMinB: 70.0 }],
-  ['llama3.2',    { optimized: false, thinks: false, toolMinB: 3.0 }],
-  ['llama3.1',    { optimized: true,  thinks: false, toolMinB: 70.0 }],
+  // tool calling at every thinking level. vision=false: Ollama's
+  // GGUF + mmproj split blocks qwen3.5 vision; use qwen3-vl instead.
+  ['qwen3.5',     { optimized: true,  thinks: true,  vision: false, toolMinB: 2.0 }],
+  ['qwen3-coder', { optimized: true,  thinks: true,  vision: false, toolMinB: 8.0 }],
+  ['qwen3',       { optimized: true,  thinks: true,  vision: false, toolMinB: 4.0 }],
+  ['qwen2.5',     { optimized: false, thinks: false, vision: false, toolMinB: 7.0 }],
+  // Gemma — every Gemma 4 size is multimodal per Google; Gemma 3 4B+
+  // is multimodal. The family-wide flag is True; runtime size floor
+  // / Ollama capability check handles edge cases.
+  ['gemma4',      { optimized: true,  thinks: true,  vision: true,  toolMinB: 4.0 }],
+  ['gemma3',      { optimized: true,  thinks: false, vision: true,  toolMinB: 4.0 }],
+  // Llama — order matters: vision variants + 'llama3-groq' before
+  // generic 'llama3' so the more-specific match wins.
+  ['llama3.2-vision', { optimized: true, thinks: false, vision: true, toolMinB: 11.0 }],
+  ['llama4',      { optimized: true,  thinks: false, vision: true,  toolMinB: 16.0 }],
+  ['llama3.3',    { optimized: true,  thinks: false, vision: false, toolMinB: 70.0 }],
+  ['llama3.2',    { optimized: false, thinks: false, vision: false, toolMinB: 3.0 }],
+  ['llama3.1',    { optimized: true,  thinks: false, vision: false, toolMinB: 70.0 }],
   // Groq's tool-use fine-tune of Llama 3 8B — Hermes JSON tool_calls.
   // Validated end-to-end on chat + escalation per 2026-05-13 sweep.
-  ['llama3-groq', { optimized: true,  thinks: false, toolMinB: 8.0 }],
+  ['llama3-groq', { optimized: true,  thinks: false, vision: false, toolMinB: 8.0 }],
   // Plain Llama 3.0 base. Conservative 8B floor.
-  ['llama3',      { optimized: false, thinks: false, toolMinB: 8.0 }],
+  ['llama3',      { optimized: false, thinks: false, vision: false, toolMinB: 8.0 }],
   // OpenAI gpt-oss (local)
-  ['gpt-oss',     { optimized: false, thinks: true,  toolMinB: 1.0 }],
+  ['gpt-oss',     { optimized: false, thinks: true,  vision: false, toolMinB: 1.0 }],
   // DeepSeek
-  ['deepseek-r1', { optimized: false, thinks: true,  toolMinB: 7.0 }],
-  ['deepseek-v3', { optimized: false, thinks: true,  toolMinB: 7.0 }],
+  ['deepseek-r1', { optimized: false, thinks: true,  vision: false, toolMinB: 7.0 }],
+  ['deepseek-v3', { optimized: false, thinks: true,  vision: false, toolMinB: 7.0 }],
   // Phi
-  ['phi4-mini',   { optimized: false, thinks: true,  toolMinB: 1.0 }],
-  ['phi4',        { optimized: false, thinks: false, toolMinB: 7.0 }],
+  ['phi4-mini',   { optimized: false, thinks: true,  vision: false, toolMinB: 1.0 }],
+  ['phi4',        { optimized: false, thinks: false, vision: false, toolMinB: 7.0 }],
   // Mistral / Magistral
-  ['magistral',   { optimized: false, thinks: true,  toolMinB: 7.0 }],
-  ['mistral',     { optimized: false, thinks: false, toolMinB: 7.0 }],
+  ['magistral',   { optimized: false, thinks: true,  vision: false, toolMinB: 7.0 }],
+  ['mistral',     { optimized: false, thinks: false, vision: false, toolMinB: 7.0 }],
+  // Dedicated vision-language models on Ollama with no text-only sibling.
+  ['llava',       { optimized: false, thinks: false, vision: true,  toolMinB: 7.0 }],
+  ['bakllava',    { optimized: false, thinks: false, vision: true,  toolMinB: 7.0 }],
+  ['moondream',   { optimized: false, thinks: false, vision: true,  toolMinB: 1.0 }],
   // Cohere
-  ['command-r',   { optimized: false, thinks: false, toolMinB: 7.0 }],
+  ['command-r',   { optimized: false, thinks: false, vision: false, toolMinB: 7.0 }],
+];
+
+/** Cloud models with vision support — matched by substring of the
+ *  wire-prefixed model id. Mirrors soul's `_CLOUD_VISION_PATTERNS`. */
+const _CLOUD_VISION_PATTERNS: ReadonlyArray<string> = [
+  'openai:gpt-4o',
+  'openai:gpt-5',
+  'llama-3.2-11b-vision',
+  'llama-3.2-90b-vision',
+  'meta-llama/llama-4',
+  'llama-4-scout',
+  'llama-4-maverick',
 ];
 
 /** Find the matching local family for an Ollama-prefixed model id. */
@@ -167,6 +194,34 @@ export function isOptimizedLocalModel(modelId: string | null | undefined): boole
   const size = _parseSizeB(modelId);
   if (size !== null && size < family.toolMinB) return false;
   return true;
+}
+
+/** Does this model accept image input?
+ *
+ *  Cloud: substring match against the curated list of OpenAI and Groq
+ *  vision-capable model ids.
+ *  Local: per-family `vision` flag from `_LOCAL_FAMILIES`.
+ *
+ *  Drives the chat UI's image-attach button (hidden when the active
+ *  chat model can't see images) and the wizard's image-capable badge.
+ *  Soul's `_supports_vision` is the runtime authority — this is just
+ *  a UI-side gate. */
+export function modelSupportsVision(modelId: string | null | undefined): boolean {
+  if (!modelId) return false;
+  const tag = modelId.toLowerCase();
+  // Cloud
+  for (const pat of _CLOUD_VISION_PATTERNS) {
+    if (tag.includes(pat.toLowerCase())) return true;
+  }
+  // Groq's bare `<vendor>/<model>` form for non-Ollama models
+  if (modelId.includes('/') && !modelId.startsWith('ollama:')) {
+    // Already handled via the patterns above for Llama 4; nothing else
+    // currently. Fall through.
+  }
+  // Local
+  if (!modelId.startsWith('ollama:')) return false;
+  const family = _identifyLocalFamily(modelId);
+  return !!family?.vision;
 }
 
 

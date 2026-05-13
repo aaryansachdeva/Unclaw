@@ -46,8 +46,54 @@ export interface DropdownOption {
   hint?: string;
   /** Optional accent-tinted chip rendered between label and hint (e.g.
    *  "Optimized"). Used to mark options we've validated end-to-end so
-   *  the user can pick with confidence. */
+   *  the user can pick with confidence. Legacy single-badge slot — use
+   *  `badges` for multi-chip rendering. */
   badge?: string;
+  /** Optional multi-chip slot for surfaces that need to show several
+   *  capabilities at once (e.g. "Optimized" + "Vision"). Rendered in
+   *  order, separated by a small gap. When set, supersedes `badge`. */
+  badges?: ReadonlyArray<string>;
+}
+
+
+const BADGE_STYLE: React.CSSProperties = {
+  padding: '1px 6px',
+  borderRadius: 4,
+  background: 'rgba(196, 68, 68, 0.18)',
+  color: 'var(--accent)',
+  fontSize: 9.5,
+  fontWeight: 600,
+  letterSpacing: '0.04em',
+  textTransform: 'uppercase',
+  flexShrink: 0,
+};
+
+
+function BadgeChips({ badges, marginLeft = 0 }: {
+  badges: ReadonlyArray<string>;
+  marginLeft?: number;
+}) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      gap: 4,
+      alignItems: 'center',
+      flexShrink: 0,
+      marginLeft,
+    }}>
+      {badges.map((b) => (
+        <span key={b} style={BADGE_STYLE}>{b}</span>
+      ))}
+    </span>
+  );
+}
+
+
+/** Resolve the effective chip list. `badges` wins; falls back to `badge`. */
+function effectiveBadges(opt: DropdownOption): ReadonlyArray<string> {
+  if (opt.badges && opt.badges.length > 0) return opt.badges;
+  if (opt.badge) return [opt.badge];
+  return [];
 }
 
 interface Props {
@@ -278,22 +324,8 @@ export function Dropdown({
           {selected ? (
             <>
               <span>{selected.label}</span>
-              {selected.badge && (
-                <span
-                  style={{
-                    marginLeft: 8,
-                    padding: '1px 6px',
-                    borderRadius: 4,
-                    background: 'rgba(196, 68, 68, 0.18)',
-                    color: 'var(--accent)',
-                    fontSize: 10,
-                    fontWeight: 600,
-                    letterSpacing: '0.04em',
-                    textTransform: 'uppercase',
-                  }}
-                >
-                  {selected.badge}
-                </span>
+              {effectiveBadges(selected).length > 0 && (
+                <BadgeChips badges={effectiveBadges(selected)} marginLeft={8} />
               )}
               {selected.hint && (
                 <span style={{ color: 'var(--text-ghost)', marginLeft: 8 }}>
@@ -419,22 +451,8 @@ export function Dropdown({
                     >
                       {opt.label}
                     </span>
-                    {opt.badge && (
-                      <span
-                        style={{
-                          padding: '1px 6px',
-                          borderRadius: 4,
-                          background: 'rgba(196, 68, 68, 0.18)',
-                          color: 'var(--accent)',
-                          fontSize: 9.5,
-                          fontWeight: 600,
-                          letterSpacing: '0.04em',
-                          textTransform: 'uppercase',
-                          flexShrink: 0,
-                        }}
-                      >
-                        {opt.badge}
-                      </span>
+                    {effectiveBadges(opt).length > 0 && (
+                      <BadgeChips badges={effectiveBadges(opt)} />
                     )}
                     {opt.hint && (
                       <span

@@ -26,6 +26,7 @@ import {
   missingRequiredKeyFields,
   modelSupportsThinking,
   modelSupportsTools,
+  modelSupportsVision,
   isOptimizedLocalModel,
   validateKeys,
   type ApiKeysProfile,
@@ -164,17 +165,32 @@ export function ConnectionsStep({
   // uses whatever soul reports as locally installed.
   const models = useMemo(() => {
     if (provider?.dynamicModels) {
-      return (ollamaModels ?? []).map((m) => ({
-        id: m.id,
-        label: m.tag ?? m.label ?? m.id,
-        hint: m.size_gb ? `${m.size_gb} GB` : undefined,
-        // "Optimized" chip for families we've validated end-to-end —
-        // per-family native-token fallback parsers, thinking protocol,
-        // and size floor all tuned. See isOptimizedLocalModel.
-        badge: isOptimizedLocalModel(m.id) ? 'Optimized' : undefined,
-      }));
+      return (ollamaModels ?? []).map((m) => {
+        // Stack the chips the model deserves. "Optimized" means we've
+        // validated tool calling + thinking + size floor end-to-end.
+        // "Vision" means the family accepts image input.
+        const badges: string[] = [];
+        if (isOptimizedLocalModel(m.id)) badges.push('Optimized');
+        if (modelSupportsVision(m.id))   badges.push('Vision');
+        return {
+          id: m.id,
+          label: m.tag ?? m.label ?? m.id,
+          hint: m.size_gb ? `${m.size_gb} GB` : undefined,
+          badges: badges.length > 0 ? badges : undefined,
+        };
+      });
     }
-    return provider?.models ?? [];
+    // Cloud providers — surface Vision on the curated catalog too.
+    return (provider?.models ?? []).map((m) => {
+      const badges: string[] = [];
+      if (modelSupportsVision(m.id)) badges.push('Vision');
+      return {
+        id: m.id,
+        label: m.label,
+        hint: m.hint,
+        badges: badges.length > 0 ? badges : undefined,
+      };
+    });
   }, [provider, ollamaModels]);
 
   const setProvider = (id: LLMProviderId | '') => {
@@ -420,7 +436,7 @@ export function ConnectionsStep({
                 id: m.id,
                 label: m.label,
                 hint: m.hint,
-                badge: (m as { badge?: string }).badge,
+                badges: (m as { badges?: ReadonlyArray<string> }).badges,
               }))}
             />
           </FieldLabel>
