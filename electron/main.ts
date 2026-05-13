@@ -481,7 +481,7 @@ function createTray() {
 
 // IPC handlers for window controls from renderer
 ipcMain.on('window:minimize', () => mainWindow?.minimize());
-ipcMain.on('window:close', () => mainWindow?.hide());
+ipcMain.on('window:close', () => app.quit());
 ipcMain.on('window:toggle-pin', (_event, pinned: boolean) => {
   // Same level as the createWindow setup — 'screen-saver' is the
   // highest standard level and survives full-screen apps stealing
