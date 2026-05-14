@@ -24,11 +24,35 @@ export function WeatherPanel({ refreshKey = 0 }: WeatherPanelProps) {
   const [available, setAvailable] = useState<boolean | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [data, setData] = useState<WeatherPayload | null>(null);
+  // Cache the user's coords once — Chrome geolocation is cheap but
+  // we don't want a permission re-prompt loop on each 10-min refresh.
+  // null = not yet resolved; false = denied/unavailable, use IP fallback.
+  const coordsRef = useRef<{ lat: number; lon: number } | null | false>(null);
   const reqIdRef = useRef(0);
 
   const refresh = useCallback(async () => {
     const myReq = ++reqIdRef.current;
-    const res = await getWeather();
+    // Resolve coords on first refresh; subsequent refreshes reuse
+    // them. Permission-denied / browser-unsupported → false; soul
+    // then falls back to whatever Gemini can infer from the prompt.
+    if (coordsRef.current === null) {
+      coordsRef.current = await new Promise<{lat:number;lon:number} | false>(
+        (resolve) => {
+          if (!navigator.geolocation) { resolve(false); return; }
+          navigator.geolocation.getCurrentPosition(
+            (pos) => resolve({
+              lat: pos.coords.latitude, lon: pos.coords.longitude,
+            }),
+            () => resolve(false),
+            // ~5 min cached fix is fine for a weather widget — the
+            // user's not moving between blocks during a refresh.
+            { maximumAge: 5 * 60 * 1000, timeout: 8000 },
+          );
+        },
+      );
+    }
+    const c = coordsRef.current;
+    const res = await getWeather(c ? c : undefined);
     if (myReq !== reqIdRef.current) return;
     setAvailable(res.available);
     setHint(res.hint ?? null);

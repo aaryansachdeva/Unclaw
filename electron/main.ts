@@ -948,12 +948,18 @@ app.whenReady().then(() => {
     app.dock.setIcon(APP_ICON);
   }
 
+  // `geolocation` lets the Weather widget call navigator.geolocation
+  // to pass real coords to soul instead of letting Gemini guess (which
+  // defaulted to New York for every user). Chromium's geolocation
+  // backend resolves via Wi-Fi networks → Google location service; no
+  // user-facing API key needed in Electron.
   session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
-    const allowed = ['media', 'audioCapture', 'mediaKeySystem'];
+    const allowed = ['media', 'audioCapture', 'mediaKeySystem', 'geolocation'];
     cb(allowed.includes(permission));
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
-    return ['media', 'audioCapture', 'mediaKeySystem'].includes(permission);
+    return ['media', 'audioCapture', 'mediaKeySystem', 'geolocation']
+      .includes(permission);
   });
   session.defaultSession.setDevicePermissionHandler((details) => {
     if (details.deviceType === 'audioInput' || details.deviceType === 'audioOutput') {
