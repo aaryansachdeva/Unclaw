@@ -571,6 +571,7 @@ export function ConnectionsStep({
             onCheck={handleCheckKeys}
             scope={mode}
             agenticEnabled={values.agentic_enabled}
+            agenticProvider={values.agentic_provider}
             groundingEnabled={values.grounding_search_enabled}
           />
         ))}
@@ -591,6 +592,7 @@ function CheckKeysBar({
   onCheck,
   scope = 'all',
   agenticEnabled = false,
+  agenticProvider = 'openai',
   groundingEnabled = false,
 }: {
   check: {
@@ -606,8 +608,11 @@ function CheckKeysBar({
   scope?: 'llm' | 'voice' | 'all';
   /** When true AND scope includes LLM, render an Agentic row from
    *  result.agentic. When the soul-side probe lands, this row will
-   *  show the OpenAI-key check outcome. */
+   *  show the backend's check outcome. */
   agenticEnabled?: boolean;
+  /** Drives the Agentic row label — was hardcoded "Agentic (OpenAI)"
+   *  even when the user picked Local Ollama. */
+  agenticProvider?: AgenticProvider;
   /** When true AND scope includes LLM, render a Web-search (Gemini)
    *  row from result.gemini_search. */
   groundingEnabled?: boolean;
@@ -799,7 +804,11 @@ function CheckKeysBar({
           )}
           {(scope === 'all' || scope === 'llm') && agenticEnabled && (
             <KeyResultRow
-              label="Agentic (OpenAI)"
+              label={
+                agenticProvider === 'ollama'
+                  ? 'Agentic (Ollama)'
+                  : 'Agentic (OpenAI)'
+              }
               outcome={result.agentic ?? { ok: false, error: 'not probed yet' }}
             />
           )}
