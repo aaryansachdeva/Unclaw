@@ -15,6 +15,7 @@ interface NewsPanelProps {
 
 export function NewsPanel({ refreshKey = 0 }: NewsPanelProps) {
   const [available, setAvailable] = useState<boolean | null>(null);
+  const [hint, setHint] = useState<string | null>(null);
   const [articles, setArticles] = useState<NewsArticle[]>([]);
   const reqIdRef = useRef(0);
 
@@ -23,6 +24,7 @@ export function NewsPanel({ refreshKey = 0 }: NewsPanelProps) {
     const res = await getNews();
     if (myReq !== reqIdRef.current) return;
     setAvailable(res.available);
+    setHint(res.hint ?? null);
     setArticles(res.available && res.data ? res.data.articles : []);
   }, []);
 
@@ -39,7 +41,7 @@ export function NewsPanel({ refreshKey = 0 }: NewsPanelProps) {
   if (available === false) {
     return (
       <div style={unavailableStyle}>
-        News isn't available on this build of soul.
+        {hint ?? "News isn't available on this build of soul."}
       </div>
     );
   }

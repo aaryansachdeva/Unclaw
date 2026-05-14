@@ -17,6 +17,7 @@ interface StocksPanelProps {
 
 export function StocksPanel({ refreshKey = 0, onDayPctChange }: StocksPanelProps) {
   const [available, setAvailable] = useState<boolean | null>(null);
+  const [hint, setHint] = useState<string | null>(null);
   const [quotes, setQuotes] = useState<StockQuote[]>([]);
   const reqIdRef = useRef(0);
 
@@ -25,6 +26,7 @@ export function StocksPanel({ refreshKey = 0, onDayPctChange }: StocksPanelProps
     const res = await getStocks();
     if (myReq !== reqIdRef.current) return;
     setAvailable(res.available);
+    setHint(res.hint ?? null);
     setQuotes(res.available && res.data ? res.data.quotes : []);
   }, []);
 
@@ -51,7 +53,7 @@ export function StocksPanel({ refreshKey = 0, onDayPctChange }: StocksPanelProps
   if (available === false) {
     return (
       <div style={unavailableStyle}>
-        Stocks aren't available on this build of soul.
+        {hint ?? "Stocks aren't available on this build of soul."}
       </div>
     );
   }

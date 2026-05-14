@@ -1,10 +1,12 @@
 // Soul.exe weather REST client.
 //
-// Soul.exe (the local Python server on :8765) proxies a tiny subset of
-// Open-Meteo and normalizes it so the renderer doesn't care about the
-// upstream provider. The `available` flag mirrors the reminders pattern:
-// if soul is older than the build that added /weather, the call returns
-// `available: false` and the panel hides itself silently.
+// Soul now reads weather via Gemini-grounded search (replacing the old
+// WeatherAPI.com proxy), which means the user's Gemini key is required.
+// BYOK strict — we never fall back to a dev key. When the user hasn't
+// supplied a Gemini key OR hasn't enabled grounded search, the panel
+// surfaces a hint pointing them at Settings, not blank data.
+
+import { fetchApiKeys } from './apiKeys';
 
 const SOUL_URL = 'http://127.0.0.1:8765';
 
@@ -19,7 +21,7 @@ export interface WeatherCurrent {
 }
 
 export interface WeatherHourly {
-  ts: string;          // ISO local timestamp from Open-Meteo
+  ts: string;          // ISO local timestamp
   temp_c: number | null;
   condition: string;
   icon: WeatherIcon;
@@ -41,29 +43,49 @@ export interface WeatherPayload {
 }
 
 export interface WeatherResult {
-  /** True only when soul exposes /weather. False ⇒ panel hides. */
+  /** False ⇒ panel renders the hint copy instead of data. */
   available: boolean;
   data?: WeatherPayload;
+  /** Renderer-facing copy when `available: false`. Tells the user how
+   *  to enable the feature. */
+  hint?: string;
   error?: string;
 }
 
 export interface Coords { lat: number; lon: number; }
 
+const HINT_DISABLED =
+  'Enable web search (Gemini) in Settings to fetch live weather.';
+
 export async function getWeather(coords?: Coords): Promise<WeatherResult> {
+  // Strict BYOK: skip soul entirely when the user hasn't opted in,
+  // saving a roundtrip and a 200-with-hint response.
+  const keys = await fetchApiKeys();
+  if (!keys.grounding_search_enabled || !keys.gemini_search_api_key) {
+    return { available: false, hint: HINT_DISABLED };
+  }
+
   const qs = coords
     ? `?lat=${encodeURIComponent(coords.lat)}&lon=${encodeURIComponent(coords.lon)}`
     : '';
   let res: Response;
   try {
-    res = await fetch(`${SOUL_URL}/weather${qs}`, { method: 'GET' });
+    res = await fetch(`${SOUL_URL}/weather${qs}`, {
+      method: 'GET',
+      headers: { 'X-Gemini-Key': keys.gemini_search_api_key },
+    });
   } catch (err) {
     return { available: false, error: `network: ${(err as Error).message}` };
   }
   if (res.status === 404) return { available: false };
   if (!res.ok) return { available: true, error: `soul /weather ${res.status}` };
   try {
-    const data = (await res.json()) as WeatherPayload;
-    return { available: true, data };
+    const parsed = (await res.json()) as
+      WeatherPayload | { available: false; hint?: string };
+    if ('available' in parsed && parsed.available === false) {
+      return { available: false, hint: parsed.hint || HINT_DISABLED };
+    }
+    return { available: true, data: parsed as WeatherPayload };
   } catch (err) {
     return { available: true, error: `parse: ${(err as Error).message}` };
   }

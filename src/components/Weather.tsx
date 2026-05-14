@@ -22,6 +22,7 @@ interface WeatherPanelProps {
 
 export function WeatherPanel({ refreshKey = 0 }: WeatherPanelProps) {
   const [available, setAvailable] = useState<boolean | null>(null);
+  const [hint, setHint] = useState<string | null>(null);
   const [data, setData] = useState<WeatherPayload | null>(null);
   const reqIdRef = useRef(0);
 
@@ -30,6 +31,7 @@ export function WeatherPanel({ refreshKey = 0 }: WeatherPanelProps) {
     const res = await getWeather();
     if (myReq !== reqIdRef.current) return;
     setAvailable(res.available);
+    setHint(res.hint ?? null);
     setData(res.available && res.data ? res.data : null);
   }, []);
 
@@ -46,7 +48,7 @@ export function WeatherPanel({ refreshKey = 0 }: WeatherPanelProps) {
   if (available === false) {
     return (
       <div style={unavailableStyle}>
-        Weather isn't available on this build of soul.
+        {hint ?? "Weather isn't available on this build of soul."}
       </div>
     );
   }
