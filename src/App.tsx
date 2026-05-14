@@ -1021,6 +1021,14 @@ export function App() {
       // textarea content is just a momentary mirror anyway.
       window.setTimeout(() => {
         inputBarRef.current?.setText('');
+        // Continuous mode keeps `voice.isListening` true between
+        // utterances, so `voiceActive` stays on and the InputBar
+        // overlay would otherwise keep rendering streaming.display
+        // (which still carries the just-finalized committed text
+        // until the next startFeed). Resetting the transcriber state
+        // here clears that ghost transcript so the bar goes back to
+        // its empty visual between utterances.
+        streaming.reset();
       }, 0);
     },
     isAISpeaking: () => isAISpeakingRef.current,
