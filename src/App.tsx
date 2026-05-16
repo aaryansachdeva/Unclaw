@@ -130,10 +130,16 @@ export function App() {
   // the onboarding wizard closes — that's the only time apiKeys
   // mutates within a session.
   const [activeLlmModel, setActiveLlmModel] = useState<string | null>(null);
+  // Whether the agentic / escalation backend is enabled. When it is,
+  // soul's image-attached fast-path routes any turn carrying images to
+  // the vision-capable escalation model — so attachments are usable
+  // even when the chat model itself is text-only.
+  const [agenticEnabled, setAgenticEnabled] = useState(false);
   const refreshActiveLlmModel = useCallback(async () => {
     try {
       const keys = await fetchApiKeys();
       setActiveLlmModel(keys.llm_model);
+      setAgenticEnabled(!!keys.agentic_enabled);
     } catch (err) {
       console.warn('[apiKeys] failed to read active llm_model', err);
     }
@@ -141,9 +147,12 @@ export function App() {
   useEffect(() => {
     void refreshActiveLlmModel();
   }, [refreshActiveLlmModel]);
-  const chatModelSupportsVision = useMemo(
-    () => modelSupportsVision(activeLlmModel),
-    [activeLlmModel],
+  // The + image-attach button shows when images can actually be used:
+  // either the chat model is vision-capable, or agentic is on (soul's
+  // escalation fast-path digests the images on a vision model).
+  const canAttachImages = useMemo(
+    () => modelSupportsVision(activeLlmModel) || agenticEnabled,
+    [activeLlmModel, agenticEnabled],
   );
 
   // Single active widget panel — lifted up so opening one closes the
@@ -1874,7 +1883,7 @@ export function App() {
                   personaDisabled={!isConnected}
                   onPasteImage={handlePasteImage}
                   onAttachImages={handleAttachImages}
-                  canAttachImages={chatModelSupportsVision}
+                  canAttachImages={canAttachImages}
                   chatPaneOpen={chatPaneOpen}
                   onToggleChatPane={() => setChatPaneOpen((o) => !o)}
                   comingSoon={persona.id === 'mark'}
