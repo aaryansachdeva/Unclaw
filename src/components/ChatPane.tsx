@@ -427,6 +427,35 @@ function MessageRow({
             whiteSpace: 'pre-wrap',
           }}
         >
+          {turn.images && turn.images.length > 0 && (
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 4,
+                // Gap below the image grid only when text follows.
+                marginBottom: turn.content ? 6 : 0,
+              }}
+            >
+              {turn.images.map((b64, i) => (
+                <img
+                  key={i}
+                  src={`data:image/png;base64,${b64}`}
+                  alt=""
+                  style={{
+                    maxWidth: 144,
+                    maxHeight: 144,
+                    width: 'auto',
+                    height: 'auto',
+                    borderRadius: 8,
+                    objectFit: 'cover',
+                    display: 'block',
+                    border: '1px solid rgba(255, 255, 255, 0.06)',
+                  }}
+                />
+              ))}
+            </div>
+          )}
           {turn.content}
         </div>
       </div>

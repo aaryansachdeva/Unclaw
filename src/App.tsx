@@ -811,7 +811,19 @@ export function App() {
     setIsSending(true);
     isAISpeakingRef.current = true;
 
-    if (trimmed) memory.add('user', trimmed);
+    // Record the user turn — with any staged screenshots so the chat
+    // pane renders them in-bubble. Image-only sends (no text) still
+    // create a turn now; `add` allows an empty-content turn when it
+    // carries images.
+    const pendingImageB64 = pendingImages.map((img) => img.base64);
+    if (trimmed || pendingImageB64.length > 0) {
+      memory.add(
+        'user',
+        trimmed,
+        undefined,
+        pendingImageB64.length > 0 ? pendingImageB64 : undefined,
+      );
+    }
     const history = memory.getHistory();
 
     // Snapshot the screenshot stack at send time and immediately

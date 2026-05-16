@@ -13,6 +13,13 @@ export interface Turn {
    *  pane renders them as small chips under the message. NOT included
    *  in `getHistory` — the LLM should never re-ingest URLs. */
   sources?: WebSource[];
+  /** Raw base64 image strings (no data-URL prefix) the user attached
+   *  to this turn. User turns only. The chat pane renders them as
+   *  thumbnails in the bubble. SESSION-SCOPED: deliberately stripped
+   *  before persisting to localStorage — base64 images would blow the
+   *  ~5 MB quota within a few turns. So images show for the current
+   *  session and the text alone survives a reload. */
+  images?: string[];
 }
 
 export interface WebSource {
@@ -55,7 +62,13 @@ function loadFromStorage(personaId: string): Turn[] {
 
 function saveToStorage(personaId: string, turns: Turn[]): void {
   try {
-    localStorage.setItem(storageKey(personaId), JSON.stringify(turns));
+    // Strip `images` before persisting — base64 image data would blow
+    // localStorage's ~5 MB quota within a handful of turns. Image
+    // display is session-scoped by design (see Turn.images doc).
+    const lean = turns.map(t =>
+      t.images ? { ...t, images: undefined } : t,
+    );
+    localStorage.setItem(storageKey(personaId), JSON.stringify(lean));
   } catch (err) {
     console.warn('[chatMemory] save failed:', err);
   }
@@ -73,6 +86,7 @@ export interface ChatMemoryAPI {
     role: 'user' | 'assistant',
     content: string,
     sources?: WebSource[],
+    images?: string[],
   ) => Turn | null;
   /**
    * Return the last `limit` turns in the schema soul/Groq expect:
@@ -103,11 +117,16 @@ export function useChatMemory(personaId: string): ChatMemoryAPI {
     turnsRef.current = next;
   }, [personaId]);
 
-  const add = useCallback<ChatMemoryAPI['add']>((role, content, sources) => {
+  const add = useCallback<ChatMemoryAPI['add']>((role, content, sources, images) => {
     const trimmed = content.trim();
-    if (!trimmed) return null;
+    const hasImages = !!images && images.length > 0;
+    // Allow an image-only user turn (no text) — the user can stage
+    // screenshots and send with an empty box. Bail only when there's
+    // nothing at all.
+    if (!trimmed && !hasImages) return null;
     const turn: Turn = { role, content: trimmed, ts: Date.now() };
     if (sources && sources.length > 0) turn.sources = sources;
+    if (hasImages) turn.images = images;
     const next = [...turnsRef.current, turn].slice(-MAX_TURNS);
     turnsRef.current = next;
     setTurns(next);
