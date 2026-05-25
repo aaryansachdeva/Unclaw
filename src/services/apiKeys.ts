@@ -9,9 +9,12 @@
 // requires soul-side support in `_select_provider` + an allowlist entry.
 
 export type LLMProviderId =
-  | 'groq'      // Groq Cloud — qwen3-32b, gpt-oss-20b, llama-3.3-70b
-  | 'openai'    // OpenAI Cloud — gpt-4o-mini default, gpt-5.4 family
-  | 'ollama';   // Local Ollama daemon — any locally-pulled model
+  | 'groq'        // Groq Cloud — qwen3-32b, gpt-oss-20b, llama-3.3-70b
+  | 'openai'      // OpenAI Cloud — gpt-4o-mini default, gpt-5.4 family
+  | 'ollama'      // Local Ollama daemon — any locally-pulled model
+  | 'deepseek'    // DeepSeek API (OpenAI-compatible) — deepseek-chat, -reasoner
+  | 'openrouter'  // OpenRouter — one key, every cloud model (Claude/Gemini/etc.)
+  | 'xai';        // xAI Grok (OpenAI-compatible) — grok-2-latest, grok-beta
 
 /** Which backend runs the agentic / escalation loop. `'openai'` (default)
  *  uses the Responses API + gpt-5.4 family. `'ollama'` uses a local
@@ -237,6 +240,47 @@ export const LLM_PROVIDERS: ProviderInfo[] = [
     // so callers know to hit the live endpoint. The wizard surfaces a
     // loading state until the first response arrives.
     models: [],
+  },
+  // OpenAI-compatible providers — all share soul's `_openai_compatible_chat`.
+  // Adding a model here also requires adding it to ALLOWED_LLM_MODELS in
+  // soul/server.py so the per-request validation doesn't reject it.
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    signupUrl: 'https://platform.deepseek.com/api_keys',
+    requiresApiKey: true,
+    models: [
+      { id: 'deepseek:deepseek-chat',     label: 'DeepSeek Chat',     hint: 'fast' },
+      { id: 'deepseek:deepseek-reasoner', label: 'DeepSeek Reasoner', hint: 'thinking' },
+    ],
+  },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    signupUrl: 'https://openrouter.ai/keys',
+    requiresApiKey: true,
+    models: [
+      // One OpenRouter key unlocks every cloud model. Curated shortlist;
+      // power users can paste a custom wire id in the future if we expose
+      // a free-text field. Wire-id format: "vendor/model".
+      { id: 'openrouter:anthropic/claude-3.5-haiku',         label: 'Claude 3.5 Haiku',    hint: 'fast' },
+      { id: 'openrouter:anthropic/claude-3.5-sonnet',        label: 'Claude 3.5 Sonnet',   hint: 'smart' },
+      { id: 'openrouter:google/gemini-2.0-flash-exp',        label: 'Gemini 2.0 Flash',    hint: 'fast' },
+      { id: 'openrouter:google/gemini-pro-1.5',              label: 'Gemini Pro 1.5' },
+      { id: 'openrouter:meta-llama/llama-3.3-70b-instruct',  label: 'Llama 3.3 70B' },
+      { id: 'openrouter:deepseek/deepseek-chat',             label: 'DeepSeek Chat' },
+      { id: 'openrouter:mistralai/mistral-large',            label: 'Mistral Large' },
+    ],
+  },
+  {
+    id: 'xai',
+    label: 'xAI Grok',
+    signupUrl: 'https://console.x.ai/',
+    requiresApiKey: true,
+    models: [
+      { id: 'xai:grok-2-latest', label: 'Grok 2',    hint: 'smart' },
+      { id: 'xai:grok-beta',     label: 'Grok Beta' },
+    ],
   },
 ];
 
