@@ -13,6 +13,7 @@ import { StocksPanel } from './components/Stocks';
 import { NewsPanel } from './components/News';
 import { WeatherPanel } from './components/Weather';
 import { CustomizationOverlay, ACCENT_COLORS } from './components/CustomizationOverlay';
+import { SettingsPanel } from './components/SettingsPanel';
 import { SoulBootScreen } from './components/SoulBootScreen';
 import { SetupWizard } from './components/SetupWizard';
 import type { WardrobeSettings } from './services/userSettings';
@@ -241,6 +242,9 @@ function AppMain() {
   // Full-screen customization mode — orthogonal to the rail sheets.
   // The wardrobe rail icon flips this; everything else stays.
   const [customizationActive, setCustomizationActive] = useState(false);
+  // Settings modal — opened from Titlebar profile dropdown. Distinct
+  // overlay from CustomizationOverlay so the two can't collide.
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Chat history side-pane. When true, the gray utility pane slides in
   // from the right and the workspace wrapper's right anchor animates
@@ -1849,6 +1853,15 @@ function AppMain() {
         )}
       </AnimatePresence>
 
+      {/* Settings modal — separate from CustomizationOverlay so the two
+          can't collide if the user opens settings during a wardrobe
+          session. AnimatePresence is INSIDE SettingsPanel since the
+          panel needs to animate its own backdrop fade. */}
+      <SettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+      />
+
       {/* Everything below this point — greeting, widgets, sheet, status,
           screenshots, input bar, wizard — is gated on a connected
           stream AND some kind of session (signed-in OR guest mode).
@@ -2193,6 +2206,7 @@ function AppMain() {
         }}
         onResetAccount={() => { void handleResetAccount(); }}
         onResetSession={handleResetSession}
+        onOpenSettings={() => setSettingsOpen(true)}
         // Workspace = the visible stream area. UNCLAW wordmark stays
         // centered over THIS region, not the whole window, so it
         // remains visually centered on the streamed face when the

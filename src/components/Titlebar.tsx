@@ -76,6 +76,10 @@ interface TitlebarProps {
    *  as Reset all data, since interrupting Grace mid-sentence on an
    *  accidental click would be annoying. */
   onResetSession?: () => void;
+  /** Triggered from the "Settings" row in the profile dropdown. Opens
+   *  the SettingsPanel modal where users can reconfigure LLM, TTS,
+   *  agentic, and graphics settings post-onboarding. */
+  onOpenSettings?: () => void;
   /** Width of the workspace area in pixels — i.e. window width minus
    *  any open chat pane. Used to keep the UNCLAW wordmark centered
    *  over the visible stream view rather than the whole window. When
@@ -103,6 +107,7 @@ export function Titlebar({
   onSignIn,
   onResetAccount,
   onResetSession,
+  onOpenSettings,
   workspaceWidth,
   minimalMode = false,
   leftSlot,
@@ -349,6 +354,31 @@ export function Titlebar({
                         </span>
                       )}
                     </div>
+                    {/* Settings — opens the in-app SettingsPanel modal
+                        where users reconfigure LLM provider/model/key,
+                        TTS provider/voice/key, agentic on/off + backend,
+                        and graphics quality. Saves through the same
+                        encrypted safeStorage path as onboarding. */}
+                    {onOpenSettings && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setProfileOpen(false);
+                          onOpenSettings();
+                        }}
+                        style={menuItemStyle}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'transparent';
+                        }}
+                      >
+                        <Settings size={14} strokeWidth={2} color="var(--text-secondary)" />
+                        <span>Settings</span>
+                      </button>
+                    )}
                     {/* Soul Settings — opens the soul portal in the
                         user's default browser. Engine power-user surface;
                         most users never need it but it's the canonical

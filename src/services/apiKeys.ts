@@ -393,7 +393,21 @@ export interface ApiKeysProfile {
    *  (see `modelSupportsThinking`); hidden in the wizard otherwise. */
   chat_thinking_effort: ThinkingEffort;
   agentic_thinking_effort: ThinkingEffort;
+  /** UE graphics quality preset. Surfaces in Settings as Low/Med/High
+   *  dropdown. Soul reads this and passes the matching CVar block as
+   *  ExecCmds when next launching UE. Change requires character restart
+   *  (the UI shows a "Restart character" toast).
+   *
+   *  - low (default): the current shipped settings — fits 2026-era M1+
+   *    laptops on battery.
+   *  - medium / high: TBD — Aryan will provide the CVar block. Currently
+   *    these dropdown values are stored but soul falls back to low until
+   *    the matching CVar block is wired in unreal_runtime.py. */
+  graphics_quality: GraphicsQuality;
 }
+
+/** UE-side graphics preset. See ApiKeysProfile.graphics_quality. */
+export type GraphicsQuality = 'low' | 'medium' | 'high';
 
 
 export const DEFAULT_API_KEYS: ApiKeysProfile = {
@@ -425,6 +439,7 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   grounding_search_enabled: false,
   chat_thinking_effort:     'none',
   agentic_thinking_effort:  'medium',
+  graphics_quality:         'low',
 };
 
 
