@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Electron / V8 JIT under hardened runtime. Without allow-jit the
+       V8 isolate fails to map RWX pages on first JIT compile. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+
+  <!-- V8 occasionally falls out of JIT into ad-hoc executable allocations
+       (regex compiler, deopts). Hardened runtime kills those by default. -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+
+  <!-- We dynamically load the user's downloaded Python interpreter
+       (python-build-standalone) and its bundled .dylibs at runtime.
+       Those are signed by Astral, not us — strict library validation
+       would refuse them. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- Python relies on PYTHONPATH / PYTHONHOME / DYLD_* env vars to find
+       its own stdlib + site-packages. Hardened runtime strips DYLD_* from
+       child processes by default. -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+
+  <!-- Microphone for voice chat. NSMicrophoneUsageDescription is
+       provided via the Info.plist extendInfo block. -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+
+  <!-- Camera entitlement. The feature is opt-in; the entitlement just
+       has to exist so the prompt can be shown when the user enables it. -->
+  <key>com.apple.security.device.camera</key>
+  <true/>
+</dict>
+</plist>

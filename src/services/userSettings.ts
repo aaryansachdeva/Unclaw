@@ -51,8 +51,26 @@ export interface UserSettings {
   notes?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+  /** Saved outfit + lighting for wardrobe mode. Indices are bounded to
+   *  the UE-side asset list (see WARDROBE_BOUNDS in components/Wardrobe).
+   *  Lighting angle is 0-360 degrees. Null/missing = use UE defaults. */
+  wardrobe?: WardrobeSettings | null;
   /** Allow any future top-level setting without a Pydantic edit. */
   [k: string]: unknown;
+}
+
+/** Wardrobe is a sub-object so all related state lives under one key
+ *  and partial updates (changing only lighting, say) are a single
+ *  `patchSettings({ wardrobe: {...prev, lightingAngle: x} })` call. */
+export interface WardrobeSettings {
+  topIndex?: number;
+  bottomIndex?: number;
+  shoesIndex?: number;
+  hairIndex?: number;
+  lightingAngle?: number;
+  /** Index into the curated accent-lighting palette (see ACCENT_COLORS
+   *  in components/Wardrobe). 0 = neutral default. */
+  accentColorIndex?: number;
 }
 
 // ---- Soul (local) ---------------------------------------------------

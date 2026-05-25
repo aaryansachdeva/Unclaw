@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X } from 'lucide-react';
+import { X, ArrowLeft } from 'lucide-react';
 import { Titlebar } from './components/Titlebar';
 import { StreamView } from './components/StreamView';
 import { Greeting } from './components/Greeting';
@@ -12,6 +12,10 @@ import { RemindersPanel } from './components/Reminders';
 import { StocksPanel } from './components/Stocks';
 import { NewsPanel } from './components/News';
 import { WeatherPanel } from './components/Weather';
+import { CustomizationOverlay, ACCENT_COLORS } from './components/CustomizationOverlay';
+import { SoulBootScreen } from './components/SoulBootScreen';
+import { SetupWizard } from './components/SetupWizard';
+import type { WardrobeSettings } from './services/userSettings';
 import { usePixelStreaming } from './hooks/usePixelStreaming';
 import { useVideoRectPublisher } from './hooks/useVideoRectPublisher';
 import { useChatMemory, type Turn } from './hooks/useChatMemory';
@@ -25,6 +29,7 @@ import { expressFace } from './services/express';
 import { getStocks } from './services/stocks';
 import {
   deleteSettings,
+  patchSettings,
   saveSettingsEverywhere,
   syncSettings,
   type UserSettings,
@@ -84,8 +89,66 @@ function dispatchActionToUE(
 
 const SIGNALING_URL = 'ws://localhost:8080';
 
+/**
+ * Top-level gate: don't mount the main UI (and therefore the pixel-
+ * streaming connection) until soul has booted. The Electron main
+ * process spawns soul on app start and fires 'soul:ready' over IPC
+ * once soul prints its READY banner. While we wait, SoulBootScreen
+ * shows the live log stream so the user can see what's happening.
+ *
+ * If we mounted <usePixelStreaming> immediately, it would fight an
+ * autoreconnect loop against soul's not-yet-listening signaling
+ * server, flicker the connection state, and confuse the wardrobe
+ * init handshake. Gating cleanly side-steps all of that.
+ *
+ * If electronAPI isn't present (e.g. someone opens the renderer in a
+ * plain browser), we assume soul is reachable and bypass the gate
+ * immediately — preserves the dev-portal use case.
+ */
 export function App() {
-  const { videoParentRef, connectionState, pixelStreaming } = usePixelStreaming({
+  // Setup gate (packaged-build first-run only). null = still checking;
+  // the brief null render is preferable to a flash of SoulBootScreen
+  // before realizing the wizard should run instead.
+  const [setupComplete, setSetupComplete] = useState<boolean | null>(
+    () => (typeof window === 'undefined' || !window.electronAPI?.setup) ? true : null,
+  );
+
+  useEffect(() => {
+    if (setupComplete !== null) return;
+    const api = window.electronAPI?.setup;
+    if (!api) { setSetupComplete(true); return; }
+    let cancelled = false;
+    api.getStatus().then((snap) => {
+      if (cancelled) return;
+      setSetupComplete(snap?.isComplete ?? false);
+    }).catch(() => { if (!cancelled) setSetupComplete(true); });
+    return () => { cancelled = true; };
+  }, [setupComplete]);
+
+  const [soulReady, setSoulReady] = useState(
+    // Default to ready when running outside Electron — the renderer
+    // in a browser dev session has no main-process soul supervisor
+    // to wait on, and the user is presumably running `./run_soul.sh`
+    // themselves.
+    () => typeof window === 'undefined' || !window.electronAPI?.soul,
+  );
+
+  if (setupComplete === null) {
+    // Brief loading flash — IPC roundtrip is sub-50ms in practice.
+    return null;
+  }
+  if (!setupComplete) {
+    return <SetupWizard onComplete={() => setSetupComplete(true)} />;
+  }
+  if (!soulReady) {
+    return <SoulBootScreen onReady={() => setSoulReady(true)} />;
+  }
+
+  return <AppMain />;
+}
+
+function AppMain() {
+  const { videoParentRef, connectionState, pixelStreaming, sendAndAwaitAck } = usePixelStreaming({
     signalingUrl: SIGNALING_URL,
   });
 
@@ -93,6 +156,23 @@ export function App() {
   // CursorGazeComponent can translate the host OS cursor into video-
   // relative coords.
   useVideoRectPublisher(pixelStreaming, videoParentRef);
+
+  // Wardrobe descriptor emitter — narrow wrapper around the PS emit
+  // so callers don't import PS types. Each payload is timestamped to
+  // match the project's existing descriptor pattern. Declared up here
+  // (right next to pixelStreaming) so any helper below — including
+  // the connect/reset apply path — can reference it without TDZ.
+  const emitWardrobeDescriptor = useCallback((payload: Record<string, unknown>) => {
+    if (!pixelStreaming) {
+      console.warn('[wardrobe] emit skipped — no pixelStreaming', payload);
+      return;
+    }
+    console.log('[wardrobe] →', payload);
+    pixelStreaming.emitUIInteraction({
+      ...payload,
+      Timestamp: new Date().toISOString(),
+    });
+  }, [pixelStreaming]);
 
   const [currentAgentIndex, setCurrentAgentIndex] = useState(0);
   const [isSending, setIsSending] = useState(false);
@@ -158,6 +238,9 @@ export function App() {
   // Single active widget panel — lifted up so opening one closes the
   // others. The dock and the sheet both subscribe to this state.
   const [activeWidget, setActiveWidget] = useState<SheetKey | null>(null);
+  // Full-screen customization mode — orthogonal to the rail sheets.
+  // The wardrobe rail icon flips this; everything else stays.
+  const [customizationActive, setCustomizationActive] = useState(false);
 
   // Chat history side-pane. When true, the gray utility pane slides in
   // from the right and the workspace wrapper's right anchor animates
@@ -270,11 +353,13 @@ export function App() {
   const stocksRef = useRef<HTMLButtonElement | null>(null);
   const newsRef = useRef<HTMLButtonElement | null>(null);
   const weatherRef = useRef<HTMLButtonElement | null>(null);
+  const wardrobeRef = useRef<HTMLButtonElement | null>(null);
   const triggerRefs = useMemo(() => ({
     reminders: reminderRef,
     stocks: stocksRef,
     news: newsRef,
     weather: weatherRef,
+    wardrobe: wardrobeRef,
   }), []);
 
   // Rail-badge state — fetched at the App level so the badges
@@ -1210,19 +1295,106 @@ export function App() {
     profileSyncedRef.current = false;
   }, [authToken]);
 
+  // Re-apply the user's saved wardrobe + lighting to UE. Fired on:
+  //   * stream connect (so a fresh UE session loads the user's outfit
+  //     before they ever see Grace),
+  //   * session reset (UE returns to neutral; we restore the look),
+  //   * any other place that needs to bring UE back to the saved
+  //     configuration without going through customization mode.
+  //
+  // Sends three descriptors:
+  //   1. initializeClothing — 4 int fields (top/bottom/shoes/hair)
+  //   2. changeLightAngle — string `lightAngle` 0-360
+  //   3. changeLightColor — flat dot-named string fields lightColor.r/.g/.b
+  //
+  // No-op when the stream isn't connected or the profile hasn't loaded
+  // a wardrobe yet.
+  // sendAndAwaitAck wrapped with retry — used by applySavedWardrobe so
+  // the stream-connect init handshake survives the "UE technically
+  // connected but not yet ready to process descriptors" race window.
+  // Sends → waits up to 1500ms for `{EventType, status: "received"}`
+  // back from UE → on timeout, retries (max 3 attempts). If all retries
+  // fail, logs an error but does NOT throw, so a missing ack for one
+  // descriptor never blocks the rest of the init chain or the UI.
+  const sendWithRetry = useCallback(async (
+    payload: Record<string, unknown> & { EventType: string },
+    maxAttempts = 3,
+  ) => {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        console.log(`[wardrobe] → ${payload.EventType} (attempt ${attempt}/${maxAttempts})`, payload);
+        await sendAndAwaitAck(payload, { timeoutMs: 1500 });
+        return true;
+      } catch (err) {
+        console.warn(`[wardrobe] ${payload.EventType} attempt ${attempt} failed:`, err);
+      }
+    }
+    console.error(`[wardrobe] ${payload.EventType} GAVE UP after ${maxAttempts} attempts — UE never ack'd`);
+    return false;
+  }, [sendAndAwaitAck]);
+
+  const applySavedWardrobe = useCallback(async () => {
+    if (!pixelStreaming) return;
+    const w = profile?.wardrobe as WardrobeSettings | null | undefined;
+    if (!w) return;
+    // Sequential await — UE applies descriptors in order; if one is
+    // racing with the prior one we'd see weird intermediate states.
+    // The 1500ms-per-attempt × 3 attempts × 3 descriptors caps the
+    // whole handshake at ~13.5s worst case (vs hanging forever).
+    await sendWithRetry({
+      EventType: 'initializeClothing',
+      top:    w.topIndex    ?? 0,
+      bottom: w.bottomIndex ?? 0,
+      shoes:  w.shoesIndex  ?? 0,
+      hair:   w.hairIndex   ?? 0,
+    });
+    await sendWithRetry({
+      EventType: 'changeLightAngle',
+      lightAngle: String(w.lightingAngle ?? 0),
+    });
+    const c = ACCENT_COLORS[w.accentColorIndex ?? 0] ?? ACCENT_COLORS[0];
+    await sendWithRetry({
+      EventType: 'changeLightColor',
+      'lightColor.r': c.r.toFixed(3),
+      'lightColor.g': c.g.toFixed(3),
+      'lightColor.b': c.b.toFixed(3),
+    });
+    console.log('[wardrobe] init handshake complete');
+  }, [pixelStreaming, profile?.wardrobe, sendWithRetry]);
+
+  // Track whether we've sent initializeClothing for the current
+  // stream connection. Resets on disconnect so a reconnect re-fires.
+  // Without this gate, every profile update (e.g. after save) would
+  // re-send the descriptors — UE just received finalizeClothing, no
+  // need to clobber it with another init.
+  const wardrobeInitSentRef = useRef(false);
+  useEffect(() => {
+    if (connectionState !== 'connected') {
+      wardrobeInitSentRef.current = false;
+      return;
+    }
+    if (wardrobeInitSentRef.current) return;
+    if (!pixelStreaming || !profile?.wardrobe) return;
+    wardrobeInitSentRef.current = true;
+    console.log('[wardrobe-init] starting handshake with', profile.wardrobe);
+    void applySavedWardrobe();
+  }, [connectionState, pixelStreaming, profile?.wardrobe, applySavedWardrobe]);
+
   // Soft session reset — tells Unreal to drop back to neutral pose +
-  // clear any in-progress speech. Doesn't touch auth, profile, keys,
-  // or chat memory. Same descriptor shape we use elsewhere
-  // (PS_Next_Claude originated the pattern). No-op when the stream
-  // isn't connected — the popover button only mounts when titlebar
-  // is up, which itself only renders post-load, but guard anyway.
+  // clear any in-progress speech, then immediately re-applies the
+  // user's saved wardrobe so the character returns to THEIR look,
+  // not the engine default. Doesn't touch auth, profile, keys, or
+  // chat memory.
   const handleResetSession = useCallback(() => {
     if (!pixelStreaming) return;
     pixelStreaming.emitUIInteraction({
       EventType: 'reset',
       Timestamp: new Date().toISOString(),
     });
-  }, [pixelStreaming]);
+    // Re-apply on the next tick so UE has a moment to process the
+    // reset before we tell it which outfit to wear.
+    setTimeout(() => { void applySavedWardrobe(); }, 50);
+  }, [pixelStreaming, applySavedWardrobe]);
 
   // Fetch the user profile, but only once the stream is connected.
   // Null -> open the onboarding wizard in firstRun mode. Any non-null
@@ -1291,14 +1463,24 @@ export function App() {
     memory.clear();
   }, [memory]);
 
-  // Toggle a sheet open/closed. When closing, also surrender focus
-  // back to the dock — SheetPanel handles the refocus itself but
-  // anyone calling toggle directly needs the same effect.
+  // Toggle a sheet open/closed. The wardrobe rail icon is special —
+  // it doesn't open a sheet; it flips the full-screen customization
+  // mode on, which hides the rest of the UI. Every other key uses
+  // the normal sheet flow.
   const handleToggleWidget = useCallback((key: SheetKey) => {
+    if (key === 'wardrobe') {
+      // Force the chat pane closed so the customization overlay
+      // spans the whole workspace, not the pre-shrunk window.
+      setActiveWidget(null);
+      setChatPaneOpen(false);
+      setCustomizationActive(prev => !prev);
+      return;
+    }
     setActiveWidget(prev => (prev === key ? null : key));
   }, []);
 
   const handleCloseSheet = useCallback(() => setActiveWidget(null), []);
+  const handleExitCustomization = useCallback(() => setCustomizationActive(false), []);
 
   const isConnected = connectionState === 'connected';
 
@@ -1558,6 +1740,37 @@ export function App() {
     inputBarRef.current?.setText(`${baseline}${sep}${c}`);
   }, [streaming.isActive, streaming.committed]);
 
+  // Save handler — fires finalizeClothing to UE, persists to soul,
+  // mirrors into local profile state so the next entry into
+  // customization sees the new values as `initial`, then exits the
+  // mode (which separately fires wardrobeModeOff via the lifecycle
+  // effect).
+  const handleSaveWardrobe = useCallback(async (settings: WardrobeSettings) => {
+    emitWardrobeDescriptor({ EventType: 'finalizeClothing' });
+    try {
+      const updated = await patchSettings({ wardrobe: settings });
+      setProfile(updated);
+    } catch (err) {
+      console.warn('[wardrobe] save to soul failed', err);
+    }
+    setCustomizationActive(false);
+  }, [emitWardrobeDescriptor]);
+
+  // wardrobeModeOn / wardrobeModeOff — fire on entry / exit of the
+  // full-screen customization overlay. Saving sets customizationActive
+  // to false (handler above), which naturally triggers wardrobeModeOff
+  // through this effect's cleanup.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    if (customizationActive) {
+      emitWardrobeDescriptor({ EventType: 'wardrobeModeOn' });
+      return () => {
+        emitWardrobeDescriptor({ EventType: 'wardrobeModeOff' });
+      };
+    }
+    return undefined;
+  }, [customizationActive, pixelStreaming, emitWardrobeDescriptor]);
+
   // Active sheet content. App owns the routing so the SheetPanel
   // doesn't need to know about the data layer.
   const sheetContent = useMemo(() => {
@@ -1580,6 +1793,7 @@ export function App() {
         return <NewsPanel refreshKey={refreshKey} />;
       case 'weather':
         return <WeatherPanel refreshKey={refreshKey} />;
+      // wardrobe is intentionally NOT a sheet — see CustomizationOverlay.
       default:
         return null;
     }
@@ -1617,10 +1831,30 @@ export function App() {
         connectionState={connectionState}
       />
 
+      {/* Customization mode — full-screen overlay anchored to the
+          workspace wrapper, so it shares Grace's framing. Every other
+          chrome element below fades out while it's mounted. Rendered
+          OUTSIDE the `isConnected && hasSession` gate so it doesn't
+          unmount when the stream blips and the cleanup effect can
+          properly fire wardrobeModeOff. */}
+      <AnimatePresence>
+        {customizationActive && (
+          <CustomizationOverlay
+            key="customization"
+            initial={profile?.wardrobe as WardrobeSettings | null | undefined}
+            onEmit={emitWardrobeDescriptor}
+            onSave={handleSaveWardrobe}
+            onCancel={handleExitCustomization}
+          />
+        )}
+      </AnimatePresence>
+
       {/* Everything below this point — greeting, widgets, sheet, status,
           screenshots, input bar, wizard — is gated on a connected
-          stream AND some kind of session (signed-in OR guest mode). */}
-      {isConnected && hasSession && (
+          stream AND some kind of session (signed-in OR guest mode).
+          When customization mode is on, hide all of it so Grace
+          stands alone in the fitting room. */}
+      {isConnected && hasSession && !customizationActive && (
         <>
       <Greeting
         userName={
@@ -1703,7 +1937,7 @@ export function App() {
           states, so typing/voice/textarea-focus state survives toggles.
           Z-index 38 sits above the chat pane (35) so the bar reads
           on top of the gray pane surface, and below the titlebar (50). */}
-      {isConnected && hasSession && (
+      {isConnected && hasSession && !customizationActive && (
         <div
           style={{
             position: 'absolute',
@@ -1897,8 +2131,50 @@ export function App() {
 
       {/* Titlebar — full window width, OUTSIDE the workspace wrapper so
           the window chrome stays edge-to-edge even with the chat pane
-          open. Z-index 50 keeps it above both workspace and pane. */}
+          open. Z-index 50 keeps it above both workspace and pane.
+          In customization mode we drop into "minimal" — the profile
+          cluster + wordmark hide, but pin / minimize / close stay so
+          the window remains manageable. */}
       <Titlebar
+        minimalMode={customizationActive}
+        leftSlot={customizationActive ? (
+          // Back button rendered INSIDE the Titlebar's left slot so
+          // it lives in the same DOM subtree (and no-drag wrapper)
+          // as the working window controls. Clicking it reliably
+          // exits customization without being eaten by the Titlebar's
+          // drag region. Style matches the profile button it
+          // visually replaces (36×36 frosted circle).
+          <button
+            type="button"
+            onClick={handleExitCustomization}
+            aria-label="Back"
+            title="Back"
+            className="glass-btn"
+            style={{
+              width: 36,
+              height: 36,
+              padding: 0,
+              borderRadius: '50%',
+              background: 'rgba(255, 255, 255, 0.06)',
+              border: '1px solid rgba(255, 255, 255, 0.10)',
+              color: 'var(--text-primary)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              transition:
+                'background 180ms var(--ease-out-quart), color 180ms var(--ease-out-quart)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.12)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+            }}
+          >
+            <ArrowLeft size={17} strokeWidth={1.8} />
+          </button>
+        ) : undefined}
         showReconnecting={showReconnecting}
         user={authUser}
         guestMode={guestMode}
@@ -1940,8 +2216,9 @@ export function App() {
           workspace wrapper above shrinks in unison so the stream is
           physically pushed in, not overlaid. Only mounted once
           a session exists (authed or guest); conversation history
-          comes from the per-persona localStorage memory. */}
-      {isConnected && hasSession && (
+          comes from the per-persona localStorage memory. Hidden
+          while customization mode is active. */}
+      {isConnected && hasSession && !customizationActive && (
         <ChatPane
           open={chatPaneOpen}
           turns={memory.turns}
@@ -1961,7 +2238,7 @@ export function App() {
           drag region overlay. The wrapper's `right: 140` leaves
           room for the existing titlebar window controls (AS / pin /
           minimize / close-window). */}
-      {isConnected && hasSession && chatPaneOpen && (
+      {isConnected && hasSession && chatPaneOpen && !customizationActive && (
         <div
           style={{
             position: 'absolute',

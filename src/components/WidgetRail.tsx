@@ -4,7 +4,7 @@
 // its right), so the layout never reflows.
 
 import { motion, useReducedMotion } from 'framer-motion';
-import { Bell, BarChart3, Newspaper, Cloud } from 'lucide-react';
+import { Bell, BarChart3, Newspaper, Cloud, Shirt } from 'lucide-react';
 import { LucideIcon } from 'lucide-react';
 import { RefObject, useState } from 'react';
 
@@ -81,6 +81,13 @@ export function WidgetRail({
         active={activeWidget === 'weather'}
         onClick={() => onToggle('weather')}
         triggerRef={triggerRefs?.weather}
+      />
+      <RailIcon
+        icon={Shirt}
+        label="Customization"
+        active={activeWidget === 'wardrobe'}
+        onClick={() => onToggle('wardrobe')}
+        triggerRef={triggerRefs?.wardrobe}
       />
     </motion.div>
   );

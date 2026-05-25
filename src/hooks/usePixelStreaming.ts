@@ -23,6 +23,19 @@ interface UsePixelStreamingReturn {
   videoParentRef: React.RefObject<HTMLDivElement | null>;
   connectionState: ConnectionState;
   pixelStreaming: PixelStreaming | null;
+  /**
+   * Send a descriptor to UE and resolve when UE acks it back with
+   * `{EventType, status: "received"}`. Rejects on timeout (default 1500 ms).
+   * Caller can retry on rejection. Used for descriptors that MUST be
+   * acknowledged (the wardrobe init handshake on stream connect — UE is
+   * sometimes not ready to process descriptors the instant the stream
+   * is technically "connected", so we need confirm-or-retry rather than
+   * fire-and-forget).
+   */
+  sendAndAwaitAck: (
+    payload: Record<string, unknown> & { EventType: string },
+    opts?: { timeoutMs?: number }
+  ) => Promise<void>;
 }
 
 export function usePixelStreaming({
@@ -34,6 +47,12 @@ export function usePixelStreaming({
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
 
+  // Per-EventType promise resolvers waiting on a `status: "received"`
+  // response from UE. Set when sendAndAwaitAck is called, cleared by
+  // the response listener below when the matching EventType arrives.
+  // Map (not object) so we can iterate cleanly on cleanup.
+  const pendingAcksRef = useRef<Map<string, (err?: Error) => void>>(new Map());
+
   useEffect(() => {
     if (!videoParentRef.current) return;
 
@@ -44,7 +63,15 @@ export function usePixelStreaming({
         StartVideoMuted: false,
         HoveringMouse: true,
         WaitForStreamer: true,
-        MatchViewportRes: false,
+        MatchViewportRes: true,
+        // PS 5.6 SDK defaults to UE-as-offerer (legacy Epic plugin behavior).
+        // Our PixelStreaming2NativeMac plugin (1.0.8+) is browser-as-offerer —
+        // UE awaits the browser's offer in OnRemoteOffer and answers via AddTrack.
+        // Without this flag, both sides wait silently after `subscribe` and the
+        // stream never starts. Symptom: WS connects + subscribe sent, then only
+        // pings forever; UE creates the peer + video track but never gets an
+        // SDP offer. Hit in 1.0.8 first-Mac-ship test.
+        BrowserSendOffer: true,
         ss: signalingUrl,
       },
     });
@@ -54,6 +81,28 @@ export function usePixelStreaming({
     });
 
     psRef.current = ps;
+
+    // Listen for UE → browser response messages. The SDK fires this
+    // for EVERY response, regardless of "name" — that's just a handle
+    // for removal. We parse the message as JSON; if it has the shape
+    // `{EventType, status: "received"}` it's an ack for a sendAndAwaitAck
+    // call and we resolve the matching pending promise. Late acks
+    // (after a timeout) are silently discarded.
+    ps.addResponseEventListener('unclaw-ack-router', (raw: string) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); }
+      catch { return; }  // non-JSON UE response — ignore
+      if (!parsed || typeof parsed !== 'object') return;
+      const msg = parsed as { EventType?: unknown; status?: unknown };
+      if (typeof msg.EventType !== 'string') return;
+      if (msg.status !== 'received') return;
+      const resolver = pendingAcksRef.current.get(msg.EventType);
+      if (resolver) {
+        pendingAcksRef.current.delete(msg.EventType);
+        resolver();
+        console.log('[ps-ack] ←', msg.EventType);
+      }
+    });
 
     const scheduleRetry = () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
@@ -65,6 +114,33 @@ export function usePixelStreaming({
       }, retryDelay);
     };
 
+    // Force MatchViewportRes — the SDK's auto-trigger from the
+    // `MatchViewportRes: true` setting is unreliable on Electron/Mac
+    // paint timing (the video element may not have its final device-
+    // pixel size when the SDK first fires the sync). Manually re-fire
+    // at `webRtcConnected` and `playStream` (×3, layered) to cover the
+    // layout-settle window. Mirrors the proven PC reference pattern in
+    // ProjectGraceTests/PS_Next_Claude. Drop the manual fires once the
+    // auto-trigger proves reliable across Mac/Electron paint timing.
+    const forceViewportResolutionUpdate = () => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const controller = (ps as any)._webRtcController;
+        controller?.videoPlayer?.updateVideoStreamSize?.();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[ps] viewport-resolution update failed:', err);
+      }
+    };
+
+    // Dev-mode handle so the update can be fired from DevTools when
+    // diagnosing a layout-change miss. Stripped in production builds
+    // by Vite's dead-code elimination on import.meta.env.DEV.
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).forceViewportUpdate = forceViewportResolutionUpdate;
+    }
+
     ps.addEventListener('webRtcConnecting', () => setConnectionState('connecting'));
     ps.addEventListener('webRtcConnected', () => {
       setConnectionState('connected');
@@ -72,6 +148,11 @@ export function usePixelStreaming({
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
       }
+      // First manual viewport-res nudge ~500 ms after RTC connect (PC
+      // reference timing). Stream may not be playing yet so this is just
+      // priming the pipe; the `playStream` triple-fire below carries the
+      // real load.
+      setTimeout(forceViewportResolutionUpdate, 500);
       // Localhost optimization: ask the receiver to render frames as soon
       // as decoded with no jitter buffer. Default Chromium playout delay is
       // 50-200ms (designed to absorb network jitter); on loopback there's no
@@ -89,6 +170,21 @@ export function usePixelStreaming({
               // 0 = "render with minimum delay possible".
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               (recv as any).playoutDelayHint = 0;
+              // jitterBufferTarget (Chrome 92+) is the newer companion knob —
+              // explicit target depth in ms. 0 = no buffering. Belt and suspenders
+              // with playoutDelayHint; some Chromium builds honor one but not the
+              // other. Sofia's debug viewer sets both for the same reason.
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (recv as any).jitterBufferTarget = 0;
+            } else if (recv.track?.kind === 'audio') {
+              // Mac dual-audio: UE plays its own audio out of the Mac
+              // speakers via CoreAudio at the same time it sends the
+              // WebRTC audio track. Disable the track at the receiver so
+              // the renderer is silent and Grace is only heard once
+              // (from UE locally). track.enabled=false makes the WebRTC
+              // stack render silence regardless of any video/audio
+              // element's .muted state.
+              recv.track.enabled = false;
             }
           }
         }
@@ -98,6 +194,17 @@ export function usePixelStreaming({
         // eslint-disable-next-line no-console
         console.warn('[usePixelStreaming] playoutDelayHint apply failed:', err);
       }
+    });
+    // Triple-fire viewport-res on stream start. Each one re-runs the
+    // SDK's videoPlayer.updateVideoStreamSize() which sends a Resize
+    // descriptor to UE with the current device-pixel size of the
+    // <video> element. Layered timing covers the window where the
+    // Electron layout is still settling (image first paint, container
+    // reflow, etc.). PC reference uses the same 1/2/3-second pattern.
+    ps.addEventListener('playStream', () => {
+      setTimeout(forceViewportResolutionUpdate, 1000);
+      setTimeout(forceViewportResolutionUpdate, 2000);
+      setTimeout(forceViewportResolutionUpdate, 3000);
     });
     ps.addEventListener('webRtcDisconnected', () => {
       setConnectionState('connecting');
@@ -110,14 +217,59 @@ export function usePixelStreaming({
 
     return () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+      ps.removeResponseEventListener('unclaw-ack-router');
+      // Reject any in-flight ack promises so callers don't hang forever
+      // if the component unmounts mid-handshake.
+      const pendings = pendingAcksRef.current;
+      pendings.forEach(reject => reject(new Error('pixelStreaming unmounted')));
+      pendings.clear();
       ps.disconnect();
       psRef.current = null;
     };
   }, [signalingUrl, retryDelay]);
 
+  const sendAndAwaitAck = useCallback<UsePixelStreamingReturn['sendAndAwaitAck']>(
+    (payload, opts) => {
+      const ps = psRef.current;
+      if (!ps) return Promise.reject(new Error('pixelStreaming not ready'));
+
+      const timeoutMs = opts?.timeoutMs ?? 1500;
+      const evt = payload.EventType;
+
+      return new Promise<void>((resolve, reject) => {
+        // If a previous ack for this EventType is still pending, the
+        // newer send supersedes it — drop the old resolver. (UE only
+        // tracks the latest state; we don't need both acks.)
+        const existing = pendingAcksRef.current.get(evt);
+        if (existing) existing(new Error('superseded by newer send'));
+
+        const timer = setTimeout(() => {
+          if (pendingAcksRef.current.get(evt) === wrappedResolve) {
+            pendingAcksRef.current.delete(evt);
+            reject(new Error(`ack timeout: ${evt} (${timeoutMs}ms)`));
+          }
+        }, timeoutMs);
+
+        const wrappedResolve = (err?: Error) => {
+          clearTimeout(timer);
+          if (err) reject(err); else resolve();
+        };
+
+        pendingAcksRef.current.set(evt, wrappedResolve);
+
+        ps.emitUIInteraction({
+          ...payload,
+          Timestamp: new Date().toISOString(),
+        });
+      });
+    },
+    []
+  );
+
   return {
     videoParentRef,
     connectionState,
     pixelStreaming: psRef.current,
+    sendAndAwaitAck,
   };
 }

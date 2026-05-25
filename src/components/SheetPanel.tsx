@@ -27,6 +27,7 @@ const TITLES: Record<SheetKey, string> = {
   stocks: 'Watchlist',
   news: 'Headlines',
   weather: 'Weather',
+  wardrobe: 'Customization',
 };
 
 interface SheetPanelProps {
@@ -43,13 +44,14 @@ interface SheetPanelProps {
 }
 
 // Vertical offset (px) from the rail's center to each icon's center.
-// Rail icon: 38px tall, 4px gap → 42px stride. With 4 icons, the rail
-// center sits between Stocks and News. Formula: (i - 1.5) * 42.
+// Rail icon: 38px tall, 4px gap → 42px stride. With 5 icons, the rail
+// center sits on the middle icon (News). Formula: (i - 2) * 42.
 const ICON_OFFSET: Record<SheetKey, number> = {
-  reminders: -63,
-  stocks:    -21,
-  news:       21,
-  weather:    63,
+  reminders: -84,
+  stocks:    -42,
+  news:        0,
+  weather:    42,
+  wardrobe:   84,
 };
 
 export function SheetPanel({

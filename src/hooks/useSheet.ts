@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 
-export type SheetKey = 'reminders' | 'stocks' | 'news' | 'weather';
+export type SheetKey = 'reminders' | 'stocks' | 'news' | 'weather' | 'wardrobe';
 
 /**
  * Imperative API around an externally-owned `activeWidget` state.

@@ -1,6 +1,27 @@
+# dependencies
 node_modules/
+
+# build output
+#   electron-vite  -> dist/  (and out/ if the config ever changes)
+#   electron-builder -> release/  (installers, .exe/.dmg/.AppImage, blockmaps)
 dist/
+out/
+release/
+
+# NOTE: build/ is NOT ignored — it holds the app icon (build/icon.*),
+# which is source and must be committed so a fresh clone can package.
+
+# env / secrets
 *.env
+
+# logs
+*.log
+
+# OS / tooling cruft
 .DS_Store
 Thumbs.db
 .claude/
+build/resources/uv/
+
+# Apple Developer ID certificates — keychain-only, never committed.
+*.cer

@@ -148,16 +148,34 @@ export function ConnectionsStep({
 
   const provider = getProvider(values.llm_provider);
 
-  // Fetch Ollama models once on mount AND any time the user picks the
-  // Ollama provider, so newly-pulled models appear without a wizard
-  // remount. Best-effort: if soul is offline we just show an empty list.
+  // Fetch Ollama models when the user picks the Ollama provider. If
+  // the first attempt returns nothing (race with soul's reachable
+  // probe, daemon briefly slow, etc.), retry once after 800ms before
+  // giving up — soul's startup probe takes ~300ms and the cache fills
+  // a hair later. Without this retry the wizard locks into the "No
+  // Ollama models found" placeholder even when models ARE installed.
+  // Best-effort throughout: if soul stays offline we render the empty
+  // state and the dropdown invites the user to pull a model.
   useEffect(() => {
     if (provider?.id !== 'ollama') return;
     let cancelled = false;
     setOllamaLoading(true);
-    fetchOllamaModels()
-      .then((list) => { if (!cancelled) setOllamaModels(list); })
-      .finally(() => { if (!cancelled) setOllamaLoading(false); });
+    const attempt = async (): Promise<void> => {
+      const list = await fetchOllamaModels();
+      if (cancelled) return;
+      if (list.length > 0) {
+        setOllamaModels(list);
+        return;
+      }
+      // First attempt empty — wait + retry once. Avoids the empty
+      // state when the only cause was timing.
+      await new Promise(r => setTimeout(r, 800));
+      if (cancelled) return;
+      const retry = await fetchOllamaModels();
+      if (cancelled) return;
+      setOllamaModels(retry);
+    };
+    attempt().finally(() => { if (!cancelled) setOllamaLoading(false); });
     return () => { cancelled = true; };
   }, [provider?.id]);
 

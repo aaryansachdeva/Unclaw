@@ -1,6 +1,6 @@
 {
   "name": "unclaw",
-  "version": "1.0.3",
+  "version": "1.0.9",
   "description": "Unclaw",
   "main": "dist/electron/main.js",
   "scripts": {
@@ -9,6 +9,9 @@
     "preview": "electron-vite preview",
     "start": "electron .",
     "dist:win": "electron-vite build && electron-builder --win nsis",
+    "dist:mac": "electron-vite build && electron-builder --mac --arm64",
+    "dist:mac:unsigned": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64",
+    "dist:linux": "electron-vite build && electron-builder --linux",
     "dist": "npm run dist:win"
   },
   "keywords": [],
@@ -18,11 +21,38 @@
     "appId": "app.unclaw.unclaw",
     "productName": "Unclaw",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "dist/**/*",
       "package.json"
+    ],
+    "afterSign": "scripts/notarize.js",
+    "afterAllArtifactBuild": "scripts/notarize-dmg.js",
+    "extraResources": [
+      {
+        "from": "../soul",
+        "to": "soul-src",
+        "filter": [
+          "run_soul.sh",
+          "pyproject.toml",
+          "requirements-mac.txt",
+          "soul/**/*",
+          "!soul/__pycache__/**",
+          "!soul/**/__pycache__/**",
+          "!soul/data/**",
+          "!**/.venv/**",
+          "!**/*.pyc",
+          "!**/*.pyo",
+          "!**/.DS_Store"
+        ]
+      },
+      {
+        "from": "build/resources/uv",
+        "to": "uv",
+        "filter": ["uv", "uvx"]
+      }
     ],
     "win": {
       "target": [
@@ -44,6 +74,47 @@
       "shortcutName": "Unclaw",
       "uninstallDisplayName": "Unclaw",
       "include": null
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["arm64"] },
+        { "target": "zip", "arch": ["arm64"] }
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.productivity",
+      "artifactName": "Unclaw-${version}-${arch}.${ext}",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "identity": "Aryan Sachdeva (9JPN4E9MJK)",
+      "notarize": false,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Unclaw uses the microphone for voice conversations with your AI companion.",
+        "NSCameraUsageDescription": "Unclaw can optionally use the camera to share visual context with your AI companion.",
+        "NSAppleEventsUsageDescription": "Unclaw uses Apple Events to coordinate its streaming sub-process.",
+        "NSHighResolutionCapable": true,
+        "LSUIElement": false
+      }
+    },
+    "dmg": {
+      "title": "Unclaw ${version}",
+      "iconSize": 96,
+      "window": { "width": 540, "height": 380 },
+      "contents": [
+        { "x": 130, "y": 200, "type": "file" },
+        { "x": 410, "y": 200, "type": "link", "path": "/Applications" }
+      ]
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64", "arm64"] },
+        { "target": "deb", "arch": ["x64", "arm64"] }
+      ],
+      "icon": "build/icon.png",
+      "category": "Utility",
+      "maintainer": "Foton Labs",
+      "artifactName": "Unclaw ${version} ${arch}.${ext}"
     }
   },
   "dependencies": {
@@ -58,6 +129,7 @@
     "three": "^0.184.0"
   },
   "devDependencies": {
+    "@electron/notarize": "^2.5.0",
     "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^25.5.2",
     "@types/react": "^19.2.14",

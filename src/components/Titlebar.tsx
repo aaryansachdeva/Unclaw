@@ -33,6 +33,20 @@ interface TitlebarUser {
 }
 
 interface TitlebarProps {
+  /** Minimal-chrome mode for full-screen modes like Customization.
+   *  Hides the profile cluster and UNCLAW wordmark; keeps only the
+   *  pin / minimize / close window controls so the user can still
+   *  manage the window without the identity chrome competing with
+   *  the overlay's own UI. */
+  minimalMode?: boolean;
+  /** Replacement content for the left slot when minimalMode is on
+   *  (where the profile button normally sits). Used by Customization
+   *  to drop a Back button into the same DOM subtree as the working
+   *  right-side window controls, so its click reliably wins over the
+   *  Titlebar's drag region (which can't be defeated by z-index
+   *  alone — WebkitAppRegion hit-testing operates at a different
+   *  layer than CSS stacking). */
+  leftSlot?: React.ReactNode;
   /** When true, the chrome shows a "Reconnecting…" banner under the
    *  bar — used while the pixel stream is dropped. */
   showReconnecting?: boolean;
@@ -90,6 +104,8 @@ export function Titlebar({
   onResetAccount,
   onResetSession,
   workspaceWidth,
+  minimalMode = false,
+  leftSlot,
 }: TitlebarProps) {
   const reduce = useReducedMotion() ?? false;
   const [pinned, setPinned] = useState(true);
@@ -164,7 +180,24 @@ export function Titlebar({
               guest mode (generic UserCircle icon). Both surface the
               same "Reset all data" row; the auth-state row swaps
               between Sign out (signed in) and Sign in (guest). */}
-          {(user || guestMode) ? (
+          {minimalMode ? (
+            // Customization mode: hide the profile cluster. If a
+            // leftSlot was provided, render it here (the no-drag
+            // wrapper means clicks work — same plumbing as the
+            // right-side window controls below). Otherwise a 36×36
+            // spacer keeps the right cluster anchored.
+            leftSlot ? (
+              <div
+                style={{
+                  WebkitAppRegion: 'no-drag',
+                } as React.CSSProperties}
+              >
+                {leftSlot}
+              </div>
+            ) : (
+              <div style={{ width: 36, height: 36 }} />
+            )
+          ) : (user || guestMode) ? (
             <div
               ref={profileWrapRef}
               style={{
@@ -525,8 +558,10 @@ export function Titlebar({
               (not the window center) so it stays visually centered
               over the streamed face even when the chat pane opens
               and the workspace shrinks. Falls back to the original
-              centered flex slot when workspaceWidth isn't provided. */}
-          {workspaceWidth !== undefined ? (
+              centered flex slot when workspaceWidth isn't provided.
+              Hidden in minimal-mode so the overlay's content has
+              clean breathing room at the top. */}
+          {minimalMode ? null : workspaceWidth !== undefined ? (
             <span
               aria-hidden="false"
               style={{

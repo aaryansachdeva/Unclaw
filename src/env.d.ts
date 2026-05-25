@@ -48,6 +48,70 @@ interface ElectronAPI {
   apiKeysSet: (payload: string) => Promise<boolean>;
   /** Wipe the persisted blob. */
   apiKeysClear: () => Promise<boolean>;
+
+  // Soul subprocess lifecycle — main spawns (or attaches to) soul on
+  // app start. The LoadingScreen subscribes to `onLog` to render boot
+  // progress; the App subscribes to `onReady` to dismiss the loader
+  // and mount the pixel-streaming connection.
+  soul: {
+    /** One-shot snapshot. Returns whether soul is already ready
+     *  + the recent log buffer. Call on mount so the boot screen
+     *  hydrates from past state instead of waiting forever on
+     *  events that already fired. */
+    getStatus: () => Promise<{
+      ready: boolean;
+      recentLogs: { stream: 'stdout' | 'stderr' | 'meta'; line: string }[];
+      elapsedMs: number;
+    }>;
+    /** Subscribe to soul stdout/stderr/meta lines. Returns unsubscribe. */
+    onLog: (
+      cb: (data: { stream: 'stdout' | 'stderr' | 'meta'; line: string }) => void,
+    ) => () => void;
+    /** Fired ONCE when soul prints its READY banner. */
+    onReady: (cb: () => void) => () => void;
+    /** Fired if soul exits (clean or crashed). */
+    onExit: (
+      cb: (data: { code: number | null; signal: string | null }) => void,
+    ) => () => void;
+  };
+
+  // First-run setup pipeline — provisions the per-user runtime
+  // (Python venv, downloaded UE app, downloaded model assets) on a
+  // packaged install. In dev, getStatus returns isComplete=true and
+  // the wizard never mounts.
+  setup: {
+    /** Snapshot for hydration on mount. Same replay pattern as
+     *  soul.getStatus — without it, a wizard remount mid-pipeline
+     *  loses all events that already fired. */
+    getStatus: () => Promise<{
+      isComplete: boolean;
+      releaseTag: string;
+      stage: {
+        id: 'preflight' | 'runtime' | 'unreal' | 'models' | 'complete' | 'failed';
+        progress: number | null;
+        headline: string;
+        detail?: string;
+      };
+      recentLogs: { stream: 'stdout' | 'stderr' | 'meta'; line: string }[];
+      lastError: string | null;
+    }>;
+    /** Kick the pipeline. Idempotent — re-calling while it's running
+     *  is a no-op. Resolves with true on success, false on failure. */
+    start: () => Promise<boolean>;
+    /** Subscribe to per-line log output from each stage. */
+    onLog: (
+      cb: (data: { stream: 'stdout' | 'stderr' | 'meta'; line: string }) => void,
+    ) => () => void;
+    /** Subscribe to stage transitions + progress updates. */
+    onStage: (
+      cb: (data: {
+        id: 'preflight' | 'runtime' | 'unreal' | 'models' | 'complete' | 'failed';
+        progress: number | null;
+        headline: string;
+        detail?: string;
+      }) => void,
+    ) => () => void;
+  };
 }
 
 interface Window {

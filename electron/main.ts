@@ -17,6 +17,8 @@ import {
 import path from 'path';
 import fs from 'fs';
 import { LOGO_BASE64 } from './oauthLogo';
+import { startSoul, stopSoul, getSoulSnapshot } from './soulSupervisor';
+import { getSetupSnapshot, runSetup } from './setupCoordinator';
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -450,6 +452,26 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 
+  // Devtools shortcut for packaged builds. Cmd+Alt+Shift+I on macOS opens
+  // detached devtools so we can inspect WebRTC peer state, console errors,
+  // and the React tree on user machines without rebuilding the whole DMG
+  // each time something goes wrong in the field. Packaged builds normally
+  // don't surface devtools at all — this shortcut adds the escape hatch.
+  mainWindow.webContents.on('before-input-event', (_event, input) => {
+    const isToggle =
+      (input.meta || input.control) &&
+      input.alt &&
+      input.shift &&
+      input.key.toLowerCase() === 'i';
+    if (!isToggle) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.webContents.isDevToolsOpened()) {
+      mainWindow.webContents.closeDevTools();
+    } else {
+      mainWindow.webContents.openDevTools({ mode: 'detach' });
+    }
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -482,6 +504,25 @@ function createTray() {
 // IPC handlers for window controls from renderer
 ipcMain.on('window:minimize', () => mainWindow?.minimize());
 ipcMain.on('window:close', () => app.quit());
+
+// Renderer can ask for a SNAPSHOT of soul state. Used by SoulBootScreen
+// on mount (and on every re-mount after a Cmd-R / hot reload) so it
+// hydrates with whatever log lines + ready-status already happened
+// before React was alive. Without this, refreshing the renderer mid-
+// session left the boot screen stuck on "listening for soul…" forever
+// because the IPC events had already fired into the void.
+ipcMain.handle('soul:get-status', () => getSoulSnapshot());
+
+// First-run setup pipeline. SetupWizard subscribes to 'setup:log' +
+// 'setup:stage' for live progress; getStatus is the snapshot for
+// hydration on mount (parallel to soul:get-status). start is what the
+// wizard calls when it mounts to kick the pipeline — idempotent on the
+// coordinator side, safe to call multiple times.
+ipcMain.handle('setup:get-status', () => getSetupSnapshot());
+ipcMain.handle('setup:start', async () => {
+  if (!mainWindow) return false;
+  return runSetup(mainWindow);
+});
 ipcMain.on('window:toggle-pin', (_event, pinned: boolean) => {
   // Same level as the createWindow setup — 'screen-saver' is the
   // highest standard level and survives full-screen apps stealing
@@ -983,14 +1024,33 @@ app.whenReady().then(() => {
 
   createWindow();
   createTray();
+
+  // Launch (or attach to) soul AFTER the main window exists so the
+  // renderer can subscribe to 'soul:log' events from the first stdout
+  // line. Streaming starts in the background; the React side renders
+  // a LoadingScreen until it receives the 'soul:ready' IPC event.
+  if (mainWindow) {
+    startSoul(mainWindow).catch((err) => {
+      console.warn('[unclaw] startSoul failed:', err);
+    });
+  }
 });
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  // SIGTERM the soul subprocess. Soul's shutdown hooks (UE SIGTERM,
+  // MCP subprocess teardown) run cleanly. No-op if soul was attached
+  // externally (the user owns that process and we don't kill it).
+  stopSoul();
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // Unclaw is a single-window foreground experience, not a typical
+  // Mac menubar/background app. Closing the window means the user is
+  // done — quit the whole app so `will-quit` fires and `stopSoul()`
+  // can SIGTERM the soul subprocess. Without this, on macOS the app
+  // stayed alive with no window and soul + UE leaked across sessions.
+  app.quit();
 });
 
 app.on('activate', () => {

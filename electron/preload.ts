@@ -79,4 +79,101 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('apiKeys:set', payload),
   apiKeysClear: (): Promise<boolean> =>
     ipcRenderer.invoke('apiKeys:clear'),
+
+  // ----------------------------------------------------------------------
+  // Soul lifecycle — main spawns (or attaches to) soul on app start and
+  // streams stdout/stderr lines through 'soul:log' until the boot
+  // marker fires 'soul:ready'. The LoadingScreen subscribes to log;
+  // App.tsx subscribes to ready to gate the main UI (and therefore the
+  // pixel-streaming connection, which would fail against an unstarted
+  // signaling server otherwise).
+  soul: {
+    /** One-shot snapshot of the current soul state. Used by the
+     *  boot screen on mount/refresh to hydrate before subscribing
+     *  to future log events — otherwise a Cmd-R after soul booted
+     *  leaves the screen waiting on events that already fired. */
+    getStatus: (): Promise<{
+      ready: boolean;
+      recentLogs: { stream: 'stdout' | 'stderr' | 'meta'; line: string }[];
+      elapsedMs: number;
+    }> => ipcRenderer.invoke('soul:get-status'),
+    onLog: (
+      cb: (data: { stream: 'stdout' | 'stderr' | 'meta'; line: string }) => void,
+    ): (() => void) => {
+      const handler = (
+        _evt: IpcRendererEvent,
+        data: { stream: 'stdout' | 'stderr' | 'meta'; line: string },
+      ) => cb(data);
+      ipcRenderer.on('soul:log', handler);
+      return () => ipcRenderer.removeListener('soul:log', handler);
+    },
+    onReady: (cb: () => void): (() => void) => {
+      const handler = () => cb();
+      ipcRenderer.on('soul:ready', handler);
+      return () => ipcRenderer.removeListener('soul:ready', handler);
+    },
+    onExit: (
+      cb: (data: { code: number | null; signal: NodeJS.Signals | null }) => void,
+    ): (() => void) => {
+      const handler = (
+        _evt: IpcRendererEvent,
+        data: { code: number | null; signal: NodeJS.Signals | null },
+      ) => cb(data);
+      ipcRenderer.on('soul:exit', handler);
+      return () => ipcRenderer.removeListener('soul:exit', handler);
+    },
+  },
+
+  // ----------------------------------------------------------------------
+  // First-run setup pipeline — provisions the runtime under
+  // ~/Library/Application Support/Unclaw/runtime/ on a packaged install
+  // (downloads UE app, creates Python venv, fetches model assets). The
+  // SetupWizard subscribes to onLog/onStage for live progress; start()
+  // triggers the pipeline. In dev / unpackaged renderers, getStatus
+  // returns isComplete=true and the gate immediately falls through.
+  setup: {
+    getStatus: (): Promise<{
+      isComplete: boolean;
+      releaseTag: string;
+      stage: {
+        id: 'preflight' | 'runtime' | 'unreal' | 'models' | 'complete' | 'failed';
+        progress: number | null;
+        headline: string;
+        detail?: string;
+      };
+      recentLogs: { stream: 'stdout' | 'stderr' | 'meta'; line: string }[];
+      lastError: string | null;
+    }> => ipcRenderer.invoke('setup:get-status'),
+    start: (): Promise<boolean> => ipcRenderer.invoke('setup:start'),
+    onLog: (
+      cb: (data: { stream: 'stdout' | 'stderr' | 'meta'; line: string }) => void,
+    ): (() => void) => {
+      const handler = (
+        _evt: IpcRendererEvent,
+        data: { stream: 'stdout' | 'stderr' | 'meta'; line: string },
+      ) => cb(data);
+      ipcRenderer.on('setup:log', handler);
+      return () => ipcRenderer.removeListener('setup:log', handler);
+    },
+    onStage: (
+      cb: (data: {
+        id: 'preflight' | 'runtime' | 'unreal' | 'models' | 'complete' | 'failed';
+        progress: number | null;
+        headline: string;
+        detail?: string;
+      }) => void,
+    ): (() => void) => {
+      const handler = (
+        _evt: IpcRendererEvent,
+        data: {
+          id: 'preflight' | 'runtime' | 'unreal' | 'models' | 'complete' | 'failed';
+          progress: number | null;
+          headline: string;
+          detail?: string;
+        },
+      ) => cb(data);
+      ipcRenderer.on('setup:stage', handler);
+      return () => ipcRenderer.removeListener('setup:stage', handler);
+    },
+  },
 });
