@@ -80,11 +80,6 @@ interface TitlebarProps {
    *  the SettingsPanel modal where users can reconfigure LLM, TTS,
    *  agentic, and graphics settings post-onboarding. */
   onOpenSettings?: () => void;
-  /** Width of the workspace area in pixels — i.e. window width minus
-   *  any open chat pane. Used to keep the UNCLAW wordmark centered
-   *  over the visible stream view rather than the whole window. When
-   *  omitted, the wordmark falls back to its old flex-centered slot. */
-  workspaceWidth?: number;
 }
 
 function userInitials(user: TitlebarUser): string {
@@ -108,7 +103,6 @@ export function Titlebar({
   onResetAccount,
   onResetSession,
   onOpenSettings,
-  workspaceWidth,
   minimalMode = false,
   leftSlot,
 }: TitlebarProps) {
@@ -162,6 +156,18 @@ export function Titlebar({
     }
   }, [profileOpen]);
 
+  // macOS-only: reserve space on the left for the native NSWindow traffic
+  // lights (close + min + full-screen) that main.ts surfaces via
+  // titleBarStyle:'hidden' + trafficLightPosition:{x:12,y:12}. The lights
+  // span ~70px starting at x=12 → end at x=82; padding-left=88 gives 6px
+  // breathing room before the profile cluster starts.
+  const isMacPlatform =
+    typeof navigator !== 'undefined' &&
+    /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+  const titlebarPadding = isMacPlatform
+    ? '12px 16px 28px 88px'
+    : '12px 16px 28px 16px';
+
   return (
     <>
       <motion.div
@@ -172,10 +178,18 @@ export function Titlebar({
         style={{
           WebkitAppRegion: 'drag',
           background: 'linear-gradient(to bottom, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.2) 60%, transparent 100%)',
-          padding: '12px 16px 28px 16px',
+          padding: titlebarPadding,
         } as React.CSSProperties}
       >
-        <div className="flex items-center justify-between">
+        {/* macOS: flex-direction row-reverse swaps the left/right clusters
+            so the profile (was on left) lands on the right edge, and the
+            pin button (was on right) lands just past the native traffic
+            lights on the left. The absolutely-positioned wordmark in the
+            middle is unaffected by the flex direction flip. */}
+        <div
+          className="flex items-center justify-between"
+          style={isMacPlatform ? { flexDirection: 'row-reverse' } : undefined}
+        >
           {/* Left side — profile cluster (was on the right; gear was
               here previously). Bigger now so it reads as a primary
               identity affordance, not a chrome button. The dropdown
@@ -207,9 +221,59 @@ export function Titlebar({
               ref={profileWrapRef}
               style={{
                 position: 'relative',
+                // Flex so the macOS-only pin button can sit visually
+                // next to the avatar inside the same wrapper (keeps the
+                // popover's position:absolute anchor on the avatar's
+                // wrapper without affecting positioning).
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
                 WebkitAppRegion: 'no-drag',
               } as React.CSSProperties}
             >
+              {/* macOS-only: pin button rides INSIDE the profile cluster
+                  so it lives on the right edge of the chrome (next to
+                  the avatar) instead of getting orphaned on the left
+                  next to the traffic lights. On Windows/Linux the pin
+                  stays in the right-cluster buttons array below. */}
+              {isMacPlatform && (
+                <motion.button
+                  type="button"
+                  whileTap={reduce ? undefined : { scale: 0.88 }}
+                  onClick={handlePin}
+                  aria-label={pinned ? 'Unpin from top' : 'Pin to top'}
+                  title={pinned ? 'Unpin from top' : 'Pin to top'}
+                  className="glass-btn"
+                  style={{
+                    width: 26,
+                    height: 26,
+                    borderRadius: 8,
+                    background: pinned
+                      ? 'rgba(255, 255, 255, 0.18)'
+                      : 'rgba(255, 255, 255, 0.06)',
+                    transition: 'background 180ms var(--ease-out-quart)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: 0,
+                    border: 'none',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = pinned
+                      ? 'rgba(255, 255, 255, 0.26)'
+                      : 'rgba(255, 255, 255, 0.12)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = pinned
+                      ? 'rgba(255, 255, 255, 0.18)'
+                      : 'rgba(255, 255, 255, 0.06)';
+                  }}
+                >
+                  {pinned
+                    ? <Pin size={14} color="#ffffff" strokeWidth={2.2} />
+                    : <PinOff size={14} color="var(--text-secondary)" strokeWidth={2} />}
+                </motion.button>
+              )}
               <motion.button
                 type="button"
                 whileTap={reduce ? undefined : { scale: 0.92 }}
@@ -290,9 +354,13 @@ export function Titlebar({
                     style={{
                       position: 'absolute',
                       top: 42,
-                      // Anchored LEFT now that the avatar lives on the
-                      // left side of the chrome.
-                      left: 0,
+                      // Anchor side depends on which edge the profile
+                      // cluster lives on. macOS: profile is on the right
+                      // edge (row-reverse flex) — popover anchors right:0
+                      // so it grows to the LEFT and doesn't clip off the
+                      // window edge. Windows/Linux: profile on the left —
+                      // popover anchors left:0 so it grows to the right.
+                      ...(isMacPlatform ? { right: 0 } : { left: 0 }),
                       minWidth: 240,
                       padding: 6,
                       borderRadius: 12,
@@ -584,47 +652,9 @@ export function Titlebar({
             <div style={{ width: 36, height: 36 }} />
           )}
 
-          {/* Wordmark — pinned absolutely to the WORKSPACE center
-              (not the window center) so it stays visually centered
-              over the streamed face even when the chat pane opens
-              and the workspace shrinks. Falls back to the original
-              centered flex slot when workspaceWidth isn't provided.
-              Hidden in minimal-mode so the overlay's content has
-              clean breathing room at the top. */}
-          {minimalMode ? null : workspaceWidth !== undefined ? (
-            <span
-              aria-hidden="false"
-              style={{
-                position: 'absolute',
-                // Vertically aligned with the gear / right-cluster
-                // buttons. Titlebar padding is 12px top + ~26px
-                // button height, so the row's center sits at y≈25.
-                top: 25,
-                left: workspaceWidth / 2,
-                transform: 'translate(-50%, -50%)',
-                fontSize: 11,
-                fontWeight: 600,
-                letterSpacing: '0.18em',
-                color: 'rgba(255,255,255,0.4)',
-                pointerEvents: 'none',
-                whiteSpace: 'nowrap',
-                transition: 'left 0.32s cubic-bezier(0.16, 1, 0.3, 1)',
-              }}
-            >
-              UNCLAW
-            </span>
-          ) : (
-            <span
-              style={{
-                fontSize: 11,
-                fontWeight: 600,
-                letterSpacing: '0.18em',
-                color: 'rgba(255,255,255,0.4)',
-              }}
-            >
-              UNCLAW
-            </span>
-          )}
+          {/* Wordmark removed by request — the dock icon + app name in
+              the menu bar are sufficient brand presence; the centered
+              text was crowding the streamed face. */}
 
           <div
             className="flex items-center"
@@ -633,11 +663,21 @@ export function Titlebar({
             {/* Profile cluster moved to the LEFT (above). Right side
                 only carries OS-style window controls now. */}
 
-            {([
-              { action: handlePin, label: pinned ? 'Unpin from top' : 'Pin to top', icon: 'pin' as const },
-              { action: () => window.electronAPI?.minimize(), label: 'Minimize', icon: 'min' as const },
-              { action: () => window.electronAPI?.close(), label: 'Close', icon: 'close' as const },
-            ]).map(({ action, label, icon }, i) => (
+            {(() => {
+              // On macOS the real NSWindow traffic lights (close + min +
+              // full-screen) ride in the top-left via main.ts's
+              // titleBarStyle:'hidden' and the `pin` button moved into
+              // the profile cluster on the right. This cluster ends up
+              // empty on macOS — kept around as a no-op placeholder so
+              // the row-reverse flex's spacing math stays consistent.
+              // Windows + Linux keep the full pin/min/close trio.
+              if (isMacPlatform) return [];
+              return [
+                { action: handlePin, label: pinned ? 'Unpin from top' : 'Pin to top', icon: 'pin' as const },
+                { action: () => window.electronAPI?.minimize(), label: 'Minimize', icon: 'min' as const },
+                { action: () => window.electronAPI?.close(), label: 'Close', icon: 'close' as const },
+              ];
+            })().map(({ action, label, icon }, i) => (
               <motion.button
                 key={icon}
                 initial={reduce ? { opacity: 1 } : { opacity: 0 }}

@@ -29,6 +29,7 @@ import {
   modelSupportsVision,
   isOptimizedLocalModel,
   validateKeys,
+  filterChatModels,
   type ApiKeysProfile,
   type AgenticProvider,
   type KeyValidationResult,
@@ -146,7 +147,41 @@ export function ConnectionsStep({
     networkError: string | null;
   }>({ state: 'idle', result: null, networkError: null });
 
+  // Live model lists per provider, populated from soul's /validate_keys
+  // probe (which now returns the provider's /v1/models output). Lets the
+  // dropdown swap from the baked catalog to the user's actual accessible
+  // models the moment their key validates — same pattern SettingsPanel
+  // uses. Keyed by provider so toggling providers preserves any list the
+  // user already verified this session.
+  const [liveModelsByProvider, setLiveModelsByProvider] = useState<
+    Partial<Record<LLMProviderId, string[]>>
+  >({});
+
   const provider = getProvider(values.llm_provider);
+
+  // Debounced live key-probe — same pattern as SettingsPanel. Fires
+  // /validate_keys 800 ms after the user stops typing the key, so the
+  // model dropdown re-populates with the live list without needing the
+  // explicit "Check keys" button. Errors are swallowed (the button still
+  // surfaces them on demand).
+  useEffect(() => {
+    const pid = values.llm_provider;
+    const key = (values.llm_api_key || '').trim();
+    if (!pid || pid === 'ollama' || !key) return;
+    if (liveModelsByProvider[pid]?.length) return;
+    const t = setTimeout(() => {
+      void validateKeys(values).then((res) => {
+        if (res.llm.ok && res.llm.models && res.llm.models.length) {
+          setLiveModelsByProvider((prev) => ({
+            ...prev,
+            [pid]: res.llm.models,
+          }));
+        }
+      }).catch(() => { /* surfaced on Check */ });
+    }, 800);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [values.llm_provider, values.llm_api_key]);
 
   // Fetch Ollama models when the user picks the Ollama provider. If
   // the first attempt returns nothing (race with soul's reachable
@@ -198,18 +233,26 @@ export function ConnectionsStep({
         };
       });
     }
-    // Cloud providers — surface Vision on the curated catalog too.
-    return (provider?.models ?? []).map((m) => {
+    // Live-only model list. No baked fallback — once the user's key
+    // validates, soul returns the provider's own /v1/models output and
+    // we render it directly (filtered to chat-capable ids). Empty list
+    // until validation lands → the dropdown stays disabled with a
+    // helpful placeholder downstream.
+    const pid = provider?.id;
+    if (!pid) return [];
+    const rawLive = liveModelsByProvider[pid] ?? [];
+    return filterChatModels(pid, rawLive).map((rawId) => {
+      const fullId = `${pid}:${rawId}`;
       const badges: string[] = [];
-      if (modelSupportsVision(m.id)) badges.push('Vision');
+      if (modelSupportsVision(fullId)) badges.push('Vision');
       return {
-        id: m.id,
-        label: m.label,
-        hint: m.hint,
+        id: fullId,
+        label: rawId,
+        hint: undefined as string | undefined,
         badges: badges.length > 0 ? badges : undefined,
       };
     });
-  }, [provider, ollamaModels]);
+  }, [provider, ollamaModels, liveModelsByProvider]);
 
   const setProvider = (id: LLMProviderId | '') => {
     if (!id) {
@@ -440,7 +483,7 @@ export function ConnectionsStep({
             <Dropdown
               value={values.llm_model ?? ''}
               onChange={setModel}
-              disabled={!provider || (provider.dynamicModels && models.length === 0)}
+              disabled={!provider || models.length === 0}
               placeholder={
                 !provider
                   ? 'Pick a provider first'
@@ -448,7 +491,11 @@ export function ConnectionsStep({
                     ? (ollamaLoading
                         ? 'Looking for installed models…'
                         : 'No Ollama models found, run `ollama pull <name>`')
-                    : 'Choose a model'
+                    : provider.requiresApiKey && !values.llm_api_key?.trim()
+                      ? 'Enter your key first'
+                      : models.length === 0
+                        ? 'Verifying key…'
+                        : 'Choose a model'
               }
               options={models.map((m) => ({
                 id: m.id,
@@ -456,6 +503,7 @@ export function ConnectionsStep({
                 hint: m.hint,
                 badges: (m as { badges?: ReadonlyArray<string> }).badges,
               }))}
+              searchable
             />
           </FieldLabel>
         </div>
@@ -1466,28 +1514,34 @@ function AgenticSection({
         title="Enable agentic features"
         helper={values.agentic_enabled
           ? (isLocal
-              ? 'Lets the assistant browse, search, and use tools for harder questions. Runs locally on your Ollama model — no API key.'
+              ? 'Lets the assistant browse, search, and use tools for harder questions. Runs locally on your Ollama model, no API key.'
               : 'Lets the assistant browse, search, and use tools for harder questions. Uses an OpenAI model for the agentic loop.')
           : (canRunLocal
-              ? 'Off by default. Turn on for live web search, page-reading, and multi-step research. Runs locally on your Ollama model — or pick OpenAI.'
+              ? 'Off by default. Turn on for live web search, page-reading, and multi-step research. Runs locally on your Ollama model, or pick OpenAI.'
               : 'Off by default. Turn on for live web search, page-reading, and multi-step research. Needs an OpenAI key.')}
         dimWhen={!values.agentic_enabled}
       />
 
       {values.agentic_enabled && (
         <>
-          {canRunLocal && (
-            <FieldLabel text="Agentic backend">
-              <Dropdown
-                value={values.agentic_provider}
-                onChange={(v) => setBackend((v as AgenticProvider) || 'openai')}
-                options={[
-                  { id: 'ollama', label: 'Local (Ollama)',   hint: 'no API key' },
-                  { id: 'openai', label: 'Cloud (OpenAI)',   hint: 'needs key' },
-                ]}
-              />
-            </FieldLabel>
-          )}
+          {/* Backend picker. Shows all supported agentic providers; the
+              local Ollama option only appears when chat is also Ollama
+              + tools-capable (canRunLocal). Cloud providers are always
+              available since each ships its own native tool-loop in soul. */}
+          <FieldLabel text="Agentic backend">
+            <Dropdown
+              value={values.agentic_provider}
+              onChange={(v) => setBackend((v as AgenticProvider) || 'openai')}
+              options={[
+                { id: 'openai',    label: 'OpenAI',           hint: 'Responses API' },
+                { id: 'anthropic', label: 'Anthropic Claude', hint: 'Messages API' },
+                { id: 'gemini',    label: 'Google Gemini',    hint: 'functionDeclarations' },
+                ...(canRunLocal
+                  ? [{ id: 'ollama', label: 'Local (Ollama)', hint: 'no API key' }]
+                  : []),
+              ]}
+            />
+          </FieldLabel>
 
           {!isLocal && chatIsOpenAI && (
             <Toggle
@@ -1501,36 +1555,75 @@ function AgenticSection({
             />
           )}
 
-          {!isLocal && !effectiveReuse && (
-            <FieldLabel
-              text="Agentic model"
-              trailing={!chatIsOpenAI ? (
-                <SignupLink href="https://platform.openai.com/api-keys" />
-              ) : null}
-            >
-              <Dropdown
-                value={values.agentic_model ?? ''}
-                onChange={setModel}
-                placeholder="Choose a model"
-                options={AGENTIC_OPENAI_MODELS.map((m) => ({
-                  id: m.id, label: m.label, hint: m.hint,
-                }))}
-              />
-            </FieldLabel>
-          )}
+          {!isLocal && !effectiveReuse && (() => {
+            // Per-provider key + model copy. Each provider's escalation
+            // runner in soul accepts the user's agentic_api_key directly;
+            // the only differences are the placeholder + signup URL.
+            const provider = values.agentic_provider;
+            const meta: Record<string, { label: string; url: string; keyPh: string; modelPh: string }> = {
+              openai:    { label: 'OpenAI',    url: 'https://platform.openai.com/api-keys',         keyPh: 'sk-…',     modelPh: 'gpt-5.4-mini' },
+              anthropic: { label: 'Anthropic', url: 'https://console.anthropic.com/settings/keys', keyPh: 'sk-ant-…', modelPh: 'claude-opus-4-7' },
+              gemini:    { label: 'Google',    url: 'https://aistudio.google.com/apikey',          keyPh: 'AIza…',    modelPh: 'gemini-2.5-flash' },
+            };
+            const m = meta[provider] ?? meta.openai;
+            const isOpenAI = provider === 'openai';
+            return (
+              <>
+                <FieldLabel
+                  text="Agentic model"
+                  trailing={!chatIsOpenAI || !isOpenAI ? (
+                    <SignupLink href={m.url} />
+                  ) : null}
+                >
+                  {isOpenAI ? (
+                    <Dropdown
+                      value={values.agentic_model ?? ''}
+                      onChange={setModel}
+                      placeholder="Choose a model"
+                      options={AGENTIC_OPENAI_MODELS.map((mm) => ({
+                        id: mm.id, label: mm.label, hint: mm.hint,
+                      }))}
+                    />
+                  ) : (
+                    // Anthropic + Gemini live-model fetch isn't wired into
+                    // the agentic dropdown yet; for now accept a free-text
+                    // model id. Users can paste any model their key allows
+                    // (claude-opus-4-7, gemini-2.5-pro, etc.).
+                    <input
+                      type="text"
+                      placeholder={m.modelPh}
+                      value={values.agentic_model ?? ''}
+                      onChange={(e) => setModel(e.target.value)}
+                      style={{
+                        background: 'rgba(255, 255, 255, 0.04)',
+                        border: '1px solid var(--glass-border)',
+                        borderRadius: 10,
+                        color: 'var(--text-primary)',
+                        fontFamily: 'inherit',
+                        fontSize: 14,
+                        padding: '10px 12px',
+                        outline: 'none',
+                        width: '100%',
+                      }}
+                    />
+                  )}
+                </FieldLabel>
 
-          {!isLocal && !effectiveReuse && !chatIsOpenAI && (
-            <FieldLabel text="OpenAI API key">
-              <SecretInput
-                value={values.agentic_api_key ?? ''}
-                onChange={setKey}
-                placeholder="sk-…"
-                visible={showKey}
-                onToggleVisible={() => setShowKey((v) => !v)}
-                autoComplete="off"
-              />
-            </FieldLabel>
-          )}
+                {(!chatIsOpenAI || !isOpenAI) && (
+                  <FieldLabel text={`${m.label} API key`}>
+                    <SecretInput
+                      value={values.agentic_api_key ?? ''}
+                      onChange={setKey}
+                      placeholder={m.keyPh}
+                      visible={showKey}
+                      onToggleVisible={() => setShowKey((v) => !v)}
+                      autoComplete="off"
+                    />
+                  </FieldLabel>
+                )}
+              </>
+            );
+          })()}
 
           {/* Agentic thinking lever — shown when the effective agentic
               model supports reasoning. On the local path, that means
@@ -1787,7 +1880,7 @@ function Qwen3InstallPanel({
           {!vramOk && (
             <span style={{ fontSize: 11, color: 'var(--accent)' }}>
               Need {status?.min_free_vram_gb} GB free GPU memory;
-              {' '}only {status?.free_vram_gb} GB available — close UE
+              {' '}only {status?.free_vram_gb} GB available. Close UE
               / other GPU apps and re-check.
             </span>
           )}

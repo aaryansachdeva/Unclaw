@@ -14,15 +14,17 @@ export type LLMProviderId =
   | 'ollama'      // Local Ollama daemon — any locally-pulled model
   | 'deepseek'    // DeepSeek API (OpenAI-compatible) — deepseek-chat, -reasoner
   | 'openrouter'  // OpenRouter — one key, every cloud model (Claude/Gemini/etc.)
-  | 'xai';        // xAI Grok (OpenAI-compatible) — grok-2-latest, grok-beta
+  | 'xai'         // xAI Grok (OpenAI-compatible) — grok-2-latest, grok-beta
+  | 'anthropic'   // Anthropic Claude (OpenAI-compat shim) — claude-3.x family
+  | 'gemini';     // Google Gemini (OpenAI-compat shim) — gemini-2.x family
 
-/** Which backend runs the agentic / escalation loop. `'openai'` (default)
- *  uses the Responses API + gpt-5.4 family. `'ollama'` uses a local
- *  Chat-Completions tool loop on the SAME model the user picked for
- *  chat — no separate model dropdown, no OpenAI key required. The wizard
- *  only surfaces the local option when chat is a tools-capable Ollama
- *  model (see modelSupportsTools). */
-export type AgenticProvider = 'openai' | 'ollama';
+/** Which backend runs the agentic / escalation loop. Aliased to LLMProviderId
+ *  so any provider the user has a working chat key for can also drive
+ *  escalation. The actual tool-loop dispatch in soul currently supports
+ *  `openai` (Responses API) and `ollama` (native tool calls) fully; other
+ *  providers validate the key but escalation falls back to the chat path
+ *  without tools. UI surfaces all options; pick what your provider supports. */
+export type AgenticProvider = LLMProviderId;
 
 /** Per-tier thinking lever. Resolved per-family on the soul side:
  *  - 'none'   → omit `think` field; for Gemma 4 also omit the system-
@@ -203,32 +205,30 @@ export interface ProviderInfo {
 }
 
 
-/** Static catalog. Cloud providers list a curated handful of models;
- *  Ollama's list is fetched live from soul. Adding to this list also
- *  needs a matching `_select_provider` branch in soul/server.py. */
+/** Provider catalog. Cloud providers list NO baked models — the dropdown
+ *  populates from the live `/v1/models` response returned by soul's
+ *  `/validate_keys` once the user enters a working key. This eliminates the
+ *  stale-models problem and the dual-source maintenance burden.
+ *
+ *  Ollama is the one exception: its list comes from soul's
+ *  `GET /providers` (live `/api/tags` scan against the local daemon).
+ *
+ *  Adding a new provider here also requires a matching `_select_provider`
+ *  branch in soul/server.py. */
 export const LLM_PROVIDERS: ProviderInfo[] = [
   {
     id: 'groq',
     label: 'Groq',
     signupUrl: 'https://console.groq.com/keys',
     requiresApiKey: true,
-    models: [
-      { id: 'openai/gpt-oss-20b',       label: 'GPT-OSS 20B',     hint: 'fast' },
-      { id: 'qwen/qwen3-32b',           label: 'Qwen 3 32B' },
-      { id: 'llama-3.3-70b-versatile',  label: 'Llama 3.3 70B',   hint: 'smart' },
-    ],
+    models: [],
   },
   {
     id: 'openai',
     label: 'OpenAI',
     signupUrl: 'https://platform.openai.com/api-keys',
     requiresApiKey: true,
-    models: [
-      { id: 'openai:gpt-4o-mini',  label: 'GPT-4o mini',   hint: 'fast' },
-      { id: 'openai:gpt-4o',       label: 'GPT-4o',        hint: 'smart' },
-      { id: 'openai:gpt-5.4-mini', label: 'GPT-5.4 Mini' },
-      { id: 'openai:gpt-5.4-nano', label: 'GPT-5.4 Nano',  hint: 'fastest' },
-    ],
+    models: [],
   },
   {
     id: 'ollama',
@@ -242,47 +242,102 @@ export const LLM_PROVIDERS: ProviderInfo[] = [
     models: [],
   },
   // OpenAI-compatible providers — all share soul's `_openai_compatible_chat`.
-  // Adding a model here also requires adding it to ALLOWED_LLM_MODELS in
-  // soul/server.py so the per-request validation doesn't reject it.
   {
     id: 'deepseek',
     label: 'DeepSeek',
     signupUrl: 'https://platform.deepseek.com/api_keys',
     requiresApiKey: true,
-    models: [
-      { id: 'deepseek:deepseek-chat',     label: 'DeepSeek Chat',     hint: 'fast' },
-      { id: 'deepseek:deepseek-reasoner', label: 'DeepSeek Reasoner', hint: 'thinking' },
-    ],
+    models: [],
   },
   {
     id: 'openrouter',
     label: 'OpenRouter',
     signupUrl: 'https://openrouter.ai/keys',
     requiresApiKey: true,
-    models: [
-      // One OpenRouter key unlocks every cloud model. Curated shortlist;
-      // power users can paste a custom wire id in the future if we expose
-      // a free-text field. Wire-id format: "vendor/model".
-      { id: 'openrouter:anthropic/claude-3.5-haiku',         label: 'Claude 3.5 Haiku',    hint: 'fast' },
-      { id: 'openrouter:anthropic/claude-3.5-sonnet',        label: 'Claude 3.5 Sonnet',   hint: 'smart' },
-      { id: 'openrouter:google/gemini-2.0-flash-exp',        label: 'Gemini 2.0 Flash',    hint: 'fast' },
-      { id: 'openrouter:google/gemini-pro-1.5',              label: 'Gemini Pro 1.5' },
-      { id: 'openrouter:meta-llama/llama-3.3-70b-instruct',  label: 'Llama 3.3 70B' },
-      { id: 'openrouter:deepseek/deepseek-chat',             label: 'DeepSeek Chat' },
-      { id: 'openrouter:mistralai/mistral-large',            label: 'Mistral Large' },
-    ],
+    models: [],
   },
   {
     id: 'xai',
     label: 'xAI Grok',
     signupUrl: 'https://console.x.ai/',
     requiresApiKey: true,
-    models: [
-      { id: 'xai:grok-2-latest', label: 'Grok 2',    hint: 'smart' },
-      { id: 'xai:grok-beta',     label: 'Grok Beta' },
-    ],
+    models: [],
+  },
+  {
+    id: 'anthropic',
+    label: 'Anthropic Claude',
+    signupUrl: 'https://console.anthropic.com/settings/keys',
+    requiresApiKey: true,
+    models: [],
+  },
+  {
+    id: 'gemini',
+    label: 'Google Gemini',
+    signupUrl: 'https://aistudio.google.com/apikey',
+    requiresApiKey: true,
+    models: [],
   },
 ];
+
+
+/** Per-provider filter that strips non-chat models out of a raw
+ *  /v1/models response. OpenAI ships 100+ entries (embeddings, image,
+ *  audio, moderation) we never want in a chat picker. Each provider
+ *  has a slightly different naming convention so we gate per-id.
+ *
+ *  Returns the input id list filtered to chat-capable models, in the
+ *  same order. Unknown providers pass through untouched (best-effort:
+ *  trust the upstream list). */
+export function filterChatModels(
+  provider: LLMProviderId,
+  rawIds: readonly string[],
+): string[] {
+  const isChat = (id: string): boolean => {
+    const lower = id.toLowerCase();
+    switch (provider) {
+      case 'openai': {
+        // Reject obvious non-chat families. Accept gpt-* + o-series (o1, o3, o4)
+        // + chatgpt-* + anything explicitly named "chat".
+        const reject = [
+          'embedding', 'whisper', 'tts-', 'dall-e', 'davinci', 'babbage',
+          'ada', 'curie', 'moderation', 'omni-moderation', 'image-',
+          'gpt-image', 'computer-use', 'audio-preview', 'realtime',
+          'transcribe', 'codex',
+        ];
+        if (reject.some((r) => lower.includes(r))) return false;
+        return lower.startsWith('gpt-')
+          || /^o\d/.test(lower)
+          || lower.startsWith('chatgpt-')
+          || lower.includes('chat');
+      }
+      case 'anthropic':
+        return lower.startsWith('claude-');
+      case 'gemini': {
+        // Keep gemini-* generative; drop embeddings + AQA + image-only.
+        if (lower.includes('embedding') || lower.includes('aqa')) return false;
+        if (lower.includes('image-generation') || lower.includes('tts')) return false;
+        return lower.startsWith('gemini-');
+      }
+      case 'groq': {
+        // Groq hosts a small mix; drop the non-text models. Everything
+        // else routes through their chat endpoint.
+        const reject = ['whisper', 'tts', 'guard', 'embedding', 'distil'];
+        if (reject.some((r) => lower.includes(r))) return false;
+        return true;
+      }
+      case 'deepseek':
+        return lower.startsWith('deepseek-');
+      case 'xai':
+        return lower.startsWith('grok-');
+      case 'openrouter':
+        // OpenRouter routes everything; anything in /models is callable.
+        return true;
+      case 'ollama':
+        return true;
+    }
+  };
+  return rawIds.filter(isChat);
+}
 
 /** Set of provider ids the catalog currently supports. Used by
  *  fetchApiKeys to defensively reset stale `llm_provider` values
@@ -394,15 +449,24 @@ export interface ApiKeysProfile {
   chat_thinking_effort: ThinkingEffort;
   agentic_thinking_effort: ThinkingEffort;
   /** UE graphics quality preset. Surfaces in Settings as Low/Med/High
-   *  dropdown. Soul reads this and passes the matching CVar block as
-   *  ExecCmds when next launching UE. Change requires character restart
-   *  (the UI shows a "Restart character" toast).
+   *  dropdown. Soul reads this and patches `sg.ResolutionQuality` in
+   *  GameUserSettings.ini + merges extra CVars into ExecCmds when next
+   *  launching UE. Change requires character restart (the UI shows a
+   *  "Restart character" toast).
    *
-   *  - low (default): the current shipped settings — fits 2026-era M1+
-   *    laptops on battery.
-   *  - medium / high: TBD — Aryan will provide the CVar block. Currently
-   *    these dropdown values are stored but soul falls back to low until
-   *    the matching CVar block is wired in unreal_runtime.py. */
+   *  Resolution dimension is INDEPENDENT — the UE backbuffer dynamically
+   *  matches the streamed <video> element's pixel size (browser sends
+   *  Resolution.Width/Height on resize via ResizeObserver in
+   *  usePixelStreaming.ts). The tier only controls the internal render
+   *  percentage applied to that dynamic backbuffer.
+   *
+   *  - low (default): sg.ResolutionQuality=50 — half the backbuffer
+   *    internal render then upscale. Cheap. Fits M1+ on battery.
+   *  - medium: 75 + r.SSS.Quality 2 + bumped WebRTC bitrate band.
+   *  - high:   100 + r.SSS.Quality 3 + r.Shadow.MaxResolution 2048 +
+   *    further-bumped bitrate.
+   *
+   *  See soul/unreal_runtime.py:_GRAPHICS_PRESETS for the table. */
   graphics_quality: GraphicsQuality;
 }
 
@@ -584,6 +648,13 @@ export interface KeyValidationOutcome {
   ok: boolean;
   /** Human-readable error when ok=false. Safe to show inline. */
   error?: string;
+  /** Live model list returned by the provider's /v1/models endpoint when
+   *  the key validates. Populates the model dropdown without the user
+   *  having to wait for a separate fetch. Empty / undefined on parse
+   *  failure or for providers that don't expose a model list (Ollama,
+   *  TTS). Frontend falls back to the baked LLM_PROVIDERS catalog when
+   *  this is empty. */
+  models?: string[];
 }
 
 export interface KeyValidationResult {

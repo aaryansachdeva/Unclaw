@@ -28,6 +28,13 @@
       "dist/**/*",
       "package.json"
     ],
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://files.fotonlabs.com/mac/electron/",
+        "channel": "latest"
+      }
+    ],
     "afterSign": "scripts/notarize.js",
     "afterAllArtifactBuild": "scripts/notarize-dmg.js",
     "extraResources": [
@@ -51,7 +58,10 @@
       {
         "from": "build/resources/uv",
         "to": "uv",
-        "filter": ["uv", "uvx"]
+        "filter": [
+          "uv",
+          "uvx"
+        ]
       }
     ],
     "win": {
@@ -77,8 +87,18 @@
     },
     "mac": {
       "target": [
-        { "target": "dmg", "arch": ["arm64"] },
-        { "target": "zip", "arch": ["arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
       ],
       "icon": "build/icon.icns",
       "category": "public.app-category.productivity",
@@ -100,16 +120,40 @@
     "dmg": {
       "title": "Unclaw ${version}",
       "iconSize": 96,
-      "window": { "width": 540, "height": 380 },
+      "window": {
+        "width": 540,
+        "height": 380
+      },
       "contents": [
-        { "x": 130, "y": 200, "type": "file" },
-        { "x": 410, "y": 200, "type": "link", "path": "/Applications" }
+        {
+          "x": 130,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64", "arm64"] },
-        { "target": "deb", "arch": ["x64", "arm64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ],
       "icon": "build/icon.png",
       "category": "Utility",
@@ -121,6 +165,7 @@
     "@epicgames-ps/lib-pixelstreamingfrontend-ue5.6": "^0.2.5",
     "@react-three/fiber": "^9.6.1",
     "@types/three": "^0.184.0",
+    "electron-updater": "^6.8.3",
     "framer-motion": "^12.38.0",
     "lucide-react": "^1.7.0",
     "onnxruntime-web": "^1.24.3",

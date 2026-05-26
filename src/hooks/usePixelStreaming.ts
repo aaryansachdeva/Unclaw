@@ -206,6 +206,21 @@ export function usePixelStreaming({
       setTimeout(forceViewportResolutionUpdate, 2000);
       setTimeout(forceViewportResolutionUpdate, 3000);
     });
+
+    // Dynamic-resize: watch the video parent's pixel size and re-fire
+    // updateVideoStreamSize on every Electron-window size change. Pairs
+    // with the MacInputHandler::SetCommandHandler("Resolution.Width", ...)
+    // C++ side that runs r.SetRes WxHw on receipt. Debounced 150 ms so a
+    // drag-resize doesn't flood UE with per-frame r.SetRes calls.
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const ro = new ResizeObserver(() => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null;
+        forceViewportResolutionUpdate();
+      }, 150);
+    });
+    ro.observe(videoParentRef.current);
     ps.addEventListener('webRtcDisconnected', () => {
       setConnectionState('connecting');
       scheduleRetry();
@@ -217,6 +232,8 @@ export function usePixelStreaming({
 
     return () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+      if (resizeTimer) clearTimeout(resizeTimer);
+      ro.disconnect();
       ps.removeResponseEventListener('unclaw-ack-router');
       // Reject any in-flight ack promises so callers don't hang forever
       // if the component unmounts mid-handshake.

@@ -16,6 +16,7 @@ import { CustomizationOverlay, ACCENT_COLORS } from './components/CustomizationO
 import { SettingsPanel } from './components/SettingsPanel';
 import { SoulBootScreen } from './components/SoulBootScreen';
 import { SetupWizard } from './components/SetupWizard';
+import { UpdateOverlay } from './components/UpdateOverlay';
 import type { WardrobeSettings } from './services/userSettings';
 import { usePixelStreaming } from './hooks/usePixelStreaming';
 import { useVideoRectPublisher } from './hooks/useVideoRectPublisher';
@@ -126,6 +127,14 @@ export function App() {
     return () => { cancelled = true; };
   }, [setupComplete]);
 
+  // Update gate (packaged-build, every-launch). Sits between setup and
+  // soul-boot — checks the remote manifest, downloads + swaps any drifted
+  // categories, then dismisses (or shows a restart prompt). Defaults to
+  // true when the update IPC isn't available (dev, pre-update-API builds).
+  const [updatesChecked, setUpdatesChecked] = useState<boolean>(
+    () => typeof window === 'undefined' || !window.electronAPI?.update,
+  );
+
   const [soulReady, setSoulReady] = useState(
     // Default to ready when running outside Electron — the renderer
     // in a browser dev session has no main-process soul supervisor
@@ -140,6 +149,9 @@ export function App() {
   }
   if (!setupComplete) {
     return <SetupWizard onComplete={() => setSetupComplete(true)} />;
+  }
+  if (!updatesChecked) {
+    return <UpdateOverlay onComplete={() => setUpdatesChecked(true)} />;
   }
   if (!soulReady) {
     return <SoulBootScreen onReady={() => setSoulReady(true)} />;
@@ -2089,14 +2101,6 @@ function AppMain() {
                   onDispatchAnimation={dispatchAnimation}
                   onClearMemory={handleClearMemory}
                   onOpenOnboarding={() => setWizardMode('edit')}
-                  onResetProfile={() => {
-                    void deleteSettings()
-                      .catch((err) => console.warn('[profile] delete failed', err))
-                      .finally(() => {
-                        setProfile(null);
-                        setWizardMode('first');
-                      });
-                  }}
                   onExpress={handleExpress}
                   voice={{
                     active: voice.isListening,
@@ -2105,6 +2109,8 @@ function AppMain() {
                     isUserSpeaking: voice.isUserSpeaking,
                     isTranscribing: voice.isTranscribing,
                     toggle: () => { void voice.toggle(); },
+                    start: () => { void voice.start(); },
+                    stop: () => { void voice.stop(); },
                   }}
                   // Overlay during BOTH PTT and continuous mode. PTT
                   // flips streaming.isActive on start(); continuous
@@ -2207,11 +2213,6 @@ function AppMain() {
         onResetAccount={() => { void handleResetAccount(); }}
         onResetSession={handleResetSession}
         onOpenSettings={() => setSettingsOpen(true)}
-        // Workspace = the visible stream area. UNCLAW wordmark stays
-        // centered over THIS region, not the whole window, so it
-        // remains visually centered on the streamed face when the
-        // chat pane shrinks the workspace.
-        workspaceWidth={chatPaneOpen ? winWidth - chatPaneWidth : winWidth}
       />
 
       {/* Sign-in screen. Mounted whenever auth has resolved to "no

@@ -192,7 +192,7 @@ export function isSetupComplete(): boolean {
  */
 export async function runSetup(window: BrowserWindow): Promise<boolean> {
   if (setupInFlight) {
-    pushLog(window, 'meta', '[setup] already in progress — ignoring duplicate request');
+    pushLog(window, 'meta', '[setup] already in progress, ignoring duplicate request');
     return false;
   }
   setupInFlight = true;
@@ -303,7 +303,7 @@ async function runStagePreflight(
   if (!uvPath) {
     throw new Error(
       'The bundled `uv` binary is missing from Resources/uv/uv (and not on PATH). ' +
-      'This is a packaging bug — please report it.',
+      'This is a packaging bug. Please report it.',
     );
   }
   pushLog(window, 'meta', `[preflight] uv: ${uvPath}`);
@@ -361,7 +361,7 @@ async function runStageRuntime(
       { stream: true, extraEnv: uvEnv },
     );
   } else {
-    pushLog(window, 'meta', '[runtime] venv already exists — skipping create');
+    pushLog(window, 'meta', '[runtime] venv already exists, skipping create');
   }
 
   // 3. pip install requirements into the venv. --index-strategy
@@ -372,7 +372,7 @@ async function runStageRuntime(
     id: 'runtime',
     progress: null,
     headline: 'Installing Python packages…',
-    detail: 'This is the slowest step — ~2 minutes on a fast connection',
+    detail: 'This is the slowest step, ~2 minutes on a fast connection',
   });
 
   const requirementsFile = path.join(packagedSoulSrcDir(), 'requirements-mac.txt');
@@ -420,7 +420,7 @@ async function runStageUnreal(
   const wantSha = MANIFEST.unreal.sha256 ?? '';
 
   if (fs.existsSync(installedApp) && installedSha === wantSha && wantSha) {
-    pushLog(window, 'meta', `[unreal] already at ${wantSha.slice(0, 12)} — skipping`);
+    pushLog(window, 'meta', `[unreal] already at ${wantSha.slice(0, 12)}, skipping`);
     setStage(window, {
       id: 'unreal',
       progress: 1,
@@ -532,7 +532,7 @@ async function runStageModels(
     fs.existsSync(path.join(paths.assets, rel)),
   );
   if (allPresent && installedSha === wantSha && wantSha) {
-    pushLog(window, 'meta', `[models] already at ${wantSha.slice(0, 12)} — skipping`);
+    pushLog(window, 'meta', `[models] already at ${wantSha.slice(0, 12)}, skipping`);
     setStage(window, {
       id: 'models',
       progress: 1,
@@ -605,7 +605,7 @@ async function runStageModels(
 const DOWNLOAD_USER_AGENT = 'Unclaw-Mac-Setup/1.0 (+https://unclaw.app)';
 const DOWNLOAD_RETRIES = 3;
 
-async function downloadWithResumeAndVerify(
+export async function downloadWithResumeAndVerify(
   window: BrowserWindow,
   asset: RemoteAsset,
   destPath: string,
@@ -741,7 +741,7 @@ function downloadOnce(
   });
 }
 
-function sha256File(filePath: string): Promise<string> {
+export function sha256File(filePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
     const stream = fs.createReadStream(filePath);
@@ -756,7 +756,7 @@ function sha256File(filePath: string): Promise<string> {
 // streaming + non-zero-exit handling stays consistent.
 // ----------------------------------------------------------------------
 
-interface RunCommandOpts {
+export interface RunCommandOpts {
   stream: boolean;
   ignoreNonZeroExit?: boolean;
   /** Extra env vars merged into the child process env. Used to scope
@@ -764,7 +764,7 @@ interface RunCommandOpts {
   extraEnv?: NodeJS.ProcessEnv;
 }
 
-function runCommand(
+export function runCommand(
   window: BrowserWindow,
   cmd: string,
   args: string[],
@@ -833,7 +833,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function formatBytes(n: number): string {
+export function formatBytes(n: number): string {
   if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(0)} KB`;

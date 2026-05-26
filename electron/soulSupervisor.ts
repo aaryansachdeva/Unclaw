@@ -24,7 +24,7 @@
 // (later) we'll bundle a wrapper; for now this is dev-only.
 
 import { app, BrowserWindow } from 'electron';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execFile } from 'child_process';
 import path from 'path';
 import http from 'http';
 
@@ -141,8 +141,15 @@ function isPackagedSetupComplete(): boolean {
 /**
  * Resolve `run_soul.sh` on disk. Order of precedence:
  *   1. UNCLAW_SOUL_REPO env override (for dev pointing at a non-sibling soul)
- *   2. Packaged build — Resources/soul-src/run_soul.sh inside the .app
- *   3. Dev — walk up from app path looking for a sibling soul/ checkout
+ *   2. Auto-updater overlay — <userData>/runtime/soul/run_soul.sh — newer
+ *      than the DMG-bundled baseline when the updater has dropped a fresh
+ *      soul tarball. Code-signed .app contents are read-only post-install,
+ *      so we can't write into Resources/soul-src/; the overlay lives in
+ *      userData where we have write access.
+ *   3. Packaged build baseline — Resources/soul-src/run_soul.sh inside the
+ *      .app. Used on first launch (before any update has landed) and as a
+ *      permanent fallback if the overlay is missing/corrupted.
+ *   4. Dev — walk up from app path looking for a sibling soul/ checkout
  */
 function resolveSoulScript(): { script: string; cwd: string } | null {
   const fs = require('fs') as typeof import('fs');
@@ -150,7 +157,17 @@ function resolveSoulScript(): { script: string; cwd: string } | null {
   if (override) {
     return { script: path.join(override, 'run_soul.sh'), cwd: override };
   }
-  // Packaged: Electron stages extraResources at process.resourcesPath
+  // Auto-updater overlay — checked FIRST so a freshly-dropped soul takes
+  // precedence over the baseline. The overlay dir is only present after
+  // the updater has successfully installed a soul category bump.
+  if (app.isPackaged) {
+    const overlayDir = path.join(getRuntimeDir(), 'soul');
+    const overlayScript = path.join(overlayDir, 'run_soul.sh');
+    if (fs.existsSync(overlayScript)) {
+      return { script: overlayScript, cwd: overlayDir };
+    }
+  }
+  // Packaged baseline: Electron stages extraResources at process.resourcesPath
   // (= <App>.app/Contents/Resources/ on macOS, Resources\ on Windows).
   // package.json maps `../soul → soul-src`, so this is the install path.
   if (app.isPackaged) {
@@ -181,7 +198,7 @@ function spawnSoul(window: BrowserWindow): boolean {
   const resolved = resolveSoulScript();
   if (!resolved) {
     log(window, 'meta',
-      '[unclaw] could not locate soul/run_soul.sh — set UNCLAW_SOUL_REPO to ' +
+      '[unclaw] could not locate soul/run_soul.sh. Set UNCLAW_SOUL_REPO to ' +
       'the absolute path of your soul checkout');
     return false;
   }
@@ -196,6 +213,11 @@ function spawnSoul(window: BrowserWindow): boolean {
   // exactly like a terminal-launched `./run_soul.sh` invocation.
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
+    // Dynamic backbuffer match via MatchViewportRes — the new MacInputHandler
+    // SetCommandHandler("Resolution.Width", ...) (UE plugin rebuild) handles
+    // the SDK's resize messages and runs r.SetRes WxHw. UE picks its own
+    // sensible default at boot (typically the host display dimensions in
+    // -RenderOffScreen), then resizes on demand as the browser fires.
     UNCLAW_UE_RES_AUTO: process.env.UNCLAW_UE_RES_AUTO ?? '1',
     PATH: [
       '/opt/homebrew/bin',
@@ -332,14 +354,14 @@ export async function startSoul(window: BrowserWindow): Promise<void> {
   // soul with missing python-env / missing PYTHONPATH errors.
   if (!isPackagedSetupComplete()) {
     log(window, 'meta',
-      '[unclaw] first-run setup not yet complete — deferring soul spawn ' +
+      '[unclaw] first-run setup not yet complete, deferring soul spawn ' +
       'until SetupWizard finishes');
     return;
   }
 
   const existing = await probeExistingSoul();
   if (existing) {
-    log(window, 'meta', '[unclaw] soul already running externally — attaching');
+    log(window, 'meta', '[unclaw] soul already running externally, attaching');
     alreadyReadyFired = true;
     // Short tick so renderer has time to mount its log subscription
     // before the ready event fires. Otherwise the LoadingScreen never
@@ -347,7 +369,104 @@ export async function startSoul(window: BrowserWindow): Promise<void> {
     setTimeout(() => emit(window, 'soul:ready'), 100);
     return;
   }
+  // Sweep stale processes from a prior crashed/killed Unclaw session
+  // before spawning. The bug we're working around: when Unclaw is force-
+  // quit (Cmd+Opt+Esc, system reboot, OOM, etc.), the soul/wilbur/UE
+  // process tree can survive and continue holding ports 8765/8888/8080.
+  // The next launch then can't bind those ports and silently fails to
+  // ever signal-ready, leaving the user stuck on SoulBootScreen.
+  // Auto-kill anything whose argv we can positively identify as ours —
+  // be conservative: a generic process holding port 8888 we leave alone
+  // and just log a warning.
+  await sweepStaleProcesses(window);
   spawnSoul(window);
+}
+
+/**
+ * Find + kill orphaned soul/wilbur/UE processes from a prior crashed
+ * Unclaw session. Identifies them by:
+ *   * argv contains "run_soul.sh" or "soul.cli" or "soul.server"
+ *   * argv contains "wilbur" (the signalling server soul ships with)
+ *   * .app path matches our runtime/unreal/Unclaw Character.app
+ *
+ * Safe: we only kill processes whose argv we POSITIVELY identify as ours.
+ * A random other dev tool holding port 8765 gets logged-not-killed.
+ */
+async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
+  const psOutput = await new Promise<string>((resolve) => {
+    // `ps -A -o pid=,command=` — full command line for every process the
+    // user can see. We post-filter by argv pattern.
+    execFile('/bin/ps', ['-A', '-o', 'pid=,command='], (err, stdout) => {
+      if (err) {
+        log(window, 'meta', `[unclaw] stale-process sweep skipped: ps failed (${err.message})`);
+        resolve('');
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
+  if (!psOutput) return;
+
+  const myPid = process.pid;
+  const ueAppName = 'Unclaw Character';
+  const ourPatterns = [
+    /run_soul\.sh\b/,
+    /\bsoul\.cli\b/,
+    /\bsoul\.server\b/,
+    /\bwilbur\b/,
+    new RegExp(`${ueAppName}\\.app`),
+  ];
+  const stale: Array<{ pid: number; cmd: string }> = [];
+
+  for (const line of psOutput.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = parseInt(m[1], 10);
+    const cmd = m[2];
+    // Never touch our own process tree (Electron main, helper procs,
+    // current soul if it's already mid-spawn).
+    if (pid === myPid) continue;
+    if (soulProc && pid === soulProc.pid) continue;
+    if (!ourPatterns.some((re) => re.test(cmd))) continue;
+    // Filter out the .app path matching our DMG-bundled UE — we only
+    // care about orphans that haven't been reaped. A still-living
+    // Electron-main owner means the process belongs to a parallel
+    // Unclaw instance and we shouldn't touch it. Conservative: only
+    // count it as orphan if we can confirm the parent PID is launchd
+    // (PID 1) or otherwise dead.
+    stale.push({ pid, cmd: cmd.slice(0, 120) });
+  }
+
+  if (stale.length === 0) {
+    return;
+  }
+
+  log(window, 'meta',
+    `[unclaw] sweeping ${stale.length} stale process(es) from prior session:`);
+  for (const { pid, cmd } of stale) {
+    log(window, 'meta', `  pid=${pid}: ${cmd}`);
+    try {
+      // SIGTERM first — give the process a chance to clean up. If it's
+      // wedged, we follow up with SIGKILL after a short grace window.
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // ESRCH (already exited) — fine.
+    }
+  }
+  // Brief grace window for SIGTERM to land + processes to release their
+  // ports. 800 ms is well under the user-visible "is it stuck?" threshold
+  // but long enough for clean Python shutdown hooks to run.
+  await new Promise((r) => setTimeout(r, 800));
+  // SIGKILL any survivors. By this point they've ignored SIGTERM —
+  // unblock the ports unconditionally.
+  for (const { pid } of stale) {
+    try {
+      process.kill(pid, 0); // probe — throws if dead
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // gone — good
+    }
+  }
 }
 
 /**

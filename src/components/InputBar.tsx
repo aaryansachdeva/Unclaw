@@ -23,8 +23,8 @@ import {
   useReducedMotion,
 } from 'framer-motion';
 import {
-  Plus, ArrowRight, ChevronLeft, ChevronRight, Pencil, RotateCcw,
-  PanelRightOpen, PanelRightClose, Eraser,
+  Plus, ArrowRight, ChevronLeft, ChevronRight,
+  PanelRightOpen, PanelRightClose,
 } from 'lucide-react';
 
 import { SheetKey } from '../hooks/useSheet';
@@ -53,6 +53,13 @@ export interface InputVoiceState {
   isUserSpeaking: boolean;
   isTranscribing: boolean;
   toggle: () => void;
+  /** Explicit start/stop for push-to-talk (hold-space). The global
+   *  keydown/keyup listener in InputBar uses these to cycle the mic
+   *  on press + off on release without round-tripping through toggle
+   *  (which would no-op the second fire if state.isListening flipped
+   *  in between key events). */
+  start: () => void;
+  stop: () => void;
 }
 
 interface InputBarProps {
@@ -75,9 +82,6 @@ interface InputBarProps {
   /** Reopen the onboarding wizard. Backs the pencil button next to the
    *  persona switcher and the /onboard slash command. */
   onOpenOnboarding: () => void;
-  /** Wipe the saved profile and restart the wizard from scratch. Backs
-   *  the temporary reset button next to the pencil. */
-  onResetProfile: () => void;
   /** Fire a Text2Face-only probe with an emotion prompt. Backs the
    *  /express <emotion> slash command. */
   onExpress: (emotion: string) => void;
@@ -159,7 +163,6 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onDispatchAnimation,
   onClearMemory,
   onOpenOnboarding,
-  onResetProfile,
   onExpress,
   voice,
   voiceActive = false,
@@ -331,6 +334,52 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   useEffect(() => {
     if (slash.active) slashReset();
   }, [slash.active, slash.query, slashReset]);
+
+  // Hold-Space push-to-talk. Press Space to start the mic, release to
+  // stop. Skips when the user is typing in any text field (otherwise
+  // every space in chat would toggle voice). Skips while voice is
+  // already active from a click toggle so we don't yank continuous-mode
+  // mid-utterance. Keydown is gated on !repeat so the OS auto-repeat
+  // doesn't fire start() N times while held.
+  useEffect(() => {
+    const isEditableTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      if (target.isContentEditable) return true;
+      return false;
+    };
+    let pttHeld = false;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      if (e.repeat) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      if (isEditableTarget(e.target)) return;
+      if (voice.disabled) return;
+      // If voice is already active from a click toggle, leave it alone.
+      // PTT should layer ON TOP of click-to-toggle, not steal it.
+      if (voice.active) return;
+      pttHeld = true;
+      e.preventDefault();
+      voice.start();
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      if (!pttHeld) return;
+      pttHeld = false;
+      e.preventDefault();
+      voice.stop();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      // Stop on unmount if we were holding (covers user navigating away
+      // mid-utterance — don't leave the mic open).
+      if (pttHeld) voice.stop();
+    };
+  }, [voice]);
 
   const handleSend = useCallback(() => {
     if (slash.active && slash.items.length > 0) {
@@ -810,164 +859,6 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             />
           </div>
 
-          {/* Edit-profile pencil — sits next to the persona switcher.
-              Reopens the onboarding wizard with the current values
-              prefilled. Same affordance the /onboard slash command
-              triggers. */}
-          <button
-            type="button"
-            onClick={onOpenOnboarding}
-            aria-label="Edit profile"
-            title="Edit profile"
-            style={{
-              flexShrink: 0,
-              width: 22,
-              height: 22,
-              borderRadius: 6,
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--text-ghost)',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              fontFamily: 'inherit',
-              transition: 'all 0.15s var(--ease-out-quart)',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'var(--glass-bg-hover)';
-              e.currentTarget.style.color = 'var(--text-primary)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'transparent';
-              e.currentTarget.style.color = 'var(--text-ghost)';
-            }}
-          >
-            <Pencil size={12} strokeWidth={2.2} />
-          </button>
-
-          {/* TEMPORARY: reset profile + re-run onboarding from scratch.
-              Sits next to the pencil so it's a one-click test path
-              while we iterate. Will likely move to a settings menu
-              once the wizard's stable. */}
-          <button
-            type="button"
-            onClick={onResetProfile}
-            aria-label="Reset profile and re-run onboarding"
-            title="Reset profile (re-run onboarding)"
-            style={{
-              flexShrink: 0,
-              width: 22,
-              height: 22,
-              borderRadius: 6,
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--text-ghost)',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              fontFamily: 'inherit',
-              transition: 'all 0.15s var(--ease-out-quart)',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'var(--glass-bg-hover)';
-              e.currentTarget.style.color = 'var(--accent)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'transparent';
-              e.currentTarget.style.color = 'var(--text-ghost)';
-            }}
-          >
-            <RotateCcw size={12} strokeWidth={2.2} />
-          </button>
-
-          {/* Clear conversation history — same handler as the /clear
-              slash command. Confirms before wiping. Replaces the
-              titlebar gear's old "Clear conversation" row. */}
-          <button
-            type="button"
-            onClick={() => {
-              const ok = window.confirm(
-                personaName
-                  ? `Clear conversation history with ${personaName}?`
-                  : 'Clear conversation history?',
-              );
-              if (ok) onClearMemory();
-            }}
-            aria-label="Clear conversation history"
-            title="Clear conversation"
-            style={{
-              flexShrink: 0,
-              width: 22,
-              height: 22,
-              borderRadius: 6,
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--text-ghost)',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              fontFamily: 'inherit',
-              transition: 'all 0.15s var(--ease-out-quart)',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'var(--glass-bg-hover)';
-              e.currentTarget.style.color = 'var(--text-primary)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'transparent';
-              e.currentTarget.style.color = 'var(--text-ghost)';
-            }}
-          >
-            <Eraser size={12} strokeWidth={2.2} />
-          </button>
-
-          {/* Chat-pane expand toggle. Opens the gray history pane on
-              the right side, which physically pushes the stream in.
-              Icon flips between open/close based on pane state. */}
-          {onToggleChatPane && (
-            <button
-              type="button"
-              onClick={onToggleChatPane}
-              aria-label={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
-              aria-pressed={chatPaneOpen}
-              title={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
-              style={{
-                flexShrink: 0,
-                width: 22,
-                height: 22,
-                borderRadius: 6,
-                background: chatPaneOpen ? 'var(--glass-bg-hover)' : 'transparent',
-                border: 'none',
-                color: chatPaneOpen ? 'var(--text-primary)' : 'var(--text-ghost)',
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                fontFamily: 'inherit',
-                transition: 'all 0.15s var(--ease-out-quart)',
-              }}
-              onMouseEnter={(e) => {
-                if (chatPaneOpen) return;
-                e.currentTarget.style.background = 'var(--glass-bg-hover)';
-                e.currentTarget.style.color = 'var(--text-primary)';
-              }}
-              onMouseLeave={(e) => {
-                if (chatPaneOpen) return;
-                e.currentTarget.style.background = 'transparent';
-                e.currentTarget.style.color = 'var(--text-ghost)';
-              }}
-            >
-              {chatPaneOpen ? (
-                <PanelRightClose size={12} strokeWidth={2.2} />
-              ) : (
-                <PanelRightOpen size={12} strokeWidth={2.2} />
-              )}
-            </button>
-          )}
-
           {/* Spacer */}
           <div style={{ flex: 1 }} />
 
@@ -987,6 +878,51 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               <PlusButton onClick={handlePickFiles} disabled={inputLocked} />
             </>
           )}
+
+          {/* Chat-pane toggle. Sits in the right-action cluster next to
+              the mic so the "session controls" cluster reads as one unit:
+              [+ attach][chat-pane][mic / send]. */}
+          {onToggleChatPane && (
+            <button
+              type="button"
+              onClick={onToggleChatPane}
+              aria-label={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
+              aria-pressed={chatPaneOpen}
+              title={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
+              style={{
+                flexShrink: 0,
+                width: 32,
+                height: 32,
+                borderRadius: 8,
+                background: chatPaneOpen ? 'var(--glass-bg-hover)' : 'transparent',
+                border: 'none',
+                color: chatPaneOpen ? 'var(--text-primary)' : 'var(--text-secondary)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                transition: 'all 0.15s var(--ease-out-quart)',
+              }}
+              onMouseEnter={(e) => {
+                if (chatPaneOpen) return;
+                e.currentTarget.style.background = 'var(--glass-bg-hover)';
+                e.currentTarget.style.color = 'var(--text-primary)';
+              }}
+              onMouseLeave={(e) => {
+                if (chatPaneOpen) return;
+                e.currentTarget.style.background = 'transparent';
+                e.currentTarget.style.color = 'var(--text-secondary)';
+              }}
+            >
+              {chatPaneOpen ? (
+                <PanelRightClose size={18} strokeWidth={2} />
+              ) : (
+                <PanelRightOpen size={18} strokeWidth={2} />
+              )}
+            </button>
+          )}
+
           <div
             style={{
               position: 'relative',

@@ -176,4 +176,49 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeListener('setup:stage', handler);
     },
   },
+
+  // ----------------------------------------------------------------------
+  // Auto-updater — runs once per session after setup, before main app.
+  // Fetches the remote manifest, compares per category, downloads + swaps
+  // any drifted ones. Renderer subscribes to onSnapshot for full state
+  // (per-category progress) and calls start() to kick the pipeline.
+  // restart() relaunches Unclaw to apply downloaded updates that can't
+  // hot-swap (which is currently all of them).
+  update: {
+    getStatus: (): Promise<UpdateSnapshotShape> =>
+      ipcRenderer.invoke('update:get-status'),
+    start: (): Promise<UpdateSnapshotShape> =>
+      ipcRenderer.invoke('update:start'),
+    restart: (): Promise<void> => ipcRenderer.invoke('update:restart'),
+    onSnapshot: (cb: (snap: UpdateSnapshotShape) => void): (() => void) => {
+      const handler = (_evt: IpcRendererEvent, snap: UpdateSnapshotShape) => cb(snap);
+      ipcRenderer.on('update:snapshot', handler);
+      return () => ipcRenderer.removeListener('update:snapshot', handler);
+    },
+    onLog: (cb: (line: string) => void): (() => void) => {
+      const handler = (_evt: IpcRendererEvent, line: string) => cb(line);
+      ipcRenderer.on('update:log', handler);
+      return () => ipcRenderer.removeListener('update:log', handler);
+    },
+  },
 });
+
+// Shape mirror of updateCoordinator.UpdateSnapshot — kept inline rather than
+// imported because preload runs in a separate bundle that can't see TS-only
+// types from the main process bundle.
+type UpdateCategoryStateShape =
+  | 'pending' | 'downloading' | 'applying' | 'ready' | 'failed' | 'up-to-date';
+interface UpdateCategoryProgressShape {
+  id: 'app' | 'soul' | 'unreal' | 'assets';
+  state: UpdateCategoryStateShape;
+  progress: number | null;
+  detail?: string;
+  from: string | null;
+  to: string;
+}
+interface UpdateSnapshotShape {
+  done: boolean;
+  categories: UpdateCategoryProgressShape[];
+  restartRequired: boolean;
+  fatalError: string | null;
+}

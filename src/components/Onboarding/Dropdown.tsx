@@ -104,6 +104,11 @@ interface Props {
   disabled?: boolean;
   /** Wider menu max-height when the catalogue is long (timezones). */
   menuMaxHeight?: number;
+  /** Show a search input at the top of the menu that filters options
+   *  by case-insensitive substring against label + id. Useful when the
+   *  option list is long (e.g. live LLM model lists with 100+ entries).
+   *  Disabled by default to preserve existing single-purpose dropdowns. */
+  searchable?: boolean;
 }
 
 /** Trigger style mirrors the wizard's other input fields so the dropdown
@@ -133,13 +138,31 @@ export function Dropdown({
   placeholder = 'Choose…',
   disabled,
   menuMaxHeight = 280,
+  searchable = false,
 }: Props) {
   const [open, setOpen] = useState(false);
+  // Search query — only used when `searchable` is true. Cleared every
+  // time the menu opens so the user starts with the full list visible.
+  const [query, setQuery] = useState('');
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  // Filtered subset of options. When not searchable OR query empty, the
+  // full options array passes through. Keeps the active-index math + the
+  // rendered rows on a single derived list, so the rest of the component
+  // doesn't need to know whether search is on.
+  const filteredOptions = useMemo(() => {
+    if (!searchable || !query.trim()) return options;
+    const q = query.trim().toLowerCase();
+    return options.filter((o) =>
+      o.label.toLowerCase().includes(q) || o.id.toLowerCase().includes(q),
+    );
+  }, [options, searchable, query]);
   const [active, setActive] = useState<number>(() => {
     const idx = options.findIndex((o) => o.id === value);
     return idx >= 0 ? idx : 0;
   });
   // Cumulative type-ahead buffer; cleared 750 ms after the last keystroke.
+  // Only active when searchable=false (otherwise the visible search input
+  // takes that role and type-ahead in the trigger would be redundant).
   const typeBufferRef = useRef('');
   const typeTimerRef = useRef<number | null>(null);
 
@@ -221,15 +244,37 @@ export function Dropdown({
   }, [open]);
 
   // When opening, snap the active row to whatever's currently selected
-  // so keyboard nav starts at "where you are" rather than the top.
+  // so keyboard nav starts at "where you are" rather than the top. Reset
+  // the search query so the user always sees the full list on (re)open.
   useEffect(() => {
-    if (!open) return;
-    const idx = options.findIndex((o) => o.id === value);
+    if (!open) {
+      setQuery('');
+      return;
+    }
+    const idx = filteredOptions.findIndex((o) => o.id === value);
     setActive(idx >= 0 ? idx : 0);
-  }, [open, value, options]);
+  }, [open, value, filteredOptions]);
+
+  // Auto-focus the search input on open so the user can start typing
+  // immediately. Doesn't fire when searchable=false.
+  useEffect(() => {
+    if (!open || !searchable) return;
+    const t = setTimeout(() => searchInputRef.current?.focus(), 30);
+    return () => clearTimeout(t);
+  }, [open, searchable]);
+
+  // Filter changes can move the active row past the end of the filtered
+  // list. Clamp so highlighted row stays valid.
+  useEffect(() => {
+    if (filteredOptions.length === 0) {
+      setActive(0);
+      return;
+    }
+    setActive((i) => Math.min(i, filteredOptions.length - 1));
+  }, [filteredOptions]);
 
   const commit = (idx: number) => {
-    const opt = options[idx];
+    const opt = filteredOptions[idx];
     if (!opt) return;
     onChange(opt.id);
     setOpen(false);
@@ -247,7 +292,7 @@ export function Dropdown({
     }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setActive((i) => Math.min(options.length - 1, i + 1));
+      setActive((i) => Math.min(filteredOptions.length - 1, i + 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setActive((i) => Math.max(0, i - 1));
@@ -256,21 +301,21 @@ export function Dropdown({
       setActive(0);
     } else if (e.key === 'End') {
       e.preventDefault();
-      setActive(options.length - 1);
+      setActive(filteredOptions.length - 1);
     } else if (e.key === 'Enter') {
       e.preventDefault();
       commit(active);
-    } else if (e.key.length === 1 && /\S/.test(e.key)) {
-      // Type-ahead jump. Each successive printable key extends the
-      // buffer; 750 ms of inactivity resets it. Match is case-insensitive
-      // against the start of the option label.
+    } else if (!searchable && e.key.length === 1 && /\S/.test(e.key)) {
+      // Type-ahead jump (only when no visible search bar). Each successive
+      // printable key extends the buffer; 750 ms of inactivity resets it.
+      // Match is case-insensitive against the start of the option label.
       typeBufferRef.current = (typeBufferRef.current + e.key).toLowerCase();
       if (typeTimerRef.current !== null) window.clearTimeout(typeTimerRef.current);
       typeTimerRef.current = window.setTimeout(() => {
         typeBufferRef.current = '';
         typeTimerRef.current = null;
       }, 750);
-      const idx = options.findIndex((o) =>
+      const idx = filteredOptions.findIndex((o) =>
         o.label.toLowerCase().startsWith(typeBufferRef.current),
       );
       if (idx >= 0) setActive(idx);
@@ -399,7 +444,60 @@ export function Dropdown({
                   : 'top left',
               }}
             >
-              {options.map((opt, idx) => {
+              {searchable && (
+                <div
+                  style={{
+                    position: 'sticky',
+                    top: -6,
+                    margin: '-6px -6px 4px -6px',
+                    padding: '8px 10px',
+                    background: 'var(--glass-bg-panel)',
+                    borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
+                    zIndex: 1,
+                  }}
+                >
+                  <input
+                    ref={searchInputRef}
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Forward nav keys to the same handler so the
+                      // arrow / enter behavior matches the trigger.
+                      if (e.key === 'ArrowDown' || e.key === 'ArrowUp'
+                        || e.key === 'Enter' || e.key === 'Home'
+                        || e.key === 'End' || e.key === 'Escape') {
+                        // Reuse the trigger handler by casting target —
+                        // simpler than duplicating the switch here.
+                        onTriggerKey(e as unknown as KeyboardEvent<HTMLButtonElement>);
+                      }
+                    }}
+                    placeholder="Search models…"
+                    aria-label="Search options"
+                    style={{
+                      width: '100%',
+                      background: 'rgba(255, 255, 255, 0.04)',
+                      border: '1px solid var(--glass-border)',
+                      borderRadius: 8,
+                      color: 'var(--text-primary)',
+                      fontFamily: 'inherit',
+                      fontSize: 12.5,
+                      padding: '6px 10px',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+              )}
+              {filteredOptions.length === 0 && (
+                <div style={{
+                  padding: '14px 12px',
+                  fontSize: 12,
+                  color: 'var(--text-secondary)',
+                  textAlign: 'center',
+                }}>
+                  No matches
+                </div>
+              )}
+              {filteredOptions.map((opt, idx) => {
                 const isSelected = opt.id === value;
                 const isActive = idx === active;
                 return (

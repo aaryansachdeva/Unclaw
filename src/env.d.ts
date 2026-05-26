@@ -112,6 +112,45 @@ interface ElectronAPI {
       }) => void,
     ) => () => void;
   };
+
+  // Runtime auto-updater. Runs on every launch after setup completes —
+  // fetches a remote manifest, downloads + swaps any categories that have
+  // drifted from the installed-versions ledger. Categories: app (Electron
+  // shell, handled by electron-updater), soul (Python source), unreal
+  // (UE Shipping .app), assets (models + lipsync).
+  update?: {
+    /** Snapshot for hydration. Same replay pattern as setup.getStatus. */
+    getStatus: () => Promise<UpdateSnapshot>;
+    /** Kick the update check. Idempotent — second call returns the
+     *  in-progress snapshot rather than starting a parallel run. */
+    start: () => Promise<UpdateSnapshot>;
+    /** Relaunch Unclaw to apply downloaded updates. */
+    restart: () => Promise<void>;
+    /** Subscribe to per-update-pass snapshot diffs. Fired any time a
+     *  category's progress changes. */
+    onSnapshot: (cb: (snap: UpdateSnapshot) => void) => () => void;
+    /** Subscribe to one-line diagnostic log strings. Lower-volume than
+     *  setup.onLog — mostly for surfacing errors in dev. */
+    onLog: (cb: (line: string) => void) => () => void;
+  };
+}
+
+interface UpdateCategoryProgress {
+  id: 'app' | 'soul' | 'unreal' | 'assets';
+  state: 'pending' | 'downloading' | 'applying' | 'ready' | 'failed' | 'up-to-date';
+  progress: number | null;
+  detail?: string;
+  /** Installed version before this update pass — null on first install
+   *  for this category. */
+  from: string | null;
+  to: string;
+}
+
+interface UpdateSnapshot {
+  done: boolean;
+  categories: UpdateCategoryProgress[];
+  restartRequired: boolean;
+  fatalError: string | null;
 }
 
 interface Window {

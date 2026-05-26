@@ -19,6 +19,8 @@ import fs from 'fs';
 import { LOGO_BASE64 } from './oauthLogo';
 import { startSoul, stopSoul, getSoulSnapshot } from './soulSupervisor';
 import { getSetupSnapshot, runSetup } from './setupCoordinator';
+import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
+import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -413,6 +415,16 @@ function createWindow() {
     x: screenW - WINDOW_WIDTH - EDGE_MARGIN,
     y: Math.round((screenH - WINDOW_HEIGHT) / 2),
     frame: false,
+    // macOS: surface the real OS traffic lights (close/min/full-screen)
+    // in the top-left. They're the actual NSWindow buttons — hover-pulse,
+    // dark-mode adapt, accessibility, full-screen-on-option-click — all
+    // for free. Windows/Linux ignore titleBarStyle silently and keep the
+    // frame:false chromeless treatment, so Titlebar.tsx's custom min/close
+    // buttons still render there.
+    titleBarStyle: 'hidden',
+    // Nudge the lights down + right so they sit comfortably in our chrome
+    // rather than hugging the top-left corner.
+    trafficLightPosition: { x: 12, y: 12 },
     transparent: false,
     backgroundColor: '#050506',
     alwaysOnTop: true,
@@ -432,13 +444,16 @@ function createWindow() {
     },
   });
 
-  // 'floating' was getting overridden by other apps that use higher
-  // levels (full-screen video, screen-share frames, etc.). 'screen-saver'
-  // is the highest standard level and matches what UnClaw's competitor
-  // surface (popup widgets, voice assistants) typically uses to
-  // genuinely stay on top of everything. We set it once here and re-
-  // apply on focus events below as a Windows safety belt.
-  mainWindow.setAlwaysOnTop(true, 'screen-saver');
+  // Always-on-top level: 'floating' (NSFloatingWindowLevel = 3) instead
+  // of 'screen-saver' (level 1000). The screen-saver level promotes the
+  // window into macOS's "accessory" panel category, which auto-hides the
+  // dock icon for the owning app — users had no way to see Unclaw was
+  // running or quit it from the dock. 'floating' keeps the window above
+  // normal app windows (which is the 99% case) while letting the dock
+  // icon stay visible. Trade-off: full-screen video / Screen Sharing can
+  // cover Unclaw briefly; acceptable since the dock-icon affordance is
+  // more important to the daily UX than the rare full-screen scenario.
+  mainWindow.setAlwaysOnTop(true, 'floating');
   // visibleOnAllWorkspaces is mac/linux; harmless on Windows.
   try {
     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
@@ -519,6 +534,29 @@ ipcMain.handle('soul:get-status', () => getSoulSnapshot());
 // wizard calls when it mounts to kick the pipeline — idempotent on the
 // coordinator side, safe to call multiple times.
 ipcMain.handle('setup:get-status', () => getSetupSnapshot());
+
+// Runtime auto-updater. Renderer's UpdateOverlay subscribes to
+// 'update:snapshot' (full state object replaces stage events here —
+// per-category progress fits naturally in one payload). Get-status is
+// the hydration call so the overlay can mount mid-update without
+// missing earlier events.
+ipcMain.handle('update:get-status', () => getUpdateSnapshot());
+ipcMain.handle('update:start', async () => {
+  if (!mainWindow) return getUpdateSnapshot();
+  return runUpdateCheck(mainWindow);
+});
+ipcMain.handle('update:restart', () => {
+  // If Squirrel has a staged app-shell update, go through quitAndInstall
+  // so the bundle actually swaps. Otherwise a plain relaunch covers the
+  // content-only case (soul / UE re-spawn against new on-disk bits).
+  if (getAppShellState().state === 'ready') {
+    quitAndInstallAppUpdate();
+    return;
+  }
+  app.relaunch();
+  app.exit(0);
+});
+
 ipcMain.handle('setup:start', async () => {
   if (!mainWindow) return false;
   return runSetup(mainWindow);
@@ -985,8 +1023,17 @@ app.whenReady().then(() => {
   // macOS dock icon — the BrowserWindow `icon` prop only affects the
   // window/taskbar on Win/Linux; the dock is its own surface. No-op
   // on Win/Linux because `app.dock` is undefined there.
+  //
+  // `app.dock.show()` explicitly forces dock-icon visibility. Needed
+  // because `mainWindow.setVisibleOnAllWorkspaces(true, ...)` below
+  // promotes the window's collection-behavior with NSWindowCollectionBehaviorTransient,
+  // which macOS treats as "accessory" and auto-hides the dock icon.
+  // Without the explicit show(), Unclaw is reachable only from the
+  // status-bar tray — no way for users to see it's running or quit it
+  // via Cmd+Q. show() overrides the transient-window dock-hiding.
   if (process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(APP_ICON);
+    app.dock.show().catch(() => { /* show() can reject on some macOS versions — non-fatal */ });
   }
 
   // `geolocation` lets the Weather widget call navigator.geolocation
