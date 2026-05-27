@@ -13,7 +13,7 @@
 
 import { fetchApiKeys } from './apiKeys';
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 export interface StockQuote {
   symbol: string;
@@ -50,7 +50,7 @@ export async function getStocks(symbols?: string[]): Promise<StocksResult> {
     : '';
   let res: Response;
   try {
-    res = await fetch(`${SOUL_URL}/stocks${qs}`, {
+    res = await fetch(`${getSoulBaseUrl()}/stocks${qs}`, {
       method: 'GET',
       headers: { 'X-Gemini-Key': keys.gemini_search_api_key },
     });

@@ -7,7 +7,7 @@
 //
 // This lets us ship small soul / asset / UE bumps without forcing every user
 // to re-download a new DMG. Only the Electron shell itself (the `app`
-// category) requires a DMG-side update — that path is handled separately by
+// category) requires a DMG-side update, that path is handled separately by
 // electron-updater (Squirrel.Mac).
 //
 // ----------------------------------------------------------------------
@@ -24,7 +24,7 @@
 //      /mac/soul/soul-2026.0526.01.tar.gz)
 //   2. Write a fresh latest.json with the new entry's URL/SHA/size/version
 //      AND a top-level `manifestVersion` bump (cache-bust signal)
-//   3. PUT that latest.json to R2 — Cloudflare's cache invalidates because
+//   3. PUT that latest.json to R2, Cloudflare's cache invalidates because
 //      we also rotate the query-string `?v=<manifestVersion>` that the
 //      updater appends on fetch (belt-and-suspenders to defeat any edge
 //      caching that ignored our cache-control headers)
@@ -33,18 +33,18 @@
 // Categories
 // ----------------------------------------------------------------------
 //
-//   app    — Electron shell (frontend + main process bundle). Updated via
+//   app   , Electron shell (frontend + main process bundle). Updated via
 //            electron-updater / Squirrel.Mac. Listed here for completeness
-//            but the updater code path treats it as informational only —
+//            but the updater code path treats it as informational only , 
 //            actual install is Squirrel's job.
-//   soul   — Python source (~25 MB compressed). Drops into
+//   soul  , Python source (~25 MB compressed). Drops into
 //            <userData>/runtime/soul/ as an OVERLAY; soulSupervisor.ts
 //            prefers this over the DMG-bundled baseline when present.
 //            Requires soul process restart to take effect.
-//   unreal — UE Shipping .app (~2 GB compressed). Replaces
+//   unreal, UE Shipping .app (~2 GB compressed). Replaces
 //            <userData>/runtime/unreal/Unclaw Character.app/. Requires
 //            killing + respawning UE (~30 s blackout for the user).
-//   assets — Models + lipsync source + checkpoints (~700 MB compressed).
+//   assets, Models + lipsync source + checkpoints (~700 MB compressed).
 //            Drops into <userData>/runtime/assets/. Requires soul restart
 //            because models are loaded once at soul startup.
 //
@@ -64,14 +64,14 @@ export interface CategoryEntry extends RemoteAsset {
    *  the renderer + main process + all children). For `app` this is
    *  always true (Squirrel's choice anyway); for content categories we
    *  always restart the dependent process (soul/UE) but can keep the
-   *  Electron shell alive — set false to skip the global restart prompt. */
+   *  Electron shell alive, set false to skip the global restart prompt. */
   globalRestartRequired: boolean;
   /** One-line human description shown in the update overlay. */
   changelog?: string;
 }
 
 export interface UpdateManifest {
-  /** Bumped on every publish even if only a SHA changes — used as the
+  /** Bumped on every publish even if only a SHA changes, used as the
    *  query-string cache-buster on fetch. */
   manifestVersion: number;
   /** ISO8601, informational only. */
@@ -107,7 +107,7 @@ export const FALLBACK_MANIFEST: UpdateManifest = {
   manifestVersion: 0,
   generatedAt: '2026-05-25T00:00:00Z',
   categories: {
-    // Intentionally empty — the bootstrap path is "no updates available,
+    // Intentionally empty, the bootstrap path is "no updates available,
     // use whatever the DMG shipped with." Real manifest is fetched at
     // runtime and overrides this entirely.
   },

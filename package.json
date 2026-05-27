@@ -1,6 +1,6 @@
 {
   "name": "unclaw",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Unclaw",
   "main": "dist/electron/main.js",
   "scripts": {

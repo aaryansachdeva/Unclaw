@@ -20,7 +20,7 @@
 
 import {
   Bell, BarChart3, Newspaper, Cloud, Sparkles, Eraser,
-  Heart, Wind, UserCog, Drama, Swords, LucideIcon,
+  Heart, Wind, UserCog, Drama, Swords, PartyPopper, LucideIcon,
 } from 'lucide-react';
 
 import type { SheetKey } from '../hooks/useSheet';
@@ -30,7 +30,7 @@ import type { SheetKey } from '../hooks/useSheet';
  *  the implementation through the InputBar -> hook -> registry path. */
 export interface CommandActions {
   onOpenSheet: (key: SheetKey) => void;
-  onDispatchAnimation: (name: 'give_a_kiss' | 'do_dance' | 'say_hello' | 'react_as_star_wars_fan') => void;
+  onDispatchAnimation: (name: 'give_a_kiss' | 'do_dance' | 'say_hello' | 'react_as_star_wars_fan' | 'celebrate') => void;
   onClearMemory: () => void;
   onOpenOnboarding: () => void;
   onExpress: (emotion: string) => void;
@@ -112,6 +112,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: 'May the Force be with you (lightsaber idle)',
     icon: Swords,
     run: (_a, actions) => actions.onDispatchAnimation('react_as_star_wars_fan'),
+  },
+  {
+    command: '/celebrate',
+    description: 'Celebrate a win or milestone',
+    icon: PartyPopper,
+    run: (_a, actions) => actions.onDispatchAnimation('celebrate'),
   },
   {
     command: '/express',

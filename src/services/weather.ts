@@ -8,7 +8,7 @@
 
 import { fetchApiKeys } from './apiKeys';
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 export type WeatherIcon = 'sun' | 'cloud' | 'rain' | 'snow' | 'storm' | 'fog';
 
@@ -70,7 +70,7 @@ export async function getWeather(coords?: Coords): Promise<WeatherResult> {
     : '';
   let res: Response;
   try {
-    res = await fetch(`${SOUL_URL}/weather${qs}`, {
+    res = await fetch(`${getSoulBaseUrl()}/weather${qs}`, {
       method: 'GET',
       headers: { 'X-Gemini-Key': keys.gemini_search_api_key },
     });

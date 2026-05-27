@@ -13,7 +13,7 @@
 
 import { SoulChatResult } from './soulChat';
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 export interface EscalationStep {
   /** Same shape as a /chat result. Null when the server has nothing
@@ -36,7 +36,7 @@ export async function pollNextEscalation(
 ): Promise<EscalationStep | null> {
   try {
     const r = await fetch(
-      `${SOUL_URL}/escalation/${encodeURIComponent(jobId)}/next`,
+      `${getSoulBaseUrl()}/escalation/${encodeURIComponent(jobId)}/next`,
     );
     if (!r.ok) return null;
     return (await r.json()) as EscalationStep;

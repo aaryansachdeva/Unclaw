@@ -55,11 +55,17 @@ export function Greeting({ userName = 'friend' }: GreetingProps) {
   const timeStr = formatClock(now);
   const quote = QUOTES[quoteIdx];
 
+  const dateStr = formatDate(now);
+
+  // Per-child stagger. The wrapper no longer fades as one block — the
+  // time/date row settles in first, the headline second, the quote
+  // third. Reads as a gentle "the room turns on" beat instead of
+  // everything appearing at once.
+  const baseDelay = reduce ? 0 : 0.15;
+  const stagger = reduce ? 0 : 0.18;
+
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.6, delay: 0.4, ease: EASE_OUT_EXPO }}
+    <div
       style={{
         position: 'absolute',
         top: 72,
@@ -71,58 +77,143 @@ export function Greeting({ userName = 'friend' }: GreetingProps) {
         userSelect: 'none',
       }}
     >
-      <div
+      {/* Time + date row. Time is the lead; date sits beside it in a
+          quieter tone with a hairline dot separator. Tabular numerics
+          on both so the row never reflows tick to tick. The whole
+          row uses warm-ash rather than a heavier label color so it
+          reads as ambient telemetry, not a UI element fighting the
+          headline for attention. */}
+      <motion.div
+        initial={reduce ? { opacity: 1 } : { opacity: 0, y: 4 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.55, delay: baseDelay, ease: EASE_OUT_EXPO }}
         style={{
-          fontSize: 16,
-          fontWeight: 600,
-          letterSpacing: '0.04em',
+          display: 'inline-flex',
+          alignItems: 'baseline',
+          gap: 10,
+          marginBottom: 10,
           color: 'var(--text-secondary)',
-          fontVariantNumeric: 'tabular-nums',
-          textShadow: '0 1px 3px rgba(0, 0, 0, 0.6)',
-          marginBottom: 8,
+          textShadow: 'var(--text-shadow-floating)',
         }}
       >
-        {timeStr}
-      </div>
-      <h1
-        style={{
-          fontSize: 32,
+        <span style={{
+          fontSize: 13,
           fontWeight: 500,
+          letterSpacing: '0.01em',
+          fontVariantNumeric: 'tabular-nums',
           color: 'var(--text-primary)',
-          letterSpacing: '-0.022em',
-          lineHeight: 1.1,
+          opacity: 0.92,
+        }}>
+          {timeStr}
+        </span>
+        <span aria-hidden style={{
+          width: 3, height: 3, borderRadius: 1.5,
+          background: 'currentColor', opacity: 0.4,
+          alignSelf: 'center',
+        }} />
+        <span style={{
+          fontSize: 11.5,
+          fontWeight: 500,
+          letterSpacing: '0.04em',
+          textTransform: 'uppercase',
+          opacity: 0.78,
+        }}>
+          {dateStr}
+        </span>
+      </motion.div>
+
+      <motion.h1
+        initial={reduce ? { opacity: 1 } : { opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{
+          duration: 0.65,
+          delay: baseDelay + stagger,
+          ease: EASE_OUT_EXPO,
+        }}
+        style={{
+          fontSize: 34,
+          fontWeight: 600,
+          color: 'var(--text-primary)',
+          letterSpacing: '-0.028em',
+          lineHeight: 1.04,
           margin: 0,
-          textShadow: '0 2px 8px rgba(0, 0, 0, 0.65)',
+          textShadow: 'var(--text-shadow-display)',
         }}
       >
-        Good {greetingWord}, {userName}!
-      </h1>
+        Good {greetingWord},{' '}
+        <span style={{ fontWeight: 500, fontStyle: 'italic' }}>
+          {userName}
+        </span>
+        {/* Tiny mood-tinted period. Picks up the wardrobe lighting
+            color via --mood-accent so the only saturated speck on the
+            greeting subtly matches the light the character sits in. */}
+        <span aria-hidden style={{
+          color: 'var(--mood-accent)',
+          fontWeight: 600,
+          marginLeft: 1,
+          transition: 'color var(--duration-base) var(--ease-out-quart)',
+        }}>.</span>
+      </motion.h1>
 
-      <AnimatePresence mode="wait">
-        <motion.p
-          key={quoteIdx}
-          initial={reduce ? { opacity: 1 } : { opacity: 0, y: 4 }}
-          animate={{ opacity: 0.92, y: 0 }}
-          exit={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
-          transition={{ duration: 0.5, ease: EASE_OUT_EXPO }}
-          style={{
-            marginTop: 10,
-            fontSize: 15,
-            fontWeight: 400,
-            fontStyle: 'italic',
-            color: 'var(--text-secondary)',
-            lineHeight: 1.45,
-            letterSpacing: 0,
-            margin: '10px 0 0 0',
-            textShadow: '0 1px 3px rgba(0, 0, 0, 0.55)',
-            maxWidth: 360,
-          }}
-        >
-          “{quote.text}” <span style={{ opacity: 0.7 }}>· {quote.author}</span>
-        </motion.p>
-      </AnimatePresence>
-    </motion.div>
+      <motion.div
+        initial={reduce ? { opacity: 1 } : { opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{
+          duration: 0.55,
+          delay: baseDelay + stagger * 2,
+          ease: EASE_OUT_EXPO,
+        }}
+        style={{ marginTop: 18 }}
+      >
+        <AnimatePresence mode="wait">
+          <motion.p
+            key={quoteIdx}
+            initial={reduce ? { opacity: 1 } : { opacity: 0, y: 3 }}
+            animate={{ opacity: 0.92, y: 0 }}
+            exit={reduce ? { opacity: 0 } : { opacity: 0, y: -3 }}
+            transition={{ duration: 0.5, ease: EASE_OUT_EXPO }}
+            style={{
+              fontSize: 14.5,
+              fontWeight: 400,
+              fontStyle: 'italic',
+              color: 'var(--text-secondary)',
+              lineHeight: 1.5,
+              letterSpacing: '-0.005em',
+              margin: 0,
+              textShadow: 'var(--text-shadow-floating)',
+              maxWidth: 360,
+            }}
+          >
+            “{quote.text}”
+            <span style={{
+              display: 'block',
+              marginTop: 6,
+              fontStyle: 'normal',
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              color: 'var(--text-ghost)',
+              opacity: 0.85,
+            }}>
+              {quote.author}
+            </span>
+          </motion.p>
+        </AnimatePresence>
+      </motion.div>
+    </div>
   );
+}
+
+function formatDate(d: Date): string {
+  // Short weekday + day-of-month without year. "Mon · May 26" reads
+  // like a journal entry above the rotating thought; "Monday, May 26,
+  // 2026" would overwhelm. No leading zero on the day.
+  return d.toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
 }
 
 function greetingFor(d: Date): string {

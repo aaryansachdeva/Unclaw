@@ -7,7 +7,7 @@
 
 import { fetchApiKeys } from './apiKeys';
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 export interface NewsArticle {
   title: string;
@@ -42,7 +42,7 @@ export async function getNews(topic?: string): Promise<NewsResult> {
   const qs = topic ? `?topic=${encodeURIComponent(topic)}` : '';
   let res: Response;
   try {
-    res = await fetch(`${SOUL_URL}/news${qs}`, {
+    res = await fetch(`${getSoulBaseUrl()}/news${qs}`, {
       method: 'GET',
       headers: { 'X-Gemini-Key': keys.gemini_search_api_key },
     });

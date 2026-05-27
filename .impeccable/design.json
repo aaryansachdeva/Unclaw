@@ -1,0 +1,246 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-05-26T03:45:00Z",
+  "title": "Design System: UnClaw",
+  "extensions": {
+    "colorMeta": {
+      "stream-void": {
+        "role": "background",
+        "displayName": "Stream Void",
+        "canonical": "oklch(2% 0.005 260)",
+        "tonalRamp": [
+          "#020203", "#050506", "#0a0a0c", "#101013",
+          "#191920", "#2a2a35", "#4a4a55", "#73737a"
+        ]
+      },
+      "frosted-slate-base": {
+        "role": "primary-chrome",
+        "displayName": "Frosted Slate Base",
+        "canonical": "oklch(22% 0.03 260 / 0.32)",
+        "tonalRamp": [
+          "#10131a", "#1a1f2b", "#252b3c", "#2f364a",
+          "#3b4257", "#525a73", "#7b8299", "#abb1c3"
+        ]
+      },
+      "frosted-slate-hover": {
+        "role": "primary-chrome-hover",
+        "displayName": "Frosted Slate Hover",
+        "canonical": "oklch(22% 0.03 260 / 0.48)",
+        "tonalRamp": [
+          "#10131a", "#1a1f2b", "#252b3c", "#2f364a",
+          "#3b4257", "#525a73", "#7b8299", "#abb1c3"
+        ]
+      },
+      "frosted-slate-panel": {
+        "role": "panel-surface",
+        "displayName": "Frosted Slate Panel",
+        "canonical": "oklch(22% 0.03 260 / 0.52)",
+        "tonalRamp": [
+          "#10131a", "#1a1f2b", "#252b3c", "#2f364a",
+          "#3b4257", "#525a73", "#7b8299", "#abb1c3"
+        ]
+      },
+      "ember-red": {
+        "role": "accent",
+        "displayName": "Ember Red",
+        "canonical": "oklch(56% 0.15 25)",
+        "tonalRamp": [
+          "#3a0f0f", "#561818", "#7a2424", "#9c2f2f",
+          "#c44444", "#d56666", "#e58e8e", "#f1bcbc"
+        ]
+      },
+      "bone-white": {
+        "role": "text-primary",
+        "displayName": "Bone White",
+        "canonical": "oklch(98% 0.001 60)",
+        "tonalRamp": [
+          "#1a1a1a", "#2e2e2c", "#494946", "#646461",
+          "#85857f", "#a8a89f", "#cecbc4", "#fafafa"
+        ]
+      },
+      "warm-ash": {
+        "role": "text-secondary",
+        "displayName": "Warm Ash",
+        "canonical": "oklch(83% 0.008 60)",
+        "tonalRamp": [
+          "#2a2622", "#403b35", "#5a544c", "#776e64",
+          "#928879", "#b1a99e", "#d4cec7", "#ebe7e2"
+        ]
+      },
+      "faded-linen": {
+        "role": "text-ghost",
+        "displayName": "Faded Linen",
+        "canonical": "oklch(66% 0.008 60)",
+        "tonalRamp": [
+          "#1f1c1a", "#332f2c", "#4c4641", "#6a6258",
+          "#857c70", "#a39c95", "#c0bab2", "#d6d1ca"
+        ]
+      },
+      "sage-pulse": {
+        "role": "status-live",
+        "displayName": "Sage Pulse",
+        "canonical": "oklch(74% 0.07 140)",
+        "tonalRamp": [
+          "#0f2a0f", "#1c3f1c", "#2c5a2b", "#3e7a3d",
+          "#549c54", "#71ba71", "#8cbf8a", "#bfdcbe"
+        ]
+      },
+      "soft-cinder": {
+        "role": "status-danger",
+        "displayName": "Soft Cinder",
+        "canonical": "oklch(64% 0.08 25)",
+        "tonalRamp": [
+          "#3a1212", "#54201f", "#702f2e", "#8d4140",
+          "#a85957", "#c07472", "#c87a7a", "#dba6a4"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Greeting at the top of the workspace; weather temperature. Drop-shadowed when it sits over the stream without chrome." },
+      "headline": { "displayName": "Headline", "purpose": "SoulBootScreen and SetupWizard monument zone. Not used in steady-state UI." },
+      "title": { "displayName": "Title", "purpose": "Settings pane header, SheetPanel title, persona switcher label." },
+      "body": { "displayName": "Body", "purpose": "Default. Settings rows, widget panel content, conversational chat copy." },
+      "body-emphasis": { "displayName": "Body Emphasis", "purpose": "Interactive controls. Button labels, dropdown selections, agent name." },
+      "label": { "displayName": "Label", "purpose": "Section labels above grouped fields. Sentence case." },
+      "micro": { "displayName": "Micro", "purpose": "Status chips, inline hints, the N-models-from-provider affordance." },
+      "caps": { "displayName": "Caps", "purpose": "The single decorative spot. The SETTINGS label at the top of the settings rail. 0.16em letter-spacing, uppercase." }
+    },
+    "shadows": [
+      { "name": "panel-ground", "value": "0 1px 0 rgba(255,255,255,0.06) inset, 0 30px 70px -16px rgba(0,0,0,0.62), 0 14px 32px -10px rgba(0,0,0,0.45)", "purpose": "Settings shell, opened widget panels, lifted setup wizard card. Two-layer ambient plus a 1px inset top-edge highlight." },
+      { "name": "panel-rest", "value": "0 1px 0 rgba(255,255,255,0.06) inset, 0 4px 14px rgba(0,0,0,0.30)", "purpose": "Smaller panel shadow used on hover-revealed widget pills." },
+      { "name": "button-glow", "value": "0 4px 14px -4px rgba(196, 68, 68, 0.55)", "purpose": "Primary Save Changes button when dirty. The single accent-tinted glow in the system." },
+      { "name": "thumb-grip", "value": "0 1px 3px rgba(0, 0, 0, 0.35)", "purpose": "Toggle switch thumb. Gives the white circle a sense of weight against the track." }
+    ],
+    "motion": [
+      { "name": "ease-out-expo", "value": "cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Default for panel entrances, category cross-fades, opacity reveals." },
+      { "name": "ease-out-quart", "value": "cubic-bezier(0.25, 1, 0.5, 1)", "purpose": "State transitions on chrome (hover, focus, color shifts)." },
+      { "name": "spring-rail-bar", "value": "stiffness: 520, damping: 38", "purpose": "Framer Motion spring for the animated layoutId accent bar in the Settings rail." },
+      { "name": "spring-toggle-thumb", "value": "stiffness: 520, damping: 36", "purpose": "Framer Motion spring for the toggle switch thumb." },
+      { "name": "duration-fast", "value": "160ms", "purpose": "Hover, focus, color transitions on inputs and small chrome." },
+      { "name": "duration-default", "value": "220ms", "purpose": "Panel entrance, action bar slide-in, dropdown menu open." }
+    ],
+    "breakpoints": [
+      { "name": "window-default", "value": "420px", "purpose": "Default Electron window width. Chrome is laid out for this size; no responsive collapse needed." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Input Bar",
+      "kind": "input",
+      "refersTo": "input-bar",
+      "description": "The always-on pill at the bottom of the workspace. Signature primary chrome.",
+      "html": "<div class=\"ds-input-bar\"><span class=\"ds-input-bar-text\">Ask anything</span><button class=\"ds-input-bar-voice\" aria-label=\"Voice\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#141414\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z\"/><path d=\"M19 10v2a7 7 0 0 1-14 0v-2\"/><line x1=\"12\" y1=\"19\" x2=\"12\" y2=\"23\"/></svg></button></div>",
+      "css": ".ds-input-bar { display: flex; align-items: center; gap: 12px; padding: 10px 10px 10px 16px; background: rgba(40, 48, 65, 0.32); backdrop-filter: blur(36px) saturate(1.7); -webkit-backdrop-filter: blur(36px) saturate(1.7); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 24px; color: #fafafa; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; font-size: 13.5px; font-weight: 500; letter-spacing: -0.005em; transition: background 160ms cubic-bezier(0.25, 1, 0.5, 1), border-color 160ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-input-bar:hover, .ds-input-bar:focus-within { background: rgba(40, 48, 65, 0.48); border-color: rgba(255, 255, 255, 0.20); } .ds-input-bar-text { flex: 1; color: #a39c95; } .ds-input-bar-voice { width: 36px; height: 36px; border-radius: 50%; background: #ffffff; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.20); border: none; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 0; transition: box-shadow 220ms cubic-bezier(0.16, 1, 0.3, 1); } .ds-input-bar-voice:hover { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28); }"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The Save Changes button. Single warmest object on screen when present.",
+      "html": "<button class=\"ds-btn-primary\">Save changes</button>",
+      "css": ".ds-btn-primary { padding: 8px 18px; background: #c44444; color: #fafafa; border: 1px solid rgba(255, 200, 190, 0.42); border-radius: 8px; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; font-size: 12px; font-weight: 600; letter-spacing: -0.005em; cursor: pointer; box-shadow: 0 4px 14px -4px rgba(196, 68, 68, 0.55); transition: background 160ms cubic-bezier(0.25, 1, 0.5, 1), transform 160ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-btn-primary:hover { background: #d05151; transform: translateY(-0.5px); } .ds-btn-primary:focus-visible { outline: 1.5px solid #c44444; outline-offset: 2px; } .ds-btn-primary:active { transform: translateY(0); }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "The Discard / Close partner for any Primary action.",
+      "html": "<button class=\"ds-btn-ghost\">Discard</button>",
+      "css": ".ds-btn-ghost { padding: 8px 14px; background: transparent; color: #fafafa; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; font-size: 12px; font-weight: 500; letter-spacing: -0.005em; cursor: pointer; transition: background 160ms cubic-bezier(0.25, 1, 0.5, 1), border-color 160ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-btn-ghost:hover { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.20); } .ds-btn-ghost:focus-visible { outline: 1.5px solid #c44444; outline-offset: 2px; }"
+    },
+    {
+      "name": "Settings Rail Item (Active)",
+      "kind": "nav",
+      "refersTo": "settings-rail-item-active",
+      "description": "Active row in the Settings left rail. The animated accent bar sits to the left.",
+      "html": "<div class=\"ds-rail-wrap\"><span class=\"ds-rail-bar\"></span><button class=\"ds-rail-item ds-rail-item-active\"><svg class=\"ds-rail-icon\" width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z\"/></svg><span class=\"ds-rail-label\">Chat</span></button></div>",
+      "css": ".ds-rail-wrap { position: relative; padding-left: 0; } .ds-rail-bar { position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 1px; background: #c44444; } .ds-rail-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 12px 9px 14px; border-radius: 10px; background: rgba(196, 68, 68, 0.10); border: none; color: #fafafa; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; font-size: 13px; font-weight: 600; letter-spacing: -0.005em; cursor: pointer; text-align: left; transition: background 180ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-rail-icon { flex-shrink: 0; color: #c44444; }"
+    },
+    {
+      "name": "Settings Row",
+      "kind": "card",
+      "refersTo": "settings-row",
+      "description": "One row inside a Settings Group card. Label on the left, control on the right, separated by a hairline.",
+      "html": "<div class=\"ds-row\"><div class=\"ds-row-label-col\"><div class=\"ds-row-label\">Provider</div><div class=\"ds-row-hint\">Where chat completions come from.</div></div><div class=\"ds-row-control\"><div class=\"ds-row-select\">OpenAI<svg width=\"10\" height=\"6\" viewBox=\"0 0 10 6\" fill=\"none\"><path d=\"M1 1L5 5L9 1\" stroke=\"rgba(255,255,255,0.55)\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg></div></div></div>",
+      "css": ".ds-row { display: grid; grid-template-columns: minmax(160px, 220px) 1fr; gap: 16px; align-items: center; padding: 12px 16px; background: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 14px; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; } .ds-row-label-col { min-width: 0; } .ds-row-label { font-size: 13px; font-weight: 500; color: #fafafa; letter-spacing: -0.005em; } .ds-row-hint { font-size: 11px; color: #d4cec7; margin-top: 2px; letter-spacing: -0.005em; line-height: 1.45; } .ds-row-control { min-width: 0; display: flex; justify-content: flex-end; } .ds-row-select { width: 100%; max-width: 280px; padding: 8px 10px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 8px; color: #fafafa; font-size: 12.5px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: border-color 160ms cubic-bezier(0.25, 1, 0.5, 1), background 160ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-row-select:hover { border-color: rgba(255, 255, 255, 0.20); background: rgba(255, 255, 255, 0.06); }"
+    },
+    {
+      "name": "Toggle (iOS-style)",
+      "kind": "custom",
+      "refersTo": "toggle-on",
+      "description": "On-state of the iOS-style switch used for booleans in Settings. Track is Ember Red, thumb is white with a grip shadow.",
+      "html": "<button class=\"ds-toggle ds-toggle-on\" role=\"switch\" aria-checked=\"true\"><span class=\"ds-toggle-thumb\"></span></button>",
+      "css": ".ds-toggle { position: relative; width: 40px; height: 24px; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.12); cursor: pointer; padding: 0; transition: background 220ms cubic-bezier(0.25, 1, 0.5, 1), border-color 220ms cubic-bezier(0.25, 1, 0.5, 1); background: rgba(255, 255, 255, 0.10); } .ds-toggle-on { background: #c44444; border-color: rgba(255, 200, 190, 0.35); } .ds-toggle-thumb { position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 9px; background: #ffffff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35); transform: translateX(0); transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1); } .ds-toggle-on .ds-toggle-thumb { transform: translateX(16px); }"
+    },
+    {
+      "name": "Widget Pill (Rest)",
+      "kind": "chip",
+      "refersTo": "widget-pill-rest",
+      "description": "Ambient widget label at rest. Transparent surface, text-shadow on the bare label so it stays legible against the stream without forcing chrome.",
+      "html": "<button class=\"ds-pill\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><polyline points=\"12 6 12 12 16 14\"/></svg><span>Reminders</span></button>",
+      "css": ".ds-pill { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; background: transparent; border: 1px solid transparent; border-radius: 14px; color: #fafafa; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; font-size: 13px; font-weight: 500; letter-spacing: -0.005em; cursor: pointer; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55); transition: background 180ms cubic-bezier(0.25, 1, 0.5, 1), border-color 180ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-pill svg { filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55)); } .ds-pill:hover { background: rgba(40, 48, 65, 0.48); backdrop-filter: blur(36px) saturate(1.7); -webkit-backdrop-filter: blur(36px) saturate(1.7); border-color: rgba(255, 255, 255, 0.20); text-shadow: none; box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 4px 14px rgba(0, 0, 0, 0.30); } .ds-pill:hover svg { filter: none; }"
+    },
+    {
+      "name": "Status Chip (Saved)",
+      "kind": "chip",
+      "refersTo": "status-chip-saved",
+      "description": "The Saved chip that appears in the Settings action bar after a successful save.",
+      "html": "<span class=\"ds-chip ds-chip-saved\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"20 6 9 17 4 12\"/></svg>Saved.</span>",
+      "css": ".ds-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 8px; border: 1px solid transparent; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; font-size: 11.5px; font-weight: 500; letter-spacing: -0.005em; } .ds-chip-saved { background: rgba(140, 191, 138, 0.10); border-color: rgba(140, 191, 138, 0.28); color: #bfdcbe; }"
+    },
+    {
+      "name": "Secret Input",
+      "kind": "input",
+      "refersTo": "field-input",
+      "description": "API key field with eye-reveal toggle. The most-used input in Settings.",
+      "html": "<div class=\"ds-secret\"><input type=\"password\" class=\"ds-secret-input\" placeholder=\"paste your key\" value=\"sk-abc123def456\" /><button class=\"ds-secret-eye\" aria-label=\"Show key\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/></svg></button></div>",
+      "css": ".ds-secret { position: relative; width: 100%; max-width: 280px; } .ds-secret-input { width: 100%; padding: 8px 34px 8px 10px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 8px; color: #fafafa; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; font-size: 12.5px; letter-spacing: 0.18em; outline: none; transition: border-color 160ms cubic-bezier(0.25, 1, 0.5, 1), background 160ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-secret-input::placeholder { color: #a39c95; letter-spacing: -0.005em; opacity: 1; } .ds-secret-input:focus { border-color: rgba(255, 255, 255, 0.20); background: rgba(255, 255, 255, 0.06); } .ds-secret-eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 24px; height: 24px; background: transparent; border: none; color: #d4cec7; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; transition: color 160ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-secret-eye:hover { color: #fafafa; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Frosted Anteroom",
+    "overview": "UnClaw is a 3D MetaHuman that lives in a small refined room that floats beside your screen. Everything in the visual system is furniture for that room. The pixel-streamed character holds the center; the chrome around it is frosted glass that picks up the navy ambient of the stream and reads as translucent material, not as a dark slab.\n\nThe aesthetic is built from one material (frosted slate) at three opacities (always-on chrome, hover reveal, opened panel), one warm-red accent reserved for moments of attention, and one warm sans (Plus Jakarta Sans) that carries every label, button, body line, and status chip. The system is intentionally dark-only. The character's lighting is calibrated for a dark UI; a light mode would break the visual coherence the product depends on. The system explicitly rejects ChatGPT-style chat bubbles, gaming overlays, corporate dashboards, skeuomorphic chrome, and the inky-black 'video player overlay' surfaces that would compete with the stream as a competing dark mass.\n\nWhat makes the system distinctive is the two-intensity glass strategy: primary controls sit at low intensity full-time so the user always knows where they are. Ambient widgets sleep at zero intensity and wake on hover, using text-shadow on bare labels before a glass surface ever appears. The character keeps the eye; the chrome only steps forward when the user reaches for it.",
+    "keyCharacteristics": [
+      "Frosted slate, never inky black: surfaces use the rgba(40, 48, 65, x) family so they pick up the stream's navy ambient.",
+      "Two intensities, one material: always-on primary chrome plus hover-reveal ambient widgets share the same glass language at different opacity stops.",
+      "The accent is precious: warm red #c44444 appears only at focus states, transcribing-bars, error chips, and primary save actions.",
+      "Whisper, don't shout: body sits at 13px, labels at 11px, borders at 1px or less, with sparse accent use.",
+      "Breathe, don't blink: motion is spring + ease-out-expo, never snap."
+    ],
+    "rules": [
+      { "name": "The One Voice Rule", "body": "Ember Red is the only saturated color. If a screen has a second hue, one of them is wrong. Sage Pulse and Soft Cinder are status semantics, not palette extensions.", "section": "colors" },
+      { "name": "The Frosted Slate Rule", "body": "Surfaces use rgba(40, 48, 65, x) and the blur(36px) saturate(1.7) filter, never plain dark backgrounds. The saturation boost is load-bearing: without it, the glass reads as tinted plastic instead of translucent material.", "section": "colors" },
+      { "name": "The Two-Intensities Rule", "body": "Primary chrome is always visible at frosted-slate-base. Ambient widgets are transparent at rest with text-shadow on their bare labels, waking to frosted-slate-hover only on hover or active. Same material, different opacity stops.", "section": "colors" },
+      { "name": "The One Family Rule", "body": "Plus Jakarta Sans only. No display pairing, no monospace for code-flavored copy. The exception is the Version string in the Settings About pane where the monospace IS the meaning.", "section": "typography" },
+      { "name": "The Quiet Caps Rule", "body": "Uppercase letter-spacing is 0.04em for small labels, 0.16em for the single decorative caps moment in the settings rail. Never 0.10em. The wide-tracked corporate look is forbidden.", "section": "typography" },
+      { "name": "The Flat-By-Default Rule", "body": "Surfaces are flat at rest. Shadows appear only as a response to state (opening a panel, raising the save bar, focusing a primary action).", "section": "elevation" },
+      { "name": "The Inset Highlight Rule", "body": "Every opened panel carries a 1px inset highlight at the top (0 1px 0 rgba(255,255,255,0.06) inset). This is what makes the glass read as a real piece of material catching ambient light rather than as a flat tinted slab.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do use rgba(40, 48, 65, x) for any glass surface. Never plain rgba(0, 0, 0, x) or rgba(255, 255, 255, x).",
+      "Do ship every glass surface with both backdrop-filter: blur(36px) saturate(1.7) and the WebKit prefix. The saturation boost is load-bearing.",
+      "Do keep Ember Red on focus, primary actions, and error chips only. If a screen has more than one Ember Red moment, one of them is wrong.",
+      "Do add the 1px inset highlight (0 1px 0 rgba(255,255,255,0.06) inset) on every opened panel. It's what makes the glass read as a real piece of material.",
+      "Do use the animated layoutId accent indicator pattern for any future left-rail navigation. Springs with stiffness 520, damping 36 or 38.",
+      "Do put the action bar at the bottom of any modal that has unsaved changes. Slide it in from below only while dirty.",
+      "Do preview WCAG AA contrast for any secondary or ghost copy before shipping. Bone-white passes everywhere; warm-ash passes on glass-bg-panel; faded-linen passes only as decorative microcopy."
+    ],
+    "donts": [
+      "Don't use ChatGPT or Discord chatbot UI patterns (white bubbles, message lists, sterile chrome).",
+      "Don't use gamer or RGB aesthetics (neon, aggressive angles, gaming-overlay vibes).",
+      "Don't use corporate dashboard patterns (sidebar nav, identical card grids, enterprise SaaS).",
+      "Don't use skeuomorphic or heavy chrome (decorative drop shadows, fake textures, thick borders).",
+      "Don't ship inky-black video player overlay surfaces that compete with the stream as a competing dark mass. If the surface reads as a dark slab, it is wrong.",
+      "Don't use light-on-dark glass tinted with white-alpha. White-alpha disappears against the character's skin tones in the stream.",
+      "Don't nest cards. A Settings Group never contains another card.",
+      "Don't wrap everything in a container. Most things do not need one.",
+      "Don't use border-left or border-right greater than 1px as a colored accent. The animated layoutId bar in the Settings rail is the one place a colored vertical bar is allowed, and it sits outside the rail item, not as a border on it.",
+      "Don't use gradient text (background-clip: text). Emphasis comes from weight, not gradient.",
+      "Don't reach for glassmorphism on non-chrome surfaces. The frosted-slate material is reserved for chrome.",
+      "Don't use em dashes in product copy, status messages, or error chips. Commas, colons, periods, parentheses. Hyphens for compound modifiers only.",
+      "Don't introduce a second font family. Plus Jakarta Sans only, with a monospace exception for the Version string in the Settings About pane.",
+      "Don't use 0.10em or wider letter-spacing on uppercase text. The wide-tracked corporate look is forbidden.",
+      "Don't ship a light mode. The character's lighting is calibrated for a dark UI."
+    ]
+  }
+}

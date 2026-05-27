@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, ArrowLeft } from 'lucide-react';
+import { X } from 'lucide-react';
 import { Titlebar } from './components/Titlebar';
 import { StreamView } from './components/StreamView';
 import { Greeting } from './components/Greeting';
@@ -18,6 +18,12 @@ import { SoulBootScreen } from './components/SoulBootScreen';
 import { SetupWizard } from './components/SetupWizard';
 import { UpdateOverlay } from './components/UpdateOverlay';
 import type { WardrobeSettings } from './services/userSettings';
+import {
+  initSoulBase,
+  getSoulBaseUrl,
+  getSignallingPlayerUrl,
+  subscribeSoulPorts,
+} from './services/soulBase';
 import { usePixelStreaming } from './hooks/usePixelStreaming';
 import { useVideoRectPublisher } from './hooks/useVideoRectPublisher';
 import { useChatMemory, type Turn } from './hooks/useChatMemory';
@@ -89,7 +95,12 @@ function dispatchActionToUE(
   });
 }
 
-const SIGNALING_URL = 'ws://localhost:8080';
+// Signalling player WS URL, resolved at usePixelStreaming mount time
+// from the supervisor's live ports (soul picks via OS-assigned port
+// 0). The hook below blocks on initSoulBase before constructing
+// usePixelStreaming so this getter always returns the live port by
+// the time it's called.
+function signalingUrl(): string { return getSignallingPlayerUrl(); }
 
 /**
  * Top-level gate: don't mount the main UI (and therefore the pixel-
@@ -105,7 +116,7 @@ const SIGNALING_URL = 'ws://localhost:8080';
  *
  * If electronAPI isn't present (e.g. someone opens the renderer in a
  * plain browser), we assume soul is reachable and bypass the gate
- * immediately — preserves the dev-portal use case.
+ * immediately, preserves the dev-portal use case.
  */
 export function App() {
   // Setup gate (packaged-build first-run only). null = still checking;
@@ -127,8 +138,58 @@ export function App() {
     return () => { cancelled = true; };
   }, [setupComplete]);
 
+  // Focus reclamation for macOS floating-window quirk.
+  //
+  // Diagnosed via a console focus trace: a click on the streamed
+  // <video> triggers `focus` → `mousedown` → `click` → `blur` ~33ms
+  // after the click event completes. The blur is AppKit's documented
+  // behavior for `NSFloatingWindowLevel` windows (Unclaw uses
+  // `setAlwaysOnTop(true, 'floating')`): the floating window is
+  // allowed to receive a click via `acceptFirstMouse: true`, but
+  // key-window status is returned to the previously-active app once
+  // the click delivery finishes, because floating windows are
+  // designed as utility palettes, not primary surfaces.
+  //
+  // Two-listener defense:
+  //   * mousedown (capture) records the timestamp, then asks the
+  //     main process to focus us. This handles the FIRST click after
+  //     focus loss.
+  //   * blur catches AppKit's "return key status" yank a beat later;
+  //     if it lands within 250ms of a recent mousedown AND we have
+  //     not already retried for this click, we re-fire the focus
+  //     IPC. One retry per click so we don't loop indefinitely if
+  //     another app is legitimately holding focus.
+  useEffect(() => {
+    let lastClickAt = 0;
+    let retriedForClickAt = 0;
+    const onMouseDown = () => {
+      lastClickAt = performance.now();
+      retriedForClickAt = 0;
+      if (document.hasFocus()) return;
+      window.electronAPI?.focusWindow?.();
+    };
+    const onBlur = () => {
+      const sinceClick = performance.now() - lastClickAt;
+      if (sinceClick > 250) return;
+      if (retriedForClickAt === lastClickAt) return;
+      retriedForClickAt = lastClickAt;
+      // Defer one frame so AppKit completes its activation routine
+      // before we reassert. Without the frame delay the OS can
+      // simply re-yank inside the same event loop pass.
+      requestAnimationFrame(() => {
+        window.electronAPI?.focusWindow?.();
+      });
+    };
+    window.addEventListener('mousedown', onMouseDown, true);
+    window.addEventListener('blur', onBlur, true);
+    return () => {
+      window.removeEventListener('mousedown', onMouseDown, true);
+      window.removeEventListener('blur', onBlur, true);
+    };
+  }, []);
+
   // Update gate (packaged-build, every-launch). Sits between setup and
-  // soul-boot — checks the remote manifest, downloads + swaps any drifted
+  // soul-boot, checks the remote manifest, downloads + swaps any drifted
   // categories, then dismisses (or shows a restart prompt). Defaults to
   // true when the update IPC isn't available (dev, pre-update-API builds).
   const [updatesChecked, setUpdatesChecked] = useState<boolean>(
@@ -136,15 +197,34 @@ export function App() {
   );
 
   const [soulReady, setSoulReady] = useState(
-    // Default to ready when running outside Electron — the renderer
+    // Default to ready when running outside Electron, the renderer
     // in a browser dev session has no main-process soul supervisor
     // to wait on, and the user is presumably running `./run_soul.sh`
     // themselves.
     () => typeof window === 'undefined' || !window.electronAPI?.soul,
   );
 
+  // Ports gate. After soulReady fires we still wait one tick for the
+  // service-base cache to hydrate from the supervisor (its [ports]
+  // IPC always lands BEFORE [ready], but renderer-side initSoulBase
+  // hasn't been awaited yet). Without this, AppMain mounts and
+  // signalingUrl() / getSoulBaseUrl() return the legacy fallback
+  // ports, fine when the dynamic + legacy ports happen to collide,
+  // a stream-dead-on-arrival otherwise.
+  const [portsReady, setPortsReady] = useState(
+    () => typeof window === 'undefined' || !window.electronAPI?.soul?.getPorts,
+  );
+  useEffect(() => {
+    if (!soulReady || portsReady) return;
+    let cancelled = false;
+    void initSoulBase().finally(() => {
+      if (!cancelled) setPortsReady(true);
+    });
+    return () => { cancelled = true; };
+  }, [soulReady, portsReady]);
+
   if (setupComplete === null) {
-    // Brief loading flash — IPC roundtrip is sub-50ms in practice.
+    // Brief loading flash, IPC roundtrip is sub-50ms in practice.
     return null;
   }
   if (!setupComplete) {
@@ -156,13 +236,38 @@ export function App() {
   if (!soulReady) {
     return <SoulBootScreen onReady={() => setSoulReady(true)} />;
   }
+  if (!portsReady) {
+    // Soul is up but our port cache hasn't hydrated yet, fall through
+    // to the boot screen for the (typically sub-frame) hydration window
+    // rather than mounting AppMain with stale fallback URLs.
+    return <SoulBootScreen onReady={() => { /* already ready */ }} />;
+  }
 
   return <AppMain />;
 }
 
 function AppMain() {
+  // Soul-respawn port-rehydration. The supervisor resets its internal
+  // livePorts to null on `startSoul`, parses the fresh [ports] banner
+  // from the new boot, and re-fires 'soul:ports'. The soulBase cache
+  // would otherwise hold the dead session's ports until the user
+  // reloads the renderer, so every fetch + the pixel-streaming
+  // signalling WS would point at a port nothing is listening on.
+  // subscribeSoulPorts updates the cache in place when the new banner
+  // arrives. Doesn't tear down the pixel-streaming hook (the user-
+  // visible reconnect is owned by usePixelStreaming + UE itself); just
+  // keeps the cache fresh so service fetches resolve correctly.
+  useEffect(() => {
+    return subscribeSoulPorts(() => {
+      // Cache mutation is handled inside subscribeSoulPorts; we just
+      // need to subscribe so the side effect runs. No state update
+      // needed here, getSoulBaseUrl() reads the fresh cache on the
+      // next fetch automatically.
+    });
+  }, []);
+
   const { videoParentRef, connectionState, pixelStreaming, sendAndAwaitAck } = usePixelStreaming({
-    signalingUrl: SIGNALING_URL,
+    signalingUrl: signalingUrl(),
   });
 
   // Publishes the streamed <video>'s screen geometry to UE so the
@@ -170,14 +275,14 @@ function AppMain() {
   // relative coords.
   useVideoRectPublisher(pixelStreaming, videoParentRef);
 
-  // Wardrobe descriptor emitter — narrow wrapper around the PS emit
+  // Wardrobe descriptor emitter, narrow wrapper around the PS emit
   // so callers don't import PS types. Each payload is timestamped to
   // match the project's existing descriptor pattern. Declared up here
-  // (right next to pixelStreaming) so any helper below — including
-  // the connect/reset apply path — can reference it without TDZ.
+  // (right next to pixelStreaming) so any helper below, including
+  // the connect/reset apply path, can reference it without TDZ.
   const emitWardrobeDescriptor = useCallback((payload: Record<string, unknown>) => {
     if (!pixelStreaming) {
-      console.warn('[wardrobe] emit skipped — no pixelStreaming', payload);
+      console.warn('[wardrobe] emit skipped, no pixelStreaming', payload);
       return;
     }
     console.log('[wardrobe] →', payload);
@@ -205,7 +310,7 @@ function AppMain() {
   const [statusHistory, setStatusHistory] = useState<Array<{ id: number; text: string }>>([]);
   const statusIdRef = useRef(0);
 
-  // Pending screenshot stack — base64 PNGs captured via the global
+  // Pending screenshot stack, base64 PNGs captured via the global
   // shortcut (Ctrl+Shift+G) or the trigger button. The user can stack
   // multiple captures by hitting the shortcut several times before
   // sending; all of them ride along with the next chat message so the
@@ -220,12 +325,12 @@ function AppMain() {
   // Active chat model, kept fresh so capability checks
   // (modelSupportsVision in particular) drive the input bar's
   // attach-image button visibility. Refreshed on mount and after
-  // the onboarding wizard closes — that's the only time apiKeys
+  // the onboarding wizard closes, that's the only time apiKeys
   // mutates within a session.
   const [activeLlmModel, setActiveLlmModel] = useState<string | null>(null);
   // Whether the agentic / escalation backend is enabled. When it is,
   // soul's image-attached fast-path routes any turn carrying images to
-  // the vision-capable escalation model — so attachments are usable
+  // the vision-capable escalation model, so attachments are usable
   // even when the chat model itself is text-only.
   const [agenticEnabled, setAgenticEnabled] = useState(false);
   const refreshActiveLlmModel = useCallback(async () => {
@@ -248,26 +353,26 @@ function AppMain() {
     [activeLlmModel, agenticEnabled],
   );
 
-  // Single active widget panel — lifted up so opening one closes the
+  // Single active widget panel, lifted up so opening one closes the
   // others. The dock and the sheet both subscribe to this state.
   const [activeWidget, setActiveWidget] = useState<SheetKey | null>(null);
-  // Full-screen customization mode — orthogonal to the rail sheets.
+  // Full-screen customization mode, orthogonal to the rail sheets.
   // The wardrobe rail icon flips this; everything else stays.
   const [customizationActive, setCustomizationActive] = useState(false);
-  // Settings modal — opened from Titlebar profile dropdown. Distinct
+  // Settings modal, opened from Titlebar profile dropdown. Distinct
   // overlay from CustomizationOverlay so the two can't collide.
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Chat history side-pane. When true, the gray utility pane slides in
   // from the right and the workspace wrapper's right anchor animates
-  // inward — physically pushing the streamed face in, rather than
+  // inward, physically pushing the streamed face in, rather than
   // overlaying it. The InputBar (with its status pills + screenshot
   // strip) ALSO slides into the pane region so the user can keep
   // typing while reading history. Toggled from the InputBar's expand
   // button. Closed by default; the pane is opt-in.
   const [chatPaneOpen, setChatPaneOpen] = useState(false);
 
-  // Window width — drives the InputBar wrapper's animated left anchor
+  // Window width, drives the InputBar wrapper's animated left anchor
   // (it slides between the workspace bottom and the chat-pane bottom
   // as a single mounted unit so typing/voice state is never reset).
   // Tracked via ResizeObserver so it stays correct even when the user
@@ -290,7 +395,7 @@ function AppMain() {
     };
   }, []);
 
-  // Pane width — 50% of the window by default, but the user can
+  // Pane width, 50% of the window by default, but the user can
   // override by dragging the resize handle on the pane's left edge.
   // `userPaneWidth` is null until they drag, then sticks at whatever
   // pixel value they landed on. Persisted to localStorage so the
@@ -313,7 +418,7 @@ function AppMain() {
   // here as its own timestamped item; ChatPane merges these with the
   // chat turns by ts and renders each tool as its own row in the
   // conversation stack at the moment it was called. Ephemeral
-  // (in-memory only, reset across reloads) — chat memory itself
+  // (in-memory only, reset across reloads), chat memory itself
   // persists, but tool annotations don't.
   const [toolEvents, setToolEvents] = useState<Array<{
     id: number;
@@ -325,7 +430,7 @@ function AppMain() {
   // ("thinking" → "thinking") don't spam the timeline with duplicates.
   const lastToolLabelRef = useRef<string>('');
 
-  // Resize handler — owns a pointermove/pointerup pair on the document
+  // Resize handler, owns a pointermove/pointerup pair on the document
   // so dragging continues even when the cursor leaves the 6px handle
   // strip. Clamped via the same min/max as chatPaneWidth above so the
   // workspace can't be reduced below 280px. Persists to localStorage
@@ -353,7 +458,7 @@ function AppMain() {
           localStorage.setItem('unclaw.chatPaneWidth', String(v));
         }
       } catch {
-        // Ignore — quota / private browsing.
+        // Ignore, quota / private browsing.
       }
     };
     document.addEventListener('pointermove', onMove);
@@ -378,14 +483,14 @@ function AppMain() {
     wardrobe: wardrobeRef,
   }), []);
 
-  // Rail-badge state — fetched at the App level so the badges
+  // Rail-badge state, fetched at the App level so the badges
   // populate even before the user has ever opened the corresponding
   // panel. The panels still own their own fetch loop for their full
   // content; this is just the lightweight count/aggregate snapshot.
   const [remindersCount, setRemindersCount] = useState(0);
   const [stocksDayPct, setStocksDayPct] = useState<number | null>(null);
 
-  // Auth session — fetched at app start from safeStorage.
+  // Auth session, fetched at app start from safeStorage.
   //   undefined: still resolving (don't render anything auth-dependent)
   //   null:      no valid session, show SignInScreen (unless guestMode)
   //   object:    signed in
@@ -403,7 +508,7 @@ function AppMain() {
     }
   });
 
-  // User profile — fetched at app start. `null` means soul has no
+  // User profile, fetched at app start. `null` means soul has no
   // profile yet, which triggers the onboarding wizard in firstRun mode.
   // `undefined` means the fetch hasn't resolved yet (we render nothing
   // profile-dependent until then to avoid a flash of "Aryan").
@@ -415,12 +520,12 @@ function AppMain() {
   // Live mirror of the Identity step's name input. The Wizard streams
   // it up via `onIdentityNameChange` so the Greeting on the workspace
   // (rendered alongside the wizard panel) can echo "good evening,
-  // <name>" as the user types — they see their name take effect
+  // <name>" as the user types, they see their name take effect
   // before they hit Continue. Empty while the field is blank.
   const [wizardLiveName, setWizardLiveName] = useState('');
 
   // Close the chat pane whenever the onboarding wizard opens (any
-  // mode — first-run auto-mount, edit via the pencil, or reset).
+  // mode, first-run auto-mount, edit via the pencil, or reset).
   // The wizard occupies the same bottom slot as the InputBar and
   // expects the workspace to be full-width; leaving the pane open
   // would crowd both. Placed here (after wizardMode is declared and
@@ -431,7 +536,7 @@ function AppMain() {
   }, [wizardMode]);
 
   // Apply the user's custom assistant name (set in onboarding) only on
-  // the default Grace persona — Mark stays Mark. This way the user can
+  // the default Grace persona, Mark stays Mark. This way the user can
   // rename their primary assistant without affecting the alternate
   // persona slot. The override flows through into displayName + the
   // in-prompt voice the LLM hears, so every surface that says "Grace"
@@ -463,11 +568,11 @@ function AppMain() {
   // Streaming Moonshine transcriber. One instance for the whole app;
   // both push-to-talk (spacebar) and continuous voice mode (button)
   // drive the same low-level transcriber. They're mutually exclusive
-  // — only one mode can be active at a time, enforced by the start
+  //, only one mode can be active at a time, enforced by the start
   // calls below.
   const streaming = useStreamingTranscriber();
 
-  // Ref to the InputBar's imperative handle — used to drop the final
+  // Ref to the InputBar's imperative handle, used to drop the final
   // text from a push-to-talk session into the textarea so the user
   // can review and edit before sending.
   const inputBarRef = useRef<InputBarHandle | null>(null);
@@ -487,7 +592,7 @@ function AppMain() {
   const voiceBaselineRef = useRef<string>('');
 
   // Holds the currently-running escalation poll interval (if any) so we
-  // can clear it from anywhere — useEffect cleanup, escalation done, etc.
+  // can clear it from anywhere, useEffect cleanup, escalation done, etc.
   const escalationIntervalRef = useRef<number | null>(null);
 
   // Streaming Kokoro chat state. AbortController cancels an in-flight
@@ -548,7 +653,7 @@ function AppMain() {
       // so callers can correlate side-data (e.g. tools-used labels)
       // with the assistant turn that just landed. Web citations from
       // an escalation web_search ride along on `result.web_sources`
-      // — attach them to this turn so the chat pane can render
+      //, attach them to this turn so the chat pane can render
       // attribution chips. Sources never go back to the LLM (memory's
       // getHistory strips them).
       const rawSources = (result as { web_sources?: unknown }).web_sources;
@@ -571,7 +676,8 @@ function AppMain() {
     const isAnimAction = actionName === 'give_a_kiss'
       || actionName === 'do_dance'
       || actionName === 'say_hello'
-      || actionName === 'react_as_star_wars_fan';
+      || actionName === 'react_as_star_wars_fan'
+      || actionName === 'celebrate';
 
     if (pixelStreaming) {
       pixelStreaming.emitUIInteraction({
@@ -603,7 +709,7 @@ function AppMain() {
 
   /** Dispatch ONE streaming chunk to UE. Mirrors the descriptor shape
    *  dispatchChatResult sends but skips memory + the speak-finished
-   *  timer — those happen once per stream (memory on first chunk, timer
+   *  timer, those happen once per stream (memory on first chunk, timer
    *  on the final-chunk total_duration). Action animations are also
    *  scoped to chunk 0 since soul only attaches `action` there.
    *
@@ -626,10 +732,10 @@ function AppMain() {
       Timestamp: new Date().toISOString(),
     });
     // Fire the portal's WS broadcast so its curves/waveform display
-    // tracks playback. Best-effort — failure is logged, never thrown,
+    // tracks playback. Best-effort, failure is logged, never thrown,
     // so a flaky portal subscriber never breaks the chat path.
     if (chunk.id) {
-      void fetch(`http://127.0.0.1:8765/broadcast/${chunk.id}`, {
+      void fetch(`${getSoulBaseUrl()}/broadcast/${chunk.id}`, {
         method: 'POST',
       }).catch((err) => {
         console.warn('[chat] /broadcast ping failed', err);
@@ -640,7 +746,8 @@ function AppMain() {
       const isAnim = action.name === 'give_a_kiss'
         || action.name === 'do_dance'
         || action.name === 'say_hello'
-        || action.name === 'react_as_star_wars_fan';
+        || action.name === 'react_as_star_wars_fan'
+        || action.name === 'celebrate';
       if (isAnim) {
         dispatchActionToUE(pixelStreaming, action, chunk.response);
       }
@@ -657,7 +764,7 @@ function AppMain() {
    *  tools have multi-second loops and there's nothing to gain by
    *  hammering the endpoint faster. */
   const startEscalationPolling = useCallback((jobId: string) => {
-    // Clear any previous interval — defensive, e.g. if two escalations
+    // Clear any previous interval, defensive, e.g. if two escalations
     // overlapped (shouldn't happen but isSending isn't bulletproof).
     if (escalationIntervalRef.current !== null) {
       window.clearInterval(escalationIntervalRef.current);
@@ -683,13 +790,13 @@ function AppMain() {
       }
       setEscalating(false);
       setStatusHistory([]);
-      // Tool events are KEPT — they're now part of the conversation
+      // Tool events are KEPT, they're now part of the conversation
       // history at the timestamps they happened, interleaved with
       // user/assistant turns by the chat pane.
     };
 
     const pushStatus = (text: string) => {
-      // Dedupe consecutive identical labels — a tool emitting the
+      // Dedupe consecutive identical labels, a tool emitting the
       // same status twice in a row shouldn't render twice.
       if (lastToolLabelRef.current === text) {
         // Still update the floating-pill stack since it has its own
@@ -738,12 +845,12 @@ function AppMain() {
           const addedTurn = dispatchChatResult(step.result);
           // Snapshot pending tools onto the FINAL assistant turn that
           // closes this escalation. Narration turns mid-flight don't
-          // get the snapshot — they're just the model's progress
+          // get the snapshot, they're just the model's progress
           // updates, not the resolved answer. The "final" trigger:
           // server says no more results queued (`!step.more`).
           // Tool events are already in the timeline at their original
           // timestamps; nothing to migrate when the final lands.
-          // NOTE: don't reset lastToolLabelRef here — the soul polling
+          // NOTE: don't reset lastToolLabelRef here, the soul polling
           // queue can drain a trailing duplicate status AFTER the
           // final result (different items on different ticks). With
           // the ref reset, that duplicate bypasses the dedup and
@@ -766,7 +873,7 @@ function AppMain() {
     }, 1200);
   }, [dispatchChatResult]);
 
-  // Tidy up the polling interval when App unmounts — orphaned intervals
+  // Tidy up the polling interval when App unmounts, orphaned intervals
   // would keep firing fetches against a dead server.
   useEffect(() => () => {
     if (escalationIntervalRef.current !== null) {
@@ -821,7 +928,7 @@ function AppMain() {
   );
 
   // File-picker attach (Plus button on the input bar). InputBar
-  // normalizes via canvas before calling us — same shape as paste.
+  // normalizes via canvas before calling us, same shape as paste.
   // Supports multiple files at once.
   const handleAttachImages = useCallback(
     (imgs: Array<{ base64: string; width: number; height: number }>) => {
@@ -842,7 +949,7 @@ function AppMain() {
     [],
   );
 
-  // /express slash command — fires a Text2Face-only probe with the
+  // /express slash command, fires a Text2Face-only probe with the
   // emotion as the mood prompt. Bypasses LLM, TTS, and LipSync; UE
   // just plays the resulting face animation. We emit the same
   // respond_with_mood_server UE event the regular chat path uses
@@ -921,7 +1028,7 @@ function AppMain() {
     setIsSending(true);
     isAISpeakingRef.current = true;
 
-    // Record the user turn — with any staged screenshots so the chat
+    // Record the user turn, with any staged screenshots so the chat
     // pane renders them in-bubble. Image-only sends (no text) still
     // create a turn now; `add` allows an empty-content turn when it
     // carries images.
@@ -942,7 +1049,7 @@ function AppMain() {
     if (pendingImages.length > 0) setAttachedImages([]);
 
     // When the user interrupts mid-response, give the LLM the text it
-    // was saying so it can adapt — don't repeat info, treat the user's
+    // was saying so it can adapt, don't repeat info, treat the user's
     // input as a follow-up/correction. Composed AFTER the persona
     // prompt so the persona voice still leads.
     const systemExt = interruptedText
@@ -1012,7 +1119,7 @@ function AppMain() {
             memoryAdded = true;
           }
           // Schedule. Negative deltas (chunk arrived after its play
-          // time) dispatch immediately — happens when synth is slower
+          // time) dispatch immediately, happens when synth is slower
           // than the audio it produced, i.e. the buffer is empty.
           // INTER_CHUNK_GAP_MS adds a small breath between chunks so
           // sentence boundaries get natural prosodic spacing instead
@@ -1023,7 +1130,7 @@ function AppMain() {
           // sentence boundaries (Kokoro splits TEXT directly, Qwen3
           // pre-splits in soul/qwen3_runtime), so gaps land on
           // natural pauses either way. Qwen3's voice-clone prosody
-          // already includes more natural conversational pacing —
+          // already includes more natural conversational pacing , 
           // a smaller gap reads as a breath instead of a held pause.
           const INTER_CHUNK_GAP_MS = streamingProvider === 'qwen3' ? 300 : 800;
           const playAt = firstChunkArrivedAt
@@ -1059,7 +1166,7 @@ function AppMain() {
           // sentence boundaries (Kokoro splits TEXT directly, Qwen3
           // pre-splits in soul/qwen3_runtime), so gaps land on
           // natural pauses either way. Qwen3's voice-clone prosody
-          // already includes more natural conversational pacing —
+          // already includes more natural conversational pacing , 
           // a smaller gap reads as a breath instead of a held pause.
           const INTER_CHUNK_GAP_MS = streamingProvider === 'qwen3' ? 300 : 800;
           const gapsMs = Math.max(0, totalChunks - 1) * INTER_CHUNK_GAP_MS;
@@ -1094,7 +1201,7 @@ function AppMain() {
 
       // 20b chose to escalate (or soul auto-routed to escalation
       // because we attached image(s)). The transition reply has
-      // already been voiced via dispatchChatResult — now start
+      // already been voiced via dispatchChatResult, now start
       // polling for narrations and the final response.
       if (result.escalation && result.escalation.id) {
         startEscalationPolling(result.escalation.id);
@@ -1107,11 +1214,11 @@ function AppMain() {
     }
   }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream]);
 
-  // Slash-command animation dispatcher — hands a ready-to-go UE
+  // Slash-command animation dispatcher, hands a ready-to-go UE
   // descriptor to the dock so it can fire `/dance`, `/kiss`, `/hello`
   // without round-tripping through the LLM.
   const dispatchAnimation = useCallback((
-    name: 'give_a_kiss' | 'do_dance' | 'say_hello' | 'react_as_star_wars_fan',
+    name: 'give_a_kiss' | 'do_dance' | 'say_hello' | 'react_as_star_wars_fan' | 'celebrate',
   ) => {
     if (!pixelStreaming) return;
     const eventType =
@@ -1139,7 +1246,7 @@ function AppMain() {
       inputBarRef.current?.setText(trimmed);
       void handleSendMessage(trimmed);
       // Race window between setText and the chat-firing reset is fine
-      // — the user message lands in the chat pane immediately, so the
+      //, the user message lands in the chat pane immediately, so the
       // textarea content is just a momentary mirror anyway.
       window.setTimeout(() => {
         inputBarRef.current?.setText('');
@@ -1167,7 +1274,7 @@ function AppMain() {
       stop: streaming.stop,
     },
     onBargeIn: () => {
-      // Stage 1: tentative interruption — we've heard ~256 ms of
+      // Stage 1: tentative interruption, we've heard ~256 ms of
       // confident user speech while the AI is talking. Mute audio
       // immediately so the user has silence to talk into; cache
       // what was being said so the next chat (if it actually
@@ -1178,7 +1285,7 @@ function AppMain() {
       isAISpeakingRef.current = false;
       pendingInterruptedRef.current = lastResponseRef.current || null;
 
-      // Stage 2: false-alarm guard — if no transcription comes
+      // Stage 2: false-alarm guard, if no transcription comes
       // back within the resume window, the "barge-in" was probably
       // noise/cough/echo. Restore audio playback and clear the
       // pending-interrupt state so the AI keeps going where it
@@ -1191,7 +1298,7 @@ function AppMain() {
           pendingInterruptedRef.current = null;
           const v2 = document.querySelector('video');
           if (v2) v2.muted = false;
-          // Don't flip isAISpeakingRef back to true — the audio
+          // Don't flip isAISpeakingRef back to true, the audio
           // was already in flight and its natural duration timer
           // (set in dispatchChatResult) will clear it normally.
         }
@@ -1211,7 +1318,7 @@ function AppMain() {
     }
   }, [isSending]);
 
-  // Top-level badge poll. Independent of the panels — the rail
+  // Top-level badge poll. Independent of the panels, the rail
   // shows counts from app start, and refresh on every chat round
   // (so reminder tool calls reflect immediately). Gated on the
   // pixel-streaming connection: nothing hits soul before the stream
@@ -1229,7 +1336,7 @@ function AppMain() {
     return () => { cancelled = true; };
   }, [refreshKey, connectionState]);
 
-  // Resume auth session on app start. Independent of stream state —
+  // Resume auth session on app start. Independent of stream state , 
   // the SignInScreen renders over the loading screen anyway, so the
   // user can authenticate while the UnClaw Engine is still warming up.
   useEffect(() => {
@@ -1289,7 +1396,7 @@ function AppMain() {
     profileSyncedRef.current = false;
   }, [authToken]);
 
-  // Account reset — wipes every local + cloud surface and drops the
+  // Account reset, wipes every local + cloud surface and drops the
   // app back to the SignInScreen (or first-run wizard for guests).
   // Bound to the "Reset all data" entry in the profile popover so the
   // user can re-test onboarding end-to-end without manually clearing
@@ -1319,13 +1426,13 @@ function AppMain() {
   //     configuration without going through customization mode.
   //
   // Sends three descriptors:
-  //   1. initializeClothing — 4 int fields (top/bottom/shoes/hair)
-  //   2. changeLightAngle — string `lightAngle` 0-360
-  //   3. changeLightColor — flat dot-named string fields lightColor.r/.g/.b
+  //   1. initializeClothing, 4 int fields (top/bottom/shoes/hair)
+  //   2. changeLightAngle, string `lightAngle` 0-360
+  //   3. changeLightColor, flat dot-named string fields lightColor.r/.g/.b
   //
   // No-op when the stream isn't connected or the profile hasn't loaded
   // a wardrobe yet.
-  // sendAndAwaitAck wrapped with retry — used by applySavedWardrobe so
+  // sendAndAwaitAck wrapped with retry, used by applySavedWardrobe so
   // the stream-connect init handshake survives the "UE technically
   // connected but not yet ready to process descriptors" race window.
   // Sends → waits up to 1500ms for `{EventType, status: "received"}`
@@ -1345,7 +1452,7 @@ function AppMain() {
         console.warn(`[wardrobe] ${payload.EventType} attempt ${attempt} failed:`, err);
       }
     }
-    console.error(`[wardrobe] ${payload.EventType} GAVE UP after ${maxAttempts} attempts — UE never ack'd`);
+    console.error(`[wardrobe] ${payload.EventType} GAVE UP after ${maxAttempts} attempts, UE never ack'd`);
     return false;
   }, [sendAndAwaitAck]);
 
@@ -1353,7 +1460,7 @@ function AppMain() {
     if (!pixelStreaming) return;
     const w = profile?.wardrobe as WardrobeSettings | null | undefined;
     if (!w) return;
-    // Sequential await — UE applies descriptors in order; if one is
+    // Sequential await, UE applies descriptors in order; if one is
     // racing with the prior one we'd see weird intermediate states.
     // The 1500ms-per-attempt × 3 attempts × 3 descriptors caps the
     // whole handshake at ~13.5s worst case (vs hanging forever).
@@ -1378,10 +1485,39 @@ function AppMain() {
     console.log('[wardrobe] init handshake complete');
   }, [pixelStreaming, profile?.wardrobe, sendWithRetry]);
 
+  // Mood-accent bleed. The wardrobe lighting color the user picks for
+  // the character also seeps into the UI via two CSS vars (`--mood-accent`
+  // for solid spots, `--mood-tint-faint` for the hairline-top gradient).
+  // Very subtle: only the chrome edges and a single decorative period
+  // in the Greeting pick this up. The system `--accent` (focus, save,
+  // error) stays ember red regardless so meaning never shifts with mood.
+  // Fires on profile load and every wardrobe save; falls back to the
+  // ember-red default if no wardrobe is configured.
+  useEffect(() => {
+    const w = profile?.wardrobe as WardrobeSettings | null | undefined;
+    const idx = w?.accentColorIndex ?? 0;
+    const c = ACCENT_COLORS[idx] ?? ACCENT_COLORS[0];
+    const r = Math.round(c.r * 255);
+    const g = Math.round(c.g * 255);
+    const b = Math.round(c.b * 255);
+    const root = document.documentElement.style;
+    root.setProperty('--mood-accent', c.hex);
+    // Low-alpha tint used by the hairline-top utility class. Sits at
+    // ~22% so it reads as "ambient light catching the lip of the glass"
+    // rather than as a colored decoration. Mixed with a small white
+    // bias so very dark chosen lights (none in the current palette,
+    // but defensive for future palette additions) still register as
+    // a highlight rather than disappearing.
+    root.setProperty('--mood-tint-faint',
+      `rgba(${r}, ${g}, ${b}, 0.22)`);
+    root.setProperty('--mood-tint-soft',
+      `rgba(${r}, ${g}, ${b}, 0.14)`);
+  }, [profile?.wardrobe]);
+
   // Track whether we've sent initializeClothing for the current
   // stream connection. Resets on disconnect so a reconnect re-fires.
   // Without this gate, every profile update (e.g. after save) would
-  // re-send the descriptors — UE just received finalizeClothing, no
+  // re-send the descriptors, UE just received finalizeClothing, no
   // need to clobber it with another init.
   const wardrobeInitSentRef = useRef(false);
   useEffect(() => {
@@ -1396,7 +1532,7 @@ function AppMain() {
     void applySavedWardrobe();
   }, [connectionState, pixelStreaming, profile?.wardrobe, applySavedWardrobe]);
 
-  // Soft session reset — tells Unreal to drop back to neutral pose +
+  // Soft session reset, tells Unreal to drop back to neutral pose +
   // clear any in-progress speech, then immediately re-applies the
   // user's saved wardrobe so the character returns to THEIR look,
   // not the engine default. Doesn't touch auth, profile, keys, or
@@ -1422,7 +1558,7 @@ function AppMain() {
   useEffect(() => {
     // Profile sync runs once we have BOTH a connected stream AND a
     // session (either signed-in OR guest mode). Signed-in: reconcile
-    // cloud (Worker) and local (soul) — cloud wins when present, soul
+    // cloud (Worker) and local (soul), cloud wins when present, soul
     // migrates up when cloud is empty. Guest mode: skip cloud entirely
     // and read whatever soul has locally. Wizard fires when there's
     // no profile on the side(s) we consulted.
@@ -1479,7 +1615,7 @@ function AppMain() {
     memory.clear();
   }, [memory]);
 
-  // Toggle a sheet open/closed. The wardrobe rail icon is special —
+  // Toggle a sheet open/closed. The wardrobe rail icon is special , 
   // it doesn't open a sheet; it flips the full-screen customization
   // mode on, which hides the rest of the UI. Every other key uses
   // the normal sheet flow.
@@ -1502,22 +1638,22 @@ function AppMain() {
 
   // Idle micro-expression driver. Fires POST /idle on a jittered
   // timer (~30-50s mean) to keep Grace alive when the user isn't
-  // talking. UnClaw is the canonical idle driver — soul refuses /idle
+  // talking. UnClaw is the canonical idle driver, soul refuses /idle
   // without an explicit llm_model in the body, which `fireIdle` pulls
   // from the user's apiKeys (the SAME model + key chat uses).
   //
   // Gates (matching soul's own short-circuits + a couple renderer-side
   // gates that soul can't observe):
-  //   * stream not connected         — pointless, no UE to render to
-  //   * isSending                    — chat in flight
-  //   * isAISpeakingRef              — Grace is still mid-reply
-  //   * voice listening              — user is talking; idle would
+  //   * stream not connected        , pointless, no UE to render to
+  //   * isSending                   , chat in flight
+  //   * isAISpeakingRef             , Grace is still mid-reply
+  //   * voice listening             , user is talking; idle would
   //                                     compete for audio focus
-  //   * wizardMode                   — onboarding overlay is up
+  //   * wizardMode                  , onboarding overlay is up
   //
   // Soul itself also refuses to fire when no /ws clients are
   // connected, when a chat is in flight, when audio is still playing
-  // (`_speaking_until_ts`), or when escalation is running — so any
+  // (`_speaking_until_ts`), or when escalation is running, so any
   // race we miss client-side gets caught server-side too.
   useEffect(() => {
     if (!isConnected) return undefined;
@@ -1528,7 +1664,6 @@ function AppMain() {
     // pause button mutate that registry, and this is how UnClaw obeys
     // them without a separate poll loop. Lag is bounded by the current
     // tick interval (worst case ~one period after a change).
-    const SOUL_URL = 'http://127.0.0.1:8765';
     const PAUSE_REPOLL_MS = 8_000;        // recheck while paused/disabled
     const DEFAULT_PERIOD_S = 37;          // mirror of soul's default
     const tick = async () => {
@@ -1538,7 +1673,7 @@ function AppMain() {
       let periodS = DEFAULT_PERIOD_S;
       let paused = false;
       try {
-        const r = await fetch(`${SOUL_URL}/settings`);
+        const r = await fetch(`${getSoulBaseUrl()}/settings`);
         if (r.ok) {
           const s = await r.json();
           if (typeof s.idle_period_s === 'number') periodS = s.idle_period_s;
@@ -1598,13 +1733,13 @@ function AppMain() {
   //     textarea remains the surface; partial transcriptions drive
   //     setText() on every update so words appear past the user's
   //     baseline content (snapshot at activation time).
-  //   * Successive activations APPEND naturally — baseline gets
+  //   * Successive activations APPEND naturally, baseline gets
   //     promoted on each finalize so the next press starts from the
   //     end of what was just dictated.
   //   * Window focus is required: an out-of-focus app won't grab
   //     spacebar (the listener wouldn't fire then anyway, but we
   //     belt-and-suspender it with document.hasFocus()).
-  //   * Disabled while the continuous-voice button is on — it owns
+  //   * Disabled while the continuous-voice button is on, it owns
   //     the mic and runs its own activation loop.
   useEffect(() => {
     if (!isConnected || !hasSession) return undefined;
@@ -1626,7 +1761,7 @@ function AppMain() {
       // Strip the run of literal spaces the OS auto-repeated into the
       // textarea while we were detecting the hold. Critical: do it
       // SYNCHRONOUSLY by reading the text now, computing the stripped
-      // version, AND mirroring it into the textarea — if we just call
+      // version, AND mirroring it into the textarea, if we just call
       // a strip method on the InputBar the React setMessage is async
       // and getText() in the next line still returns the un-stripped
       // value. That bug was leaving 8+ trailing spaces in the
@@ -1665,7 +1800,7 @@ function AppMain() {
           return;
         }
         if (pushHeldRef.current) {
-          // Hold continues — swallow further auto-repeat spaces.
+          // Hold continues, swallow further auto-repeat spaces.
           e.preventDefault();
         }
         return;
@@ -1732,17 +1867,17 @@ function AppMain() {
   }, [isConnected, hasSession, streaming, voice.isListening]);
 
   // Drive the textarea live as streaming partials arrive. ONLY the
-  // committed portion lands in the textarea — tentative text gets
+  // committed portion lands in the textarea, tentative text gets
   // rendered as a light-gray overlay sitting on top of the textarea
   // (handled by InputBar via the voiceTentative prop). This way the
   // unconfirmed words have a clear visual distinction from the
   // committed text without requiring a separate live-transcript view.
-  // Effect deps don't include tentative — that re-renders InputBar
+  // Effect deps don't include tentative, that re-renders InputBar
   // directly through its prop, no need to call setText for it.
   useEffect(() => {
     if (!streaming.isActive) return;
     const baseline = voiceBaselineRef.current;
-    // trimStart on the committed string — defensive: tokenizer
+    // trimStart on the committed string, defensive: tokenizer
     // decoders sometimes emit a leading whitespace that survives the
     // server-side .strip() (e.g. NBSP). Stripping client-side too
     // ensures the textarea never starts with whitespace.
@@ -1756,7 +1891,7 @@ function AppMain() {
     inputBarRef.current?.setText(`${baseline}${sep}${c}`);
   }, [streaming.isActive, streaming.committed]);
 
-  // Save handler — fires finalizeClothing to UE, persists to soul,
+  // Save handler, fires finalizeClothing to UE, persists to soul,
   // mirrors into local profile state so the next entry into
   // customization sees the new values as `initial`, then exits the
   // mode (which separately fires wardrobeModeOff via the lifecycle
@@ -1772,7 +1907,7 @@ function AppMain() {
     setCustomizationActive(false);
   }, [emitWardrobeDescriptor]);
 
-  // wardrobeModeOn / wardrobeModeOff — fire on entry / exit of the
+  // wardrobeModeOn / wardrobeModeOff, fire on entry / exit of the
   // full-screen customization overlay. Saving sets customizationActive
   // to false (handler above), which naturally triggers wardrobeModeOff
   // through this effect's cleanup.
@@ -1809,13 +1944,13 @@ function AppMain() {
         return <NewsPanel refreshKey={refreshKey} />;
       case 'weather':
         return <WeatherPanel refreshKey={refreshKey} />;
-      // wardrobe is intentionally NOT a sheet — see CustomizationOverlay.
+      // wardrobe is intentionally NOT a sheet, see CustomizationOverlay.
       default:
         return null;
     }
   }, [activeWidget, refreshKey]);
 
-  // Cycle through personas — chevron-prev / chevron-next versions for
+  // Cycle through personas, chevron-prev / chevron-next versions for
   // the AgentSwitcher row above the input bar.
   const handlePrevPersona = useCallback(() => {
     handleAgentSwitch((currentAgentIndex - 1 + AGENTS.length) % AGENTS.length);
@@ -1826,7 +1961,7 @@ function AppMain() {
 
   return (
     <div className="relative flex-1 min-h-0 overflow-hidden">
-      {/* Workspace — everything that should physically shrink when the
+      {/* Workspace, everything that should physically shrink when the
           chat pane opens. The `right` value animates from 0 →
           chatPaneWidth so StreamView, the input bar, and every
           right-anchored floating element move inward together. The
@@ -1847,7 +1982,7 @@ function AppMain() {
         connectionState={connectionState}
       />
 
-      {/* Customization mode — full-screen overlay anchored to the
+      {/* Customization mode, full-screen overlay anchored to the
           workspace wrapper, so it shares Grace's framing. Every other
           chrome element below fades out while it's mounted. Rendered
           OUTSIDE the `isConnected && hasSession` gate so it doesn't
@@ -1865,7 +2000,7 @@ function AppMain() {
         )}
       </AnimatePresence>
 
-      {/* Settings modal — separate from CustomizationOverlay so the two
+      {/* Settings modal, separate from CustomizationOverlay so the two
           can't collide if the user opens settings during a wardrobe
           session. AnimatePresence is INSIDE SettingsPanel since the
           panel needs to animate its own backdrop fade. */}
@@ -1874,8 +2009,8 @@ function AppMain() {
         onClose={() => setSettingsOpen(false)}
       />
 
-      {/* Everything below this point — greeting, widgets, sheet, status,
-          screenshots, input bar, wizard — is gated on a connected
+      {/* Everything below this point, greeting, widgets, sheet, status,
+          screenshots, input bar, wizard, is gated on a connected
           stream AND some kind of session (signed-in OR guest mode).
           When customization mode is on, hide all of it so Grace
           stands alone in the fitting room. */}
@@ -1911,7 +2046,7 @@ function AppMain() {
       </SheetPanel>
 
       {/* Status pills, attached screenshots, and the InputBar all
-          moved out of this conditional — they now live in the
+          moved out of this conditional, they now live in the
           App-level "dock layer" container below, which slides between
           the workspace bottom and the chat-pane bottom as a single
           unit (so the user can keep typing while reading history,
@@ -1936,7 +2071,7 @@ function AppMain() {
               setProfile(saved);
               setWizardMode(null);
               // The wizard may have updated the chat model (and thus
-              // vision capability) — re-read apiKeys so the input bar
+              // vision capability), re-read apiKeys so the input bar
               // gates its image-attach button against the new pick.
               void refreshActiveLlmModel();
             }}
@@ -1952,7 +2087,7 @@ function AppMain() {
       )}
       </div>{/* /workspace wrapper */}
 
-      {/* Dock layer — single sliding container for the InputBar, the
+      {/* Dock layer, single sliding container for the InputBar, the
           escalation status pills, and the attached-screenshot strip.
           When the chat pane is closed, the layer spans the full window
           (left:0, right:0) so the bar sits at the workspace bottom.
@@ -1975,7 +2110,7 @@ function AppMain() {
             transition: 'left 0.32s cubic-bezier(0.16, 1, 0.3, 1)',
           }}
         >
-          {/* Escalation status — stacked text-only labels streaming the
+          {/* Escalation status, stacked text-only labels streaming the
               current activity ("thinking", "navigating", etc.) just
               above the input bar. Newest at bottom in full opacity;
               prior at half opacity; oldest exits upward. */}
@@ -2028,7 +2163,7 @@ function AppMain() {
             </AnimatePresence>
           </div>
 
-          {/* Pending screenshot stack — chips above the bar, animate
+          {/* Pending screenshot stack, chips above the bar, animate
               in from below, hover reveals × per chip, full row rides
               along on send. */}
           {attachedImages.length > 0 && (
@@ -2070,7 +2205,7 @@ function AppMain() {
             </div>
           )}
 
-          {/* InputBar — single-mount, slides with the parent dock
+          {/* InputBar, single-mount, slides with the parent dock
               layer between workspace bottom and chat-pane bottom.
               Hidden during the wizard since the wizard occupies this
               same anchor. Gated on profile so it doesn't flash before
@@ -2126,7 +2261,7 @@ function AppMain() {
                   // agree on it; tentative is just the unstable tail.
                   // Showing tentative-only made the overlay flicker
                   // briefly with the last few words and disappear once
-                  // they stabilized — exactly the "millisecond flash"
+                  // they stabilized, exactly the "millisecond flash"
                   // the user reported. `display` keeps the whole
                   // running transcript visible until finalize clears.
                   voiceActive={streaming.isActive || voice.isListening}
@@ -2148,52 +2283,20 @@ function AppMain() {
         </div>
       )}
 
-      {/* Titlebar — full window width, OUTSIDE the workspace wrapper so
+      {/* Titlebar, full window width, OUTSIDE the workspace wrapper so
           the window chrome stays edge-to-edge even with the chat pane
           open. Z-index 50 keeps it above both workspace and pane.
-          In customization mode we drop into "minimal" — the profile
+          In customization mode we drop into "minimal", the profile
           cluster + wordmark hide, but pin / minimize / close stay so
           the window remains manageable. */}
       <Titlebar
         minimalMode={customizationActive}
-        leftSlot={customizationActive ? (
-          // Back button rendered INSIDE the Titlebar's left slot so
-          // it lives in the same DOM subtree (and no-drag wrapper)
-          // as the working window controls. Clicking it reliably
-          // exits customization without being eaten by the Titlebar's
-          // drag region. Style matches the profile button it
-          // visually replaces (36×36 frosted circle).
-          <button
-            type="button"
-            onClick={handleExitCustomization}
-            aria-label="Back"
-            title="Back"
-            className="glass-btn"
-            style={{
-              width: 36,
-              height: 36,
-              padding: 0,
-              borderRadius: '50%',
-              background: 'rgba(255, 255, 255, 0.06)',
-              border: '1px solid rgba(255, 255, 255, 0.10)',
-              color: 'var(--text-primary)',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              transition:
-                'background 180ms var(--ease-out-quart), color 180ms var(--ease-out-quart)',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.12)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
-            }}
-          >
-            <ArrowLeft size={17} strokeWidth={1.8} />
-          </button>
-        ) : undefined}
+        // Customization mode no longer borrows the Titlebar's leftSlot
+        // for its back button. The back button + "Customization" label
+        // now live as a single cluster inside CustomizationOverlay,
+        // positioned below the macOS traffic lights so both belong to
+        // the same left-side beat. Titlebar in minimalMode just hides
+        // its profile cluster and shows the platform window controls.
         showReconnecting={showReconnecting}
         user={authUser}
         guestMode={guestMode}
@@ -2216,7 +2319,7 @@ function AppMain() {
       />
 
       {/* Sign-in screen. Mounted whenever auth has resolved to "no
-          session" AND the user hasn't opted into guest mode — sits
+          session" AND the user hasn't opted into guest mode, sits
           over the loading screen so the user can authenticate while
           the UnClaw Engine is still warming up. Renders on top of
           everything else (zIndex 60). */}
@@ -2227,7 +2330,7 @@ function AppMain() {
         />
       )}
 
-      {/* Chat history side pane — slides in from the right; the
+      {/* Chat history side pane, slides in from the right; the
           workspace wrapper above shrinks in unison so the stream is
           physically pushed in, not overlaid. Only mounted once
           a session exists (authed or guest); conversation history
@@ -2245,7 +2348,7 @@ function AppMain() {
         />
       )}
 
-      {/* Chat pane header — rendered as a SIBLING of <ChatPane>, NOT
+      {/* Chat pane header, rendered as a SIBLING of <ChatPane>, NOT
           inside it, so its z-index isn't trapped inside the pane's
           z-35 stacking context. At z-60 it stacks above the Titlebar
           (z-50), and the WebkitAppRegion: 'no-drag' on the wrapper
@@ -2279,7 +2382,7 @@ function AppMain() {
 }
 
 // ---------------------------------------------------------------------
-// Screenshot thumbnail — pending attachment preview shown above the
+// Screenshot thumbnail, pending attachment preview shown above the
 // input bar after the user captures a region via Ctrl+Shift+G. Hover
 // reveals a circular × that clears the attachment without sending.
 // ---------------------------------------------------------------------

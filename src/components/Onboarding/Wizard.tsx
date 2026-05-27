@@ -541,13 +541,17 @@ export function Wizard({
           flexDirection: 'column',
         }}
       >
-        {/* Body — animated step content. No scroll: the panel grows to
-            fit, and each step is sized to fit comfortably without
-            overflowing. */}
+        {/* Body — animated step content. Scrolls internally when the
+            step's content exceeds the panel height (Connections step
+            grew past the visible area once the agentic CLI section
+            landed with its keyless status card + live model dropdown).
+            The bottom action bar stays pinned outside this scroll
+            region so Verify / Continue are always reachable. */}
         <div
           style={{
             flex: '1 1 auto',
             minHeight: 0,
+            overflowY: 'auto',
             padding: '20px 22px 14px',
           }}
         >

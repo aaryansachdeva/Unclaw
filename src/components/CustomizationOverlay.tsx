@@ -1,4 +1,4 @@
-// Customization mode — full-screen overlay.
+// Customization mode, full-screen overlay.
 //
 // Same spatial composition as before (left rail of typographic
 // pickers + right column of dial / accent / save), but pulled back
@@ -9,7 +9,7 @@
 // "Whisper, don't shout." The number is still the hero of each
 // vignette, but in the brand body font with tight letterspacing
 // instead of an italic serif. The chrome around the controls is
-// the same glass + blur language as the existing widget panels —
+// the same glass + blur language as the existing widget panels , 
 // the mode feels like a continuation of the app, not a separate
 // world.
 //
@@ -20,7 +20,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronLeft, ChevronRight, Check } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Check, ArrowLeft } from 'lucide-react';
 import { LightingDial } from './LightingDial';
 import type { WardrobeSettings } from '../services/userSettings';
 
@@ -61,7 +61,7 @@ interface CustomizationOverlayProps {
   initial?: WardrobeSettings | null;
   onEmit: (payload: Record<string, unknown>) => void;
   onSave: (settings: WardrobeSettings) => void;
-  /** Close without saving — try-on behavior. */
+  /** Close without saving, try-on behavior. */
   onCancel: () => void;
 }
 
@@ -151,7 +151,7 @@ export function CustomizationOverlay({
         pointerEvents: 'none',
       }}
     >
-      {/* Subtle edge vignette — same restraint pattern the existing
+      {/* Subtle edge vignette, same restraint pattern the existing
           chrome uses (whisper, don't shout). Just enough to focus the
           eye toward the centered character, no atmospheric drama. */}
       <div
@@ -165,35 +165,90 @@ export function CustomizationOverlay({
         }}
       />
 
-      {/* "Customization" mode label — small caps line that sits to
-          the right of the back button (which Titlebar now renders in
-          its left slot — see App.tsx leftSlot prop). Aligned with
-          the Titlebar's content row vertically so it reads as part
-          of the chrome, not the overlay body. */}
+      {/* Back-button + label cluster, anchored to the LEFT under the
+          macOS traffic lights. Both elements sit in the same horizontal
+          row so they read as one beat: the back affordance leading the
+          eye to the small-caps mode label. Below the traffic-light row
+          (which occupies y ~8–28 on macOS), padded enough that the
+          glass circle never collides with the close button. */}
       <motion.div
-        initial={{ opacity: 0, y: -4 }}
-        animate={{ opacity: 1, y: 0 }}
+        initial={{ opacity: 0, x: -4 }}
+        animate={{ opacity: 1, x: 0 }}
         transition={{ duration: 0.45, ease: EASE_OUT_EXPO, delay: 0.18 }}
         style={{
+          // y=80 (not 52) keeps the cluster BELOW the Titlebar's drag
+          // region (~y0-76). Because this cluster is a DOM sibling of
+          // the Titlebar (not a descendant), the no-drag flag below
+          // can't override AppKit's compositor-level drag hit-test
+          // where the regions overlap; the upper strip of the button
+          // would get eaten as a window-drag start instead of an
+          // onClick. y=80 puts the whole button outside the overlap.
           position: 'absolute',
-          top: 25,
-          left: 68,
-          pointerEvents: 'none',
-          fontSize: 10.5,
-          fontWeight: 700,
-          letterSpacing: '0.20em',
-          textTransform: 'uppercase',
-          color: 'var(--text-ghost)',
-          textShadow: '0 1px 3px rgba(0,0,0,0.55)',
-        }}
+          top: 80,
+          left: 14,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          // The overlay root is pointer-events: none so empty areas
+          // pass clicks through to the stream. Each floating control
+          // needs to re-enable its own pointer events; otherwise the
+          // back button feels dead. Pair with no-drag so AppKit's
+          // traffic-light row above doesn't intercept the click.
+          pointerEvents: 'auto',
+          WebkitAppRegion: 'no-drag',
+        } as React.CSSProperties}
       >
-        Customization
+        <button
+          type="button"
+          onClick={onCancel}
+          aria-label="Back"
+          title="Back"
+          className="glass-btn"
+          style={{
+            width: 32,
+            height: 32,
+            padding: 0,
+            borderRadius: '50%',
+            background: 'rgba(255, 255, 255, 0.06)',
+            border: '1px solid rgba(255, 255, 255, 0.10)',
+            color: 'var(--text-primary)',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            transition:
+              'background 180ms var(--ease-out-quart), border-color 180ms var(--ease-out-quart)',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'rgba(255, 255, 255, 0.12)';
+            e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.18)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+            e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.10)';
+          }}
+        >
+          <ArrowLeft size={15} strokeWidth={1.8} />
+        </button>
+        <span
+          style={{
+            fontSize: 10.5,
+            fontWeight: 700,
+            letterSpacing: '0.20em',
+            textTransform: 'uppercase',
+            color: 'var(--text-ghost)',
+            textShadow: '0 1px 3px rgba(0,0,0,0.55)',
+            pointerEvents: 'none',
+          }}
+        >
+          Customization
+        </span>
       </motion.div>
 
-      {/* ===== Left rail — chevron vignettes ============================
+      {/* ===== Left rail, chevron vignettes ============================
           Typographic, no card chrome. Each picker: caps label whisper
           above, big number in the brand body font, "of N" grounded
-          below. Chevrons are Lucide icons at refined small size —
+          below. Chevrons are Lucide icons at refined small size , 
           matching the existing widget-pill icon vocabulary. */}
       <div style={{
         position: 'absolute',
@@ -219,7 +274,7 @@ export function CustomizationOverlay({
         ))}
       </div>
 
-      {/* ===== Right column — dial, accent palette, save =============== */}
+      {/* ===== Right column, dial, accent palette, save =============== */}
       <div style={{
         position: 'absolute',
         right: 56,
@@ -232,8 +287,8 @@ export function CustomizationOverlay({
         gap: 38,
         pointerEvents: 'none',
       }}>
-        {/* Lighting — section label whisper + the dial. No card around
-            the dial — it floats. Angle readout lives inside the
+        {/* Lighting, section label whisper + the dial. No card around
+            the dial, it floats. Angle readout lives inside the
             LightingDial component itself, now in brand body font.
             Fixed width matches the accent block below so the two
             stacked controls share a vertical center line. */}
@@ -254,10 +309,10 @@ export function CustomizationOverlay({
           <LightingDial value={lightingAngle} onChange={handleLighting} size={168} />
         </motion.div>
 
-        {/* Accent palette — six bulbs. Active one grows + glows in its
+        {/* Accent palette, six bulbs. Active one grows + glows in its
             own hue. Above the row: section label + current color name
             in the same letterspaced caps voice (NOT a serif italic
-            — keep the brand language consistent), tinted in the
+           , keep the brand language consistent), tinted in the
             current color. */}
         <motion.div
           initial={{ opacity: 0, x: 18 }}
@@ -319,9 +374,9 @@ export function CustomizationOverlay({
         </motion.div>
       </div>
 
-      {/* ===== Save — bottom-right anchor ================================
+      {/* ===== Save, bottom-right anchor ================================
           Brand widget-button language: caps, letterspaced, green (the
-          --live token, same color Reminders uses for "completed" —
+          --live token, same color Reminders uses for "completed" , 
           signals a finishing/committing gesture). */}
       <motion.button
         type="button"
@@ -366,7 +421,7 @@ export function CustomizationOverlay({
 }
 
 // ============ chevron vignette (typographic) ===========================
-// Caps label · big number · "of N" — no card. Plus Jakarta Sans
+// Caps label · big number · "of N", no card. Plus Jakarta Sans
 // throughout. Hover state nudges the chevrons inward as a tiny tell
 // that they're tappable.
 
@@ -406,7 +461,7 @@ function ChevronVignette({
         width: 160,
       }}
     >
-      {/* Caps label — same letterspaced whisper voice the rest of the
+      {/* Caps label, same letterspaced whisper voice the rest of the
           app uses for category labels. */}
       <div style={{
         fontSize: 10,
@@ -420,7 +475,7 @@ function ChevronVignette({
         {CATEGORY_LABELS[category]}
       </div>
 
-      {/* Hero row — chevron · number · chevron. The number split-flaps
+      {/* Hero row, chevron · number · chevron. The number split-flaps
           in the tap direction; chevrons stay put. */}
       <div style={{
         display: 'flex',
@@ -471,7 +526,7 @@ function ChevronVignette({
         <ChevronBtn dir="next" onClick={onNext} />
       </div>
 
-      {/* "of N" — grounded below in the brand body font, ghost color. */}
+      {/* "of N", grounded below in the brand body font, ghost color. */}
       <div style={{
         marginTop: 5,
         fontSize: 11,
@@ -558,7 +613,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 // ============ accent bulb ============================================
 // Small color dot that lights up in its own hue when active. The row
-// reads like a string of stage bulbs at the side of the runway —
+// reads like a string of stage bulbs at the side of the runway , 
 // quiet at rest, glowing when chosen.
 
 function AccentBulb({

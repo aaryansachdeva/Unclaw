@@ -1,17 +1,17 @@
-// Step 4 — fully optional. BYOK: chat provider + model dropdowns,
+// Step 4, fully optional. BYOK: chat provider + model dropdowns,
 // provider API key (cloud only), ElevenLabs voice key, and a separate
 // Gemini key for Google Search grounding. Saved encrypted on this
 // device via Electron safeStorage and passed through to soul on each
 // /chat call (services/soulChat.ts handles the read).
 //
 // Three chat providers are supported, mirroring soul's `_select_provider`:
-//   * Groq (cloud) — needs API key
-//   * OpenAI (cloud) — needs API key
-//   * Ollama (local daemon) — no API key, model list discovered live
+//   * Groq (cloud), needs API key
+//   * OpenAI (cloud), needs API key
+//   * Ollama (local daemon), no API key, model list discovered live
 //                             from soul's GET /providers endpoint
 //
 // Gemini stays in the schema but ONLY for Google Search grounding,
-// not as a chat provider — its key gets its own field below.
+// not as a chat provider, its key gets its own field below.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -20,6 +20,10 @@ import {
 } from 'lucide-react';
 import { StepHeader } from './StepHeader';
 import { Dropdown } from './Dropdown';
+import {
+  CliProviderStatusCard,
+  KEYLESS_CLI_PROVIDERS,
+} from '../CliProviderStatusCard';
 import {
   LLM_PROVIDERS,
   getProvider,
@@ -67,7 +71,7 @@ interface Props {
   /** Called with `true` after a successful Check Keys round, or with
    *  `false` to explicitly invalidate (e.g. failed re-check). */
   onValidatedChange: (valid: boolean) => void;
-  /** Fires when a Check Keys round completes with `ok=false` — the
+  /** Fires when a Check Keys round completes with `ok=false`, the
    *  Wizard uses this to dispatch the "something's off with your keys"
    *  pre-gen audio line. Only called on actual check completion, never
    *  on the field-edit reset that also clears validation. */
@@ -129,7 +133,7 @@ export function ConnectionsStep({
   const [showElevenKey, setShowElevenKey] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   // Ollama models come from soul's /providers (live /api/tags scan),
-  // not the static catalog — `null` = not fetched yet, `[]` = soul
+  // not the static catalog, `null` = not fetched yet, `[]` = soul
   // unreachable or no models pulled.
   const [ollamaModels, setOllamaModels] = useState<SoulProviderModel[] | null>(null);
   const [ollamaLoading, setOllamaLoading] = useState(false);
@@ -138,7 +142,7 @@ export function ConnectionsStep({
   // `state` distinguishes idle (button shown) / checking (spinner) /
   // done (per-key icons rendered). When the user edits any key field,
   // result gets cleared and the Wizard's `validated` flips back to
-  // false — they have to re-check before they can finish.
+  // false, they have to re-check before they can finish.
   const [check, setCheck] = useState<{
     state: 'idle' | 'checking' | 'done';
     result: KeyValidationResult | null;
@@ -150,26 +154,45 @@ export function ConnectionsStep({
   // Live model lists per provider, populated from soul's /validate_keys
   // probe (which now returns the provider's /v1/models output). Lets the
   // dropdown swap from the baked catalog to the user's actual accessible
-  // models the moment their key validates — same pattern SettingsPanel
+  // models the moment their key validates, same pattern SettingsPanel
   // uses. Keyed by provider so toggling providers preserves any list the
   // user already verified this session.
   const [liveModelsByProvider, setLiveModelsByProvider] = useState<
     Partial<Record<LLMProviderId, string[]>>
   >({});
 
+  // Latest validation outcome (chat + tts + agentic + gemini_search),
+  // refreshed on auto-probes as well as the explicit Check button.
+  // Drives the CliProviderStatusCard rendering for keyless CLI
+  // providers on both the chat side (LLM section) and agentic side
+  // (AgenticSection). Independent of `check.result` so the card stays
+  // current even after the user opens the step without pressing Check.
+  const [liveValidation, setLiveValidation] = useState<KeyValidationResult | null>(null);
+  // True while ANY auto-probe is in flight (chat-side OR agentic-side).
+  // The card shows "Checking for X" during this window so the user sees
+  // motion instead of a stale state when switching providers.
+  const [isAutoProbing, setIsAutoProbing] = useState(false);
+
   const provider = getProvider(values.llm_provider);
 
-  // Debounced live key-probe — same pattern as SettingsPanel. Fires
+  // Debounced live key-probe, same pattern as SettingsPanel. Fires
   // /validate_keys 800 ms after the user stops typing the key, so the
   // model dropdown re-populates with the live list without needing the
   // explicit "Check keys" button. Errors are swallowed (the button still
   // surfaces them on demand).
+  //
+  // Claude Code is keyless (subscription auth via the local CLI's stored
+  // OAuth token), probe on provider selection alone, no key needed.
   useEffect(() => {
     const pid = values.llm_provider;
+    if (!pid || pid === 'ollama') return;
     const key = (values.llm_api_key || '').trim();
-    if (!pid || pid === 'ollama' || !key) return;
+    // Keyless CLI providers (claude-code, gemini-cli, codex) probe on
+    // selection alone, the rest need a key in hand first.
+    if (!KEYLESS_CLI_PROVIDERS.has(pid) && !key) return;
     if (liveModelsByProvider[pid]?.length) return;
     const t = setTimeout(() => {
+      setIsAutoProbing(true);
       void validateKeys(values).then((res) => {
         if (res.llm.ok && res.llm.models && res.llm.models.length) {
           setLiveModelsByProvider((prev) => ({
@@ -177,16 +200,63 @@ export function ConnectionsStep({
             [pid]: res.llm.models,
           }));
         }
-      }).catch(() => { /* surfaced on Check */ });
+        // Always update liveValidation so the CLI status card sees the
+        // latest probe result (install / setup-token / ready) even when
+        // no models came back.
+        setLiveValidation((prev) => ({
+          ...(prev ?? { ok: false } as KeyValidationResult),
+          llm: res.llm,
+          ...(res.agentic ? { agentic: res.agentic } : {}),
+        } as KeyValidationResult));
+      }).catch(() => { /* surfaced on Check */ })
+        .finally(() => setIsAutoProbing(false));
     }, 800);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [values.llm_provider, values.llm_api_key]);
 
+  // Agentic-side auto-probe. Mirror of the chat-side probe above. Fires
+  // validateKeys when the user picks an agentic provider that needs
+  // validation (CLI providers, or any non-Ollama backend with a key
+  // entered). Without this, the agentic CliProviderStatusCard would sit
+  // at "probing" forever because nothing else fires validateKeys for it.
+  useEffect(() => {
+    if (!values.agentic_enabled) return;
+    const aprov = values.agentic_provider;
+    if (!aprov || aprov === 'ollama') return;
+    const akey = (values.agentic_api_key || '').trim();
+    if (!KEYLESS_CLI_PROVIDERS.has(aprov) && !akey) return;
+    if (liveValidation?.agentic?.ok) return;
+    const t = setTimeout(() => {
+      setIsAutoProbing(true);
+      void validateKeys(values).then((res) => {
+        // When the agentic response carries a model list (CLI providers
+        // return their model catalog here), stash it under the agentic
+        // provider's slot so the Agentic Model dropdown populates from
+        // the live source.
+        const agenticModels = (res.agentic as { models?: string[] } | undefined)?.models;
+        if (aprov && res.agentic?.ok && agenticModels?.length) {
+          setLiveModelsByProvider((prev) => ({
+            ...prev,
+            [aprov]: agenticModels,
+          }));
+        }
+        setLiveValidation((prev) => ({
+          ...(prev ?? { ok: false } as KeyValidationResult),
+          ...(res.llm ? { llm: res.llm } : {}),
+          ...(res.agentic ? { agentic: res.agentic } : {}),
+        } as KeyValidationResult));
+      }).catch(() => { /* surfaced on Check */ })
+        .finally(() => setIsAutoProbing(false));
+    }, 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [values.agentic_enabled, values.agentic_provider, values.agentic_api_key]);
+
   // Fetch Ollama models when the user picks the Ollama provider. If
   // the first attempt returns nothing (race with soul's reachable
   // probe, daemon briefly slow, etc.), retry once after 800ms before
-  // giving up — soul's startup probe takes ~300ms and the cache fills
+  // giving up, soul's startup probe takes ~300ms and the cache fills
   // a hair later. Without this retry the wizard locks into the "No
   // Ollama models found" placeholder even when models ARE installed.
   // Best-effort throughout: if soul stays offline we render the empty
@@ -202,7 +272,7 @@ export function ConnectionsStep({
         setOllamaModels(list);
         return;
       }
-      // First attempt empty — wait + retry once. Avoids the empty
+      // First attempt empty, wait + retry once. Avoids the empty
       // state when the only cause was timing.
       await new Promise(r => setTimeout(r, 800));
       if (cancelled) return;
@@ -233,7 +303,7 @@ export function ConnectionsStep({
         };
       });
     }
-    // Live-only model list. No baked fallback — once the user's key
+    // Live-only model list. No baked fallback, once the user's key
     // validates, soul returns the provider's own /v1/models output and
     // we render it directly (filtered to chat-capable ids). Empty list
     // until validation lands → the dropdown stays disabled with a
@@ -286,7 +356,7 @@ export function ConnectionsStep({
       ...values,
       llm_provider: id,
       llm_model: nextModel,
-      // Wipe the old key when switching to a no-key provider — leaving
+      // Wipe the old key when switching to a no-key provider, leaving
       // it on disk would be surprising.
       llm_api_key: next?.requiresApiKey ? values.llm_api_key : null,
       agentic_provider: canRunLocal ? values.agentic_provider : 'openai',
@@ -326,6 +396,16 @@ export function ConnectionsStep({
   // than tied to the active LLM provider.
   const groundingActive = !!values.gemini_search_api_key;
 
+  // When chat provider IS Gemini (API or CLI), Google Search grounding
+  // is already part of the chat response natively, no separate
+  // gemini_search_api_key needed. Replace the field + toggle with a
+  // short notice; server-side `_effective_gemini_search_key` reuses the
+  // llm_api_key so non-Gemini agentic providers still get web_search.
+  const isGeminiNativeChat = (
+    values.llm_provider === 'gemini'
+    || values.llm_provider === 'gemini-cli'
+  );
+
   // Live validation: which required keys are still missing? Drives the
   // inline "you still need…" panel below + the Wizard's Finish gate.
   // Recomputed on every keystroke (cheap; just a few field reads).
@@ -334,10 +414,13 @@ export function ConnectionsStep({
   const allMissing = missingRequiredKeyFields(values);
   const missing = allMissing.filter((field) => {
     if (mode === 'all') return true;
+    // Any "X key for agentic" string from missingRequiredKeyFields
+    // (label varies per backend: OpenAI / Anthropic / Gemini / DeepSeek).
+    const isAgenticKeyField = field.endsWith(' key for agentic');
     const isLlmField = field === 'LLM provider'
       || field === 'Model'
       || field === 'Agentic model'
-      || field === 'OpenAI key for agentic'
+      || isAgenticKeyField
       || field === 'Tools-capable Ollama chat model'
       || field === 'Gemini API key for grounded search'
       || (field.endsWith(' API key') && field !== 'ElevenLabs API key');
@@ -347,7 +430,7 @@ export function ConnectionsStep({
   // Reset check-result + invalidate the Wizard's "validated" flag any
   // time a setup-relevant field changes. Without this, the user could
   // pass Verify, then change a key, then Finish with stale validation.
-  // Each page invalidates only when ITS OWN scope's fields change —
+  // Each page invalidates only when ITS OWN scope's fields change , 
   // editing the voice provider doesn't invalidate the LLM verify.
   useEffect(() => {
     setCheck((prev) =>
@@ -417,7 +500,7 @@ export function ConnectionsStep({
     }
   };
 
-  // Header copy keyed off mode — same panel reused on both wizard
+  // Header copy keyed off mode, same panel reused on both wizard
   // pages, with whatever's relevant to that page.
   const headerTitle = mode === 'voice'
     ? 'Pick a voice.'
@@ -456,9 +539,6 @@ export function ConnectionsStep({
           <FieldLabel
             text="LLM provider"
             style={{ flex: 1 }}
-            trailing={provider ? (
-              <SignupLink href={provider.signupUrl} />
-            ) : null}
           >
             <Dropdown
               value={values.llm_provider ?? ''}
@@ -494,7 +574,9 @@ export function ConnectionsStep({
                     : provider.requiresApiKey && !values.llm_api_key?.trim()
                       ? 'Enter your key first'
                       : models.length === 0
-                        ? 'Verifying key…'
+                        ? (provider.id === 'claude-code'
+                            ? 'Sign in via Terminal first'
+                            : 'Verifying key…')
                         : 'Choose a model'
               }
               options={models.map((m) => ({
@@ -508,7 +590,7 @@ export function ConnectionsStep({
           </FieldLabel>
         </div>
 
-        {/* API key — only for cloud providers. Ollama runs locally on
+        {/* API key, only for cloud providers. Ollama runs locally on
             the user's machine via the daemon at localhost:11434, so no
             key is needed. */}
         {provider?.requiresApiKey && (
@@ -524,7 +606,7 @@ export function ConnectionsStep({
           </FieldLabel>
         )}
 
-        {/* Chat thinking lever — only shown for models that support it.
+        {/* Chat thinking lever, only shown for models that support it.
             Default 'none' for snappy conversational chat; the agentic
             tier has its own lever (defaults to 'medium') inside
             AgenticSection. */}
@@ -541,7 +623,82 @@ export function ConnectionsStep({
           </FieldLabel>
         )}
 
-        <AgenticSection values={values} onChange={onChange} />
+        <AgenticSection
+          values={values}
+          onChange={onChange}
+          liveModelsByProvider={liveModelsByProvider}
+          liveValidation={liveValidation}
+          isAutoProbing={isAutoProbing}
+        />
+
+        {/* Gemini Search key, sits alongside the chat provider since
+            it's the path that turns on live web grounding. Only used
+            when grounding is enabled; the chat path stays whatever the
+            user picked above. Hidden entirely when the chat provider
+            IS Gemini (chat model grounds responses natively via Google
+            Search; a separate key would be redundant). */}
+        {isGeminiNativeChat ? (
+          <div
+            style={{
+              padding: '10px 12px',
+              background: 'rgba(255, 255, 255, 0.025)',
+              border: '1px solid var(--glass-border)',
+              borderRadius: 10,
+              display: 'flex',
+              gap: 10,
+              alignItems: 'flex-start',
+            }}
+          >
+            <Search
+              size={11}
+              strokeWidth={2}
+              aria-hidden
+              style={{ opacity: 0.7, marginTop: 3, flexShrink: 0 }}
+            />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 500 }}>
+                Google Search grounding (built in)
+              </span>
+              <span
+                style={{
+                  fontSize: 12,
+                  color: 'var(--text-secondary)',
+                  letterSpacing: '0.005em',
+                  lineHeight: 1.45,
+                }}
+              >
+                Your Gemini chat provider grounds replies in live web
+                sources natively, no separate key needed.
+              </span>
+            </div>
+          </div>
+        ) : (
+          <>
+            <FieldLabel text="Gemini API key (Google Search, optional)">
+              <SecretInput
+                value={values.gemini_search_api_key ?? ''}
+                onChange={setGeminiSearchKey}
+                placeholder="AIza…"
+                visible={showGeminiKey}
+                onToggleVisible={() => setShowGeminiKey((v) => !v)}
+                autoComplete="off"
+              />
+            </FieldLabel>
+
+            <Toggle
+              value={values.grounding_search_enabled}
+              onChange={setGrounding}
+              icon={<Search size={11} strokeWidth={2} aria-hidden style={{ opacity: 0.7 }} />}
+              title="Google Search grounding"
+              helper={
+                groundingActive
+                  ? 'When the assistant needs live data, it cites web sources via Gemini. Free tier: 500 grounded requests/day.'
+                  : 'Add a Gemini key above to enable. Lets the assistant cite live web sources for time-sensitive questions.'
+              }
+              dimWhen={!groundingActive}
+            />
+          </>
+        )}
         </>
         )}
 
@@ -554,39 +711,6 @@ export function ConnectionsStep({
           onToggleElevenKey={() => setShowElevenKey((v) => !v)}
           agentName={agentName}
         />
-
-        {/* Gemini Search key — separate from the chat provider. Only
-            used when grounding is enabled; the chat path stays whatever
-            the user picked above (Groq / OpenAI / Ollama). Optional. */}
-        <FieldLabel
-          text="Gemini API key (Google Search, optional)"
-          trailing={
-            <SignupLink href="https://aistudio.google.com/apikey" />
-          }
-        >
-          <SecretInput
-            value={values.gemini_search_api_key ?? ''}
-            onChange={setGeminiSearchKey}
-            placeholder="AIza…"
-            visible={showGeminiKey}
-            onToggleVisible={() => setShowGeminiKey((v) => !v)}
-            autoComplete="off"
-          />
-        </FieldLabel>
-
-        <Toggle
-          value={values.grounding_search_enabled}
-          onChange={setGrounding}
-          icon={<Search size={11} strokeWidth={2} aria-hidden style={{ opacity: 0.7 }} />}
-          title="Google Search grounding"
-          helper={
-            groundingActive
-              ? 'When the assistant needs live data, it cites web sources via Gemini. Free tier: 500 grounded requests/day.'
-              : 'Add a Gemini key above to enable. Lets the assistant cite live web sources for time-sensitive questions.'
-          }
-          dimWhen={!groundingActive}
-        />
-
         </>
         )}
 
@@ -647,7 +771,7 @@ export function ConnectionsStep({
 }
 
 // ---------------------------------------------------------------------
-// Check-keys bar — orchestrates the three render states (idle / checking
+// Check-keys bar, orchestrates the three render states (idle / checking
 // / done) for the validation block. Pulled out as a sub-component so the
 // main step body stays focused on the form fields.
 // ---------------------------------------------------------------------
@@ -676,7 +800,7 @@ function CheckKeysBar({
    *  result.agentic. When the soul-side probe lands, this row will
    *  show the backend's check outcome. */
   agenticEnabled?: boolean;
-  /** Drives the Agentic row label — was hardcoded "Agentic (OpenAI)"
+  /** Drives the Agentic row label, was hardcoded "Agentic (OpenAI)"
    *  even when the user picked Local Ollama. */
   agenticProvider?: AgenticProvider;
   /** When true AND scope includes LLM, render a Web-search (Gemini)
@@ -709,7 +833,7 @@ function CheckKeysBar({
             ? '1px solid var(--accent-strong)'
             : '1px solid var(--glass-border)',
         borderRadius: 10,
-        // Soft accent glow in pending state — pulls the eye to the
+        // Soft accent glow in pending state, pulls the eye to the
         // gating action without going full-blown attention-grabbing
         // (no animation, no flashing colors). Disappears once the
         // user has either verified or failed a check.
@@ -830,7 +954,7 @@ function CheckKeysBar({
         </button>
       </div>
 
-      {/* Network/transport error — distinct from per-key validation
+      {/* Network/transport error, distinct from per-key validation
           failures. Shown above the row results so the user can tell
           "soul is offline" apart from "ElevenLabs rejected this key". */}
       {check.networkError && (
@@ -943,20 +1067,20 @@ function KeyResultRow({
 // ---------------------------------------------------------------------
 
 // ---------------------------------------------------------------------
-// Voice section — TTS provider picker.
+// Voice section, TTS provider picker.
 //
 // Two top-level options:
-//   * ElevenLabs (cloud)   — needs a BYOK API key, ~real-time, paid
-//   * Kokoro (local, free) — open-weight 82M-param model; either soul
+//   * ElevenLabs (cloud)  , needs a BYOK API key, ~real-time, paid
+//   * Kokoro (local, free), open-weight 82M-param model; either soul
 //                            downloads + runs it in-process, OR the
 //                            user has Kokoro running elsewhere and
 //                            hands us a URL.
 //
 // When Kokoro is picked, a sub-radio toggles between:
-//   * Recommended  — soul downloads model + voices on demand (~325MB
+//   * Recommended , soul downloads model + voices on demand (~325MB
 //                    one-time), runs inference locally; no setup beyond
 //                    a single Install button.
-//   * Custom       — user provides an OpenAI-compat endpoint URL
+//   * Custom      , user provides an OpenAI-compat endpoint URL
 //                    (e.g. their own kokoro-fastapi). soul forwards
 //                    every TTS call to that server.
 //
@@ -985,7 +1109,7 @@ function VoiceSection({
   const [kokoro, setKokoro] = useState<KokoroStatus | null>(null);
   const pollRef = useRef<number | null>(null);
 
-  // Poll loop — only active when Kokoro is the chosen provider AND
+  // Poll loop, only active when Kokoro is the chosen provider AND
   // we're in recommended mode. Custom-endpoint users don't need
   // install state. The interval is rebuilt whenever those conditions
   // change so a switch from custom→recommended kicks off a fresh
@@ -1030,7 +1154,7 @@ function VoiceSection({
           if (next.state === 'downloading') {
             pollRef.current = window.setTimeout(tick, 1000);
           }
-        } catch { /* transient — outer effect will retry */ }
+        } catch { /* transient, outer effect will retry */ }
       };
       void tick();
     } catch (err) {
@@ -1054,7 +1178,7 @@ function VoiceSection({
   // Voice options. Soul-reported installed voices first; otherwise
   // the curated catalog so the dropdown isn't empty before install
   // completes. The cloned Grace voice always reads "Grace" regardless
-  // of the user's chosen agent name — the agent_name customization
+  // of the user's chosen agent name, the agent_name customization
   // is for the chat persona, not the underlying voice asset.
   const voiceOptions = useMemo(() => {
     const ids = (kokoro?.voices && kokoro.voices.length > 0)
@@ -1068,7 +1192,7 @@ function VoiceSection({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {/* Provider picker — single row at the top of the section. */}
+      {/* Provider picker, single row at the top of the section. */}
       <FieldLabel text="Voice provider">
         <Dropdown
           value={values.tts_provider}
@@ -1081,13 +1205,10 @@ function VoiceSection({
         />
       </FieldLabel>
 
-      {/* ElevenLabs branch — original BYOK key field. */}
+      {/* ElevenLabs branch, original BYOK key field. */}
       {values.tts_provider === 'elevenlabs' && (
         <FieldLabel
           text="ElevenLabs API key"
-          trailing={
-            <SignupLink href="https://elevenlabs.io/app/settings/api-keys" />
-          }
         >
           <SecretInput
             value={values.elevenlabs_api_key ?? ''}
@@ -1100,7 +1221,7 @@ function VoiceSection({
         </FieldLabel>
       )}
 
-      {/* Kokoro branch — mode picker + install panel / endpoint
+      {/* Kokoro branch, mode picker + install panel / endpoint
           input + voice dropdown. */}
       {values.tts_provider === 'kokoro' && (
         <>
@@ -1142,7 +1263,7 @@ function VoiceSection({
         </>
       )}
 
-      {/* Qwen3 branch — install panel (multi-stage) + voice dropdown.
+      {/* Qwen3 branch, install panel (multi-stage) + voice dropdown.
           No mode picker since v1 is local-only; we may add a custom
           endpoint variant later (mirrored on Kokoro's pattern). */}
       {values.tts_provider === 'qwen3' && (
@@ -1157,7 +1278,7 @@ function VoiceSection({
 }
 
 // ---------------------------------------------------------------------
-// Kokoro mode picker — radio-style toggle between "recommended" and
+// Kokoro mode picker, radio-style toggle between "recommended" and
 // "custom endpoint". Two cards, side by side; the active one gets
 // the accent border.
 // ---------------------------------------------------------------------
@@ -1253,7 +1374,7 @@ function ModeCard({
 }
 
 // ---------------------------------------------------------------------
-// Kokoro install panel — three states tied to the soul-side state
+// Kokoro install panel, three states tied to the soul-side state
 // machine:
 //   * status null / state idle   → show Install button (~325 MB)
 //   * state downloading           → progress bar with bytes_done/total
@@ -1424,24 +1545,24 @@ function formatBytes(n: number): string {
 // Agentic features section. Lives on the LLM page next to the chat
 // model. Two backends:
 //
-//   * Cloud (OpenAI) — runs the Responses API loop with gpt-5.4-mini /
+//   * Cloud (OpenAI), runs the Responses API loop with gpt-5.4-mini /
 //                      -nano. Multi-step browser + memory + web search.
 //                      Requires an OpenAI key (or chat's key if chat is
 //                      already OpenAI).
-//   * Local (Ollama) — runs a Chat-Completions tool loop on the SAME
+//   * Local (Ollama), runs a Chat-Completions tool loop on the SAME
 //                      Ollama model the user picked for chat. No
 //                      OpenAI key needed; no cloud round-trip. Only
 //                      offered when chat is a tools-capable Ollama
 //                      model (see `modelSupportsTools`).
 //
 // Nested states (cloud branch):
-//   1. Toggle off (default)  — escalation disabled.
-//   2. Toggle on + chat is OpenAI — "Use same as chat" checkbox; when
+//   1. Toggle off (default) , escalation disabled.
+//   2. Toggle on + chat is OpenAI, "Use same as chat" checkbox; when
 //                                    checked, reuse chat model + key.
-//   3. Toggle on + chat is NOT OpenAI — OpenAI key field + agentic
+//   3. Toggle on + chat is NOT OpenAI, OpenAI key field + agentic
 //                                        model dropdown.
 //
-// Local branch: no model dropdown, no key field — the chat-tier model
+// Local branch: no model dropdown, no key field, the chat-tier model
 // runs both roles.
 // ---------------------------------------------------------------------
 
@@ -1460,9 +1581,15 @@ const THINKING_LEVEL_OPTIONS: ReadonlyArray<{ id: ThinkingEffort; label: string;
 function AgenticSection({
   values,
   onChange,
+  liveModelsByProvider,
+  liveValidation,
+  isAutoProbing,
 }: {
   values: ApiKeysProfile;
   onChange: (next: ApiKeysProfile) => void;
+  liveModelsByProvider: Partial<Record<LLMProviderId, string[]>>;
+  liveValidation: KeyValidationResult | null;
+  isAutoProbing: boolean;
 }) {
   const [showKey, setShowKey] = useState(false);
 
@@ -1482,7 +1609,7 @@ function AgenticSection({
     onChange({ ...values, agentic_api_key: k || null });
   };
 
-  // Whether the chat provider is OpenAI — "use same as chat" is
+  // Whether the chat provider is OpenAI, "use same as chat" is
   // only meaningful in that case (escalation needs an OpenAI model
   // either way; if chat is already OpenAI we can borrow its key).
   const chatIsOpenAI = values.llm_provider === 'openai';
@@ -1524,18 +1651,24 @@ function AgenticSection({
 
       {values.agentic_enabled && (
         <>
-          {/* Backend picker. Shows all supported agentic providers; the
-              local Ollama option only appears when chat is also Ollama
-              + tools-capable (canRunLocal). Cloud providers are always
-              available since each ships its own native tool-loop in soul. */}
+          {/* Backend picker. Mirrors SettingsPanel's AgenticFacet, all
+              cloud APIs + the 3 CLI-subscription providers + Local
+              Ollama (only when chat is also Ollama + tools-capable).
+              CLI providers (claude-code/gemini-cli/codex) are keyless;
+              detailed sign-in lives in Settings → Agentic, this picker
+              just exposes them so users know the option exists. */}
           <FieldLabel text="Agentic backend">
             <Dropdown
               value={values.agentic_provider}
               onChange={(v) => setBackend((v as AgenticProvider) || 'openai')}
               options={[
-                { id: 'openai',    label: 'OpenAI',           hint: 'Responses API' },
-                { id: 'anthropic', label: 'Anthropic Claude', hint: 'Messages API' },
-                { id: 'gemini',    label: 'Google Gemini',    hint: 'functionDeclarations' },
+                { id: 'openai',      label: 'OpenAI',           hint: 'Responses API' },
+                { id: 'anthropic',   label: 'Anthropic Claude', hint: 'Messages API' },
+                { id: 'gemini',      label: 'Google Gemini',    hint: 'functionDeclarations' },
+                { id: 'deepseek',    label: 'DeepSeek',         hint: 'OpenAI-compat tool loop' },
+                { id: 'claude-code', label: 'Claude Code CLI',  hint: 'Pro/Max subscription' },
+                { id: 'gemini-cli',  label: 'Gemini CLI',       hint: 'Free tier or Pro' },
+                { id: 'codex',       label: 'Codex CLI',        hint: 'ChatGPT subscription' },
                 ...(canRunLocal
                   ? [{ id: 'ollama', label: 'Local (Ollama)', hint: 'no API key' }]
                   : []),
@@ -1555,7 +1688,50 @@ function AgenticSection({
             />
           )}
 
-          {!isLocal && !effectiveReuse && (() => {
+          {/* CLI providers (claude-code / gemini-cli / codex) are
+              keyless. Full install + OAuth flow lives in the shared
+              CliProviderStatusCard: detect status, render the right
+              install/sign-in command, copy + Open-in-Terminal buttons.
+              Plus a live model dropdown populated from the agentic
+              auto-probe's response. Same UX as Settings, no follow-up
+              trip needed after onboarding. */}
+          {KEYLESS_CLI_PROVIDERS.has(values.agentic_provider) && (() => {
+            const aprov = values.agentic_provider;
+            const rawLive = liveModelsByProvider[aprov] ?? [];
+            const entries = rawLive.map((rawId) => ({
+              id: `${aprov}:${rawId}`,
+              label: rawId,
+            }));
+            const placeholder =
+              isAutoProbing ? 'Verifying...'
+              : entries.length === 0 ? 'Sign in via Terminal first'
+              : 'Choose a model';
+            return (
+              <>
+                <CliProviderStatusCard
+                  provider={aprov}
+                  outcome={liveValidation?.agentic ?? liveValidation?.llm ?? null}
+                  isProbing={isAutoProbing}
+                />
+                <FieldLabel text="Agentic model">
+                  <Dropdown
+                    value={values.agentic_model ?? ''}
+                    onChange={setModel}
+                    options={entries}
+                    placeholder={placeholder}
+                    disabled={entries.length === 0}
+                  />
+                </FieldLabel>
+              </>
+            );
+          })()}
+
+          {!isLocal
+            && values.agentic_provider !== 'claude-code'
+            && values.agentic_provider !== 'gemini-cli'
+            && values.agentic_provider !== 'codex'
+            && !effectiveReuse
+            && (() => {
             // Per-provider key + model copy. Each provider's escalation
             // runner in soul accepts the user's agentic_api_key directly;
             // the only differences are the placeholder + signup URL.
@@ -1564,6 +1740,7 @@ function AgenticSection({
               openai:    { label: 'OpenAI',    url: 'https://platform.openai.com/api-keys',         keyPh: 'sk-…',     modelPh: 'gpt-5.4-mini' },
               anthropic: { label: 'Anthropic', url: 'https://console.anthropic.com/settings/keys', keyPh: 'sk-ant-…', modelPh: 'claude-opus-4-7' },
               gemini:    { label: 'Google',    url: 'https://aistudio.google.com/apikey',          keyPh: 'AIza…',    modelPh: 'gemini-2.5-flash' },
+              deepseek:  { label: 'DeepSeek',  url: 'https://platform.deepseek.com/api_keys',     keyPh: 'sk-…',     modelPh: 'deepseek-v4-flash' },
             };
             const m = meta[provider] ?? meta.openai;
             const isOpenAI = provider === 'openai';
@@ -1571,9 +1748,6 @@ function AgenticSection({
               <>
                 <FieldLabel
                   text="Agentic model"
-                  trailing={!chatIsOpenAI || !isOpenAI ? (
-                    <SignupLink href={m.url} />
-                  ) : null}
                 >
                   {isOpenAI ? (
                     <Dropdown
@@ -1625,7 +1799,7 @@ function AgenticSection({
             );
           })()}
 
-          {/* Agentic thinking lever — shown when the effective agentic
+          {/* Agentic thinking lever, shown when the effective agentic
               model supports reasoning. On the local path, that means
               the chat-tier Ollama model supports thinking. On the
               cloud path, soul's _run_escalation honors this for
@@ -1652,7 +1826,7 @@ function AgenticSection({
 
 
 // ---------------------------------------------------------------------
-// Qwen3 section — provider branch UI for Qwen3-TTS.
+// Qwen3 section, provider branch UI for Qwen3-TTS.
 //
 // Self-contained: polls /tts/qwen3/status on its own (different cadence
 // from VoiceSection's Kokoro polling), drives /tts/qwen3/install, and
@@ -1772,7 +1946,7 @@ function Qwen3InstallPanel({
   const vramOk = (status?.free_vram_gb ?? 0) >= (status?.min_free_vram_gb ?? 0);
   const installBlocked = !diskOk || !vramOk;
 
-  // Stage progress — figure out which phases have completed already.
+  // Stage progress, figure out which phases have completed already.
   // Soul reports the CURRENT phase; we mark all earlier phases done.
   const currentPhaseIdx = progress
     ? QWEN3_PHASES.indexOf(progress.phase as Qwen3InstallPhase)
@@ -1865,7 +2039,7 @@ function Qwen3InstallPanel({
         )}
       </div>
 
-      {/* Pre-flight gate warnings — render under the header when the
+      {/* Pre-flight gate warnings, render under the header when the
           checks fail, so the user sees WHY the Install button is
           disabled. Each row tells them how much they have and how
           much is needed. */}
@@ -1889,7 +2063,7 @@ function Qwen3InstallPanel({
 
       {/* Stage list during install. Each phase gets a row; the active
           one shows the bar + detail line, finished ones get a check,
-          pending ones stay dimmed. ~5 rows max — fits without scroll. */}
+          pending ones stay dimmed. ~5 rows max, fits without scroll. */}
       {state === 'downloading' && progress && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {QWEN3_PHASES.map((phase, idx) => {
@@ -2082,7 +2256,7 @@ function SecretInput({
         style={{
           ...FIELD_BASE,
           paddingRight: 38,
-          // Keep system font in both states — masked dots look clean
+          // Keep system font in both states, masked dots look clean
           // in the inherit family, and switching to monospace bled into
           // the placeholder text and made it read mechanical.
         }}
@@ -2124,38 +2298,6 @@ function SecretInput({
   );
 }
 
-function SignupLink({ href }: { href: string }) {
-  const open = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    window.electronAPI?.authOpenExternal?.(href);
-  };
-  return (
-    <a
-      href={href}
-      onClick={open}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 4,
-        fontSize: 11,
-        fontWeight: 500,
-        letterSpacing: '0.05em',
-        textTransform: 'uppercase',
-        color: 'var(--text-secondary)',
-        textDecoration: 'none',
-        cursor: 'pointer',
-        transition: 'color 0.15s var(--ease-out-quart)',
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text-primary)')}
-      onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-secondary)')}
-    >
-      Get key
-      <ExternalLink size={10} strokeWidth={2} aria-hidden />
-    </a>
-  );
-}
-
 function Toggle({
   value,
   onChange,
@@ -2171,7 +2313,7 @@ function Toggle({
   helper: string;
   /** When true, render the row at reduced opacity to communicate that
    *  the toggle has no effect right now (e.g. grounding without Gemini
-   *  selected). Still clickable — the user can pre-set it. */
+   *  selected). Still clickable, the user can pre-set it. */
   dimWhen?: boolean;
 }) {
   return (

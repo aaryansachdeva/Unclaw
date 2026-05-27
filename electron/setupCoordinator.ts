@@ -1,18 +1,18 @@
-// First-run setup coordinator — the Mac equivalent of the Windows
+// First-run setup coordinator, the Mac equivalent of the Windows
 // installer's setup.pyd pipeline. Provisions the runtime under
 // `~/Library/Application Support/Unclaw/runtime/` so the user can
 // double-click Unclaw.app and have everything Just Work without
 // touching a terminal.
 //
 // Stages (each is idempotent + resumable):
-//   1. preflight — disk space, arm64 check, uv on PATH
-//   2. runtime   — uv venv + pip install -r requirements-mac.txt
-//   3. unreal    — fetch + extract + de-quarantine UE Shipping .app
-//   4. models    — fetch + extract lipsync/t2f source + checkpoints
+//   1. preflight, disk space, arm64 check, uv on PATH
+//   2. runtime  , uv venv + pip install -r requirements-mac.txt
+//   3. unreal   , fetch + extract + de-quarantine UE Shipping .app
+//   4. models   , fetch + extract lipsync/t2f source + checkpoints
 //                  + Core ML mlpackages (the "runtime assets" bundle)
 //
 // On success a `.setup-complete` file is written with the release tag.
-// soulSupervisor.ts checks for this before auto-spawning soul — if
+// soulSupervisor.ts checks for this before auto-spawning soul, if
 // missing, it stays its hand and lets this coordinator run instead.
 //
 // All progress events stream to the renderer over IPC ('setup:progress')
@@ -48,7 +48,7 @@ export interface SetupStageState {
   progress: number | null;
   /** One-line headline shown above the progress arc in the wizard. */
   headline: string;
-  /** Optional sub-line — bytes downloaded, package being installed, etc. */
+  /** Optional sub-line, bytes downloaded, package being installed, etc. */
   detail?: string;
 }
 
@@ -167,7 +167,7 @@ export function getSetupSnapshot(): SetupSnapshot {
 
 /**
  * Has setup successfully finished for the current MANIFEST.releaseTag?
- * A completion marker from a prior release counts as incomplete — the
+ * A completion marker from a prior release counts as incomplete, the
  * wizard re-runs to fetch new artifacts when we ship updates.
  */
 export function isSetupComplete(): boolean {
@@ -183,7 +183,7 @@ export function isSetupComplete(): boolean {
 }
 
 /**
- * Run the full setup pipeline. Safe to call multiple times — each
+ * Run the full setup pipeline. Safe to call multiple times, each
  * stage skips if its idempotent marker is already in place.
  *
  * Resolves with true on success, false on failure. Either way the
@@ -226,7 +226,7 @@ export async function runSetup(window: BrowserWindow): Promise<boolean> {
     pushLog(window, 'meta', '[setup] complete');
 
     // Now that the runtime is provisioned, spawn soul. The supervisor's
-    // auto-start at app launch bailed (no .setup-complete yet) — this is
+    // auto-start at app launch bailed (no .setup-complete yet), this is
     // the catch-up call so the renderer's transition from wizard to
     // SoulBootScreen lands on a live soul process.
     pushLog(window, 'meta', '[setup] starting soul');
@@ -294,7 +294,7 @@ async function runStagePreflight(
     pushLog(window, 'meta', `[preflight] disk check unavailable: ${(err as Error).message}`);
   }
 
-  // uv is our Python environment + package manager — bootstraps a
+  // uv is our Python environment + package manager, bootstraps a
   // standalone CPython and runs `pip install` with reliable resolution.
   // Bundled inside Resources/uv/uv in packaged builds; falls back to
   // system uv in dev. Either way, if we can't find one, fail fast with
@@ -350,7 +350,7 @@ async function runStageRuntime(
     { stream: true, extraEnv: uvEnv },
   );
 
-  // 2. Create the venv (idempotent — uv venv is a no-op if it exists
+  // 2. Create the venv (idempotent, uv venv is a no-op if it exists
   //    with the same python version).
   const venvExists = fs.existsSync(path.join(paths.pythonEnv, 'bin', 'python'));
   if (!venvExists) {
@@ -408,7 +408,7 @@ async function runStageUnreal(
   paths: ReturnType<typeof runtimePaths>,
 ): Promise<void> {
   const installedApp = path.join(paths.unreal, 'Unclaw Character.app');
-  // Per-asset version sentinel — separate from the .setup-complete marker
+  // Per-asset version sentinel, separate from the .setup-complete marker
   // because the wizard may need to re-fetch this specific category without
   // re-running every stage. Holds the asset's SHA so a manifest bump
   // forces a clean re-extract instead of silently keeping the old build.
@@ -434,7 +434,7 @@ async function runStageUnreal(
   if (fs.existsSync(installedApp)) {
     pushLog(window, 'meta',
       `[unreal] installed ${installedSha?.slice(0, 12) ?? '(unstamped)'} ≠ ` +
-      `manifest ${wantSha.slice(0, 12)} — wiping for re-extract`);
+      `manifest ${wantSha.slice(0, 12)}, wiping for re-extract`);
     fs.rmSync(installedApp, { recursive: true, force: true });
   }
 
@@ -519,7 +519,7 @@ async function runStageModels(
   })();
   const wantSha = MANIFEST.runtimeAssets.sha256 ?? '';
 
-  // We treat the assets dir as a single unit — if any required sub-tree
+  // We treat the assets dir as a single unit, if any required sub-tree
   // is missing OR the version stamp mismatches, we re-extract the bundle.
   // Cheap to recheck; expensive to half-install on a network blip.
   const required = [
@@ -541,12 +541,12 @@ async function runStageModels(
     return;
   }
 
-  // Mismatch or partial install — wipe the asset tree (preserving the
+  // Mismatch or partial install, wipe the asset tree (preserving the
   // dir itself so the extract below lands in place) and re-fetch.
   if (allPresent) {
     pushLog(window, 'meta',
       `[models] installed ${installedSha?.slice(0, 12) ?? '(unstamped)'} ≠ ` +
-      `manifest ${wantSha.slice(0, 12)} — wiping for re-extract`);
+      `manifest ${wantSha.slice(0, 12)}, wiping for re-extract`);
     for (const child of fs.readdirSync(paths.assets)) {
       fs.rmSync(path.join(paths.assets, child), { recursive: true, force: true });
     }
@@ -619,7 +619,7 @@ export async function downloadWithResumeAndVerify(
       pushLog(window, 'meta', `[download] already verified: ${path.basename(destPath)}`);
       return;
     }
-    // Stale partial / corrupted — wipe and re-fetch.
+    // Stale partial / corrupted, wipe and re-fetch.
     fs.unlinkSync(destPath);
   }
 
@@ -640,12 +640,12 @@ export async function downloadWithResumeAndVerify(
         pushLog(window, 'meta', `[download] SHA-256 verified: ${path.basename(destPath)}`);
       } else if (app.isPackaged) {
         throw new Error(
-          `Asset ${asset.url} has no SHA-256 declared in setupManifest.ts — ` +
+          `Asset ${asset.url} has no SHA-256 declared in setupManifest.ts, ` +
           `refusing to install unverified bytes in a packaged build.`,
         );
       } else {
         pushLog(window, 'meta',
-          `[download] no SHA declared — skipping verify (dev build only)`);
+          `[download] no SHA declared, skipping verify (dev build only)`);
       }
       return;
     } catch (err) {
@@ -687,7 +687,7 @@ function downloadOnce(
         return;
       }
       if (res.statusCode === 416) {
-        // Range not satisfiable — partial file is already full. Move
+        // Range not satisfiable, partial file is already full. Move
         // it into place and let the SHA verify decide if it's good.
         res.resume();
         fs.renameSync(partialPath, destPath);
@@ -752,7 +752,7 @@ export function sha256File(filePath: string): Promise<string> {
 }
 
 // ----------------------------------------------------------------------
-// Subprocess helper — uv, ditto, xattr all go through here so log
+// Subprocess helper, uv, ditto, xattr all go through here so log
 // streaming + non-zero-exit handling stays consistent.
 // ----------------------------------------------------------------------
 

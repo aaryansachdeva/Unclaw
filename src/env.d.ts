@@ -1,7 +1,21 @@
+/** Live port mapping the supervisor learned from soul (banner or
+ *  ports.json fallback). Renderer URL builders consume this to avoid
+ *  hardcoding 8765/8080/8888. */
+interface SoulPorts {
+  http: number;
+  signallingStreamer: number;
+  signallingPlayer: number;
+}
+
 interface ElectronAPI {
   minimize: () => void;
   close: () => void;
   togglePin: (pinned: boolean) => void;
+  focusWindow: () => void;
+  /** Open Terminal.app with a pre-filled command (macOS only). Used by
+   *  SettingsPanel's Claude Code subscription card to fire
+   *  `claude setup-token` in a fresh tab. */
+  openTerminalWithCommand: (command: string) => Promise<{ ok: boolean; error?: string }>;
 
   /** Trigger the screenshot region selector. Same effect as the
    *  global Ctrl+Shift+G shortcut. */
@@ -11,7 +25,7 @@ interface ElectronAPI {
     cb: (payload: { base64: string; width: number; height: number }) => void,
   ) => () => void;
 
-  // Overlay-window facing — only used by the inline overlay HTML.
+  // Overlay-window facing, only used by the inline overlay HTML.
   // Renderer code in src/ doesn't call these.
   notifyOverlayReady?: () => void;
   onOverlayShow?: (
@@ -22,7 +36,7 @@ interface ElectronAPI {
   ) => void;
   cancelScreenshot?: () => void;
 
-  // Auth — loopback OAuth flow + safeStorage-backed token persist.
+  // Auth, loopback OAuth flow + safeStorage-backed token persist.
   /** Open a URL in the user's default browser (auth flow start). */
   authOpenExternal: (url: string) => Promise<boolean>;
   /** Persist a JWT via OS-encrypted storage. */
@@ -41,7 +55,7 @@ interface ElectronAPI {
   /** Cancel a pending loopback OAuth flow. */
   authCancelOAuthLoopback: () => Promise<boolean>;
 
-  // API keys (BYOK) — local-only safeStorage. JSON string in/out.
+  // API keys (BYOK), local-only safeStorage. JSON string in/out.
   /** Read the persisted JSON blob, or null if none. */
   apiKeysGet: () => Promise<string | null>;
   /** Persist the JSON blob via OS-encrypted storage. */
@@ -49,39 +63,50 @@ interface ElectronAPI {
   /** Wipe the persisted blob. */
   apiKeysClear: () => Promise<boolean>;
 
-  // Soul subprocess lifecycle — main spawns (or attaches to) soul on
+  // Soul subprocess lifecycle, main spawns (or attaches to) soul on
   // app start. The LoadingScreen subscribes to `onLog` to render boot
   // progress; the App subscribes to `onReady` to dismiss the loader
   // and mount the pixel-streaming connection.
   soul: {
     /** One-shot snapshot. Returns whether soul is already ready
-     *  + the recent log buffer. Call on mount so the boot screen
+     *  + the recent log buffer + the live port mapping (null until
+     *  the [ports] banner fires). Call on mount so the boot screen
      *  hydrates from past state instead of waiting forever on
      *  events that already fired. */
     getStatus: () => Promise<{
       ready: boolean;
       recentLogs: { stream: 'stdout' | 'stderr' | 'meta'; line: string }[];
       elapsedMs: number;
+      ports: SoulPorts | null;
     }>;
+    /** Latest known port mapping, or null while soul is still booting.
+     *  Renderer-side URL builders (services/soulBase.ts) call this
+     *  during init so they don't construct stale URLs. */
+    getPorts: () => Promise<SoulPorts | null>;
     /** Subscribe to soul stdout/stderr/meta lines. Returns unsubscribe. */
     onLog: (
       cb: (data: { stream: 'stdout' | 'stderr' | 'meta'; line: string }) => void,
     ) => () => void;
     /** Fired ONCE when soul prints its READY banner. */
     onReady: (cb: () => void) => () => void;
+    /** Fired ONCE when soul prints its [ports] banner (or immediately
+     *  with hydrated ports.json values when attaching to an external
+     *  soul). Emitted BEFORE 'soul:ready' so URL builders are ready
+     *  by the time the rest of the app starts making requests. */
+    onPorts: (cb: (ports: SoulPorts) => void) => () => void;
     /** Fired if soul exits (clean or crashed). */
     onExit: (
       cb: (data: { code: number | null; signal: string | null }) => void,
     ) => () => void;
   };
 
-  // First-run setup pipeline — provisions the per-user runtime
+  // First-run setup pipeline, provisions the per-user runtime
   // (Python venv, downloaded UE app, downloaded model assets) on a
   // packaged install. In dev, getStatus returns isComplete=true and
   // the wizard never mounts.
   setup: {
     /** Snapshot for hydration on mount. Same replay pattern as
-     *  soul.getStatus — without it, a wizard remount mid-pipeline
+     *  soul.getStatus, without it, a wizard remount mid-pipeline
      *  loses all events that already fired. */
     getStatus: () => Promise<{
       isComplete: boolean;
@@ -95,7 +120,7 @@ interface ElectronAPI {
       recentLogs: { stream: 'stdout' | 'stderr' | 'meta'; line: string }[];
       lastError: string | null;
     }>;
-    /** Kick the pipeline. Idempotent — re-calling while it's running
+    /** Kick the pipeline. Idempotent, re-calling while it's running
      *  is a no-op. Resolves with true on success, false on failure. */
     start: () => Promise<boolean>;
     /** Subscribe to per-line log output from each stage. */
@@ -113,7 +138,7 @@ interface ElectronAPI {
     ) => () => void;
   };
 
-  // Runtime auto-updater. Runs on every launch after setup completes —
+  // Runtime auto-updater. Runs on every launch after setup completes , 
   // fetches a remote manifest, downloads + swaps any categories that have
   // drifted from the installed-versions ledger. Categories: app (Electron
   // shell, handled by electron-updater), soul (Python source), unreal
@@ -121,7 +146,7 @@ interface ElectronAPI {
   update?: {
     /** Snapshot for hydration. Same replay pattern as setup.getStatus. */
     getStatus: () => Promise<UpdateSnapshot>;
-    /** Kick the update check. Idempotent — second call returns the
+    /** Kick the update check. Idempotent, second call returns the
      *  in-progress snapshot rather than starting a parallel run. */
     start: () => Promise<UpdateSnapshot>;
     /** Relaunch Unclaw to apply downloaded updates. */
@@ -130,7 +155,7 @@ interface ElectronAPI {
      *  category's progress changes. */
     onSnapshot: (cb: (snap: UpdateSnapshot) => void) => () => void;
     /** Subscribe to one-line diagnostic log strings. Lower-volume than
-     *  setup.onLog — mostly for surfacing errors in dev. */
+     *  setup.onLog, mostly for surfacing errors in dev. */
     onLog: (cb: (line: string) => void) => () => void;
   };
 }
@@ -140,7 +165,7 @@ interface UpdateCategoryProgress {
   state: 'pending' | 'downloading' | 'applying' | 'ready' | 'failed' | 'up-to-date';
   progress: number | null;
   detail?: string;
-  /** Installed version before this update pass — null on first install
+  /** Installed version before this update pass, null on first install
    *  for this category. */
   from: string | null;
   to: string;

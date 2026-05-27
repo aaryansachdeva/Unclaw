@@ -8,7 +8,7 @@
 // Soul does the actual download + state tracking — this module is a
 // thin transport layer.
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 export type KokoroState = 'idle' | 'downloading' | 'installed' | 'error';
 
@@ -40,7 +40,7 @@ export interface KokoroStatus {
  *  returns the snapshot otherwise. The state machine ('idle' →
  *  'downloading' → 'installed' / 'error') is server-authoritative. */
 export async function fetchKokoroStatus(): Promise<KokoroStatus> {
-  const res = await fetch(`${SOUL_URL}/tts/kokoro/status`);
+  const res = await fetch(`${getSoulBaseUrl()}/tts/kokoro/status`);
   if (!res.ok) {
     throw new Error(`soul /tts/kokoro/status ${res.status}`);
   }
@@ -53,7 +53,7 @@ export async function fetchKokoroStatus(): Promise<KokoroStatus> {
  *  this as fire-and-forget and poll fetchKokoroStatus() to render
  *  progress. */
 export async function startKokoroInstall(): Promise<KokoroStatus> {
-  const res = await fetch(`${SOUL_URL}/tts/kokoro/install`, {
+  const res = await fetch(`${getSoulBaseUrl()}/tts/kokoro/install`, {
     method: 'POST',
   });
   if (!res.ok) {
@@ -68,7 +68,7 @@ export async function startKokoroInstall(): Promise<KokoroStatus> {
  *  404 (already gone). */
 export async function uninstallKokoro(): Promise<boolean> {
   try {
-    const res = await fetch(`${SOUL_URL}/tts/kokoro`, { method: 'DELETE' });
+    const res = await fetch(`${getSoulBaseUrl()}/tts/kokoro`, { method: 'DELETE' });
     return res.ok || res.status === 404;
   } catch {
     return false;

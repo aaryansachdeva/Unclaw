@@ -6,7 +6,7 @@ import {
   HALLUCINATION_TEXTS,
   MAX_NO_SPEECH_PROB,
   SAMPLE_RATE,
-  TRANSCRIBE_URL,
+  getTranscribeUrl,
   WHISPER_LANGUAGE,
   WHISPER_MODEL,
 } from './constants';
@@ -99,7 +99,7 @@ export async function transcribe(
   if (opts.prompt) fd.append('prompt', opts.prompt);
 
   const t0 = performance.now();
-  const res = await fetch(TRANSCRIBE_URL, {
+  const res = await fetch(getTranscribeUrl(), {
     method: 'POST',
     body: fd,
     signal: opts.signal,

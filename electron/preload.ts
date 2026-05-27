@@ -1,13 +1,33 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 
+/** Shape of the port mapping the supervisor learns from soul's [ports]
+ *  banner (or from ports.json when attaching to an external soul). Kept
+ *  in sync with `SoulPorts` in electron/soulSupervisor.ts. */
+interface SoulPortsPayload {
+  http: number;
+  signallingStreamer: number;
+  signallingPlayer: number;
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   // Window controls.
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close'),
   togglePin: (pinned: boolean) => ipcRenderer.send('window:toggle-pin', pinned),
+  /** Force the BrowserWindow to take focus. Used by App.tsx's capture-
+   *  phase mousedown listener to defeat the PixelStreaming pointer
+   *  capture that would otherwise eat the first click on the streamed
+   *  <video> and prevent AppKit from raising the always-on-top window. */
+  focusWindow: () => ipcRenderer.send('window:focus'),
+
+  /** Open Terminal.app and run a command. Used by SettingsPanel's
+   *  Claude Code subscription card to launch `claude setup-token`
+   *  for the user. macOS only, falls back gracefully elsewhere. */
+  openTerminalWithCommand: (command: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('terminal:open-with-command', command),
 
   // ----------------------------------------------------------------------
-  // Screenshot — main-window facing.
+  // Screenshot, main-window facing.
   // The main React app calls `triggerScreenshot()` to fire the overlay
   // (same effect as the global Ctrl+Shift+G). It then subscribes to
   // `onScreenshotCaptured` to receive the cropped PNG (base64) plus
@@ -25,7 +45,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // ----------------------------------------------------------------------
-  // Screenshot — overlay-window facing.
+  // Screenshot, overlay-window facing.
   // Used by the inline overlay HTML loaded into the pre-warmed overlay
   // BrowserWindow. The same preload script is reused for both windows
   // since contextIsolation:true keeps the surfaces parallel.
@@ -44,7 +64,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelScreenshot: () => ipcRenderer.send('screenshot:cancel'),
 
   // ----------------------------------------------------------------------
-  // Auth — loopback OAuth flow + safeStorage-backed token persistence.
+  // Auth, loopback OAuth flow + safeStorage-backed token persistence.
   // The renderer drives the UX (sign-in screen, status state); main
   // owns the OS-level pieces (custom protocol, encrypted token file,
   // shell.openExternal).
@@ -58,7 +78,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('auth:clear-token'),
   /** Spin up the loopback HTTP server and resolve when the OAuth
    *  provider hits it (or on error/timeout/cancel). The server only
-   *  accepts ONE request — caller is responsible for ordering the
+   *  accepts ONE request, caller is responsible for ordering the
    *  call BEFORE openExternal so no callback can race the listener. */
   authStartOAuthLoopback: (): Promise<{
     code: string | null
@@ -70,9 +90,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('auth:cancel-oauth-loopback'),
 
   // ----------------------------------------------------------------------
-  // API keys — BYOK (Bring Your Own Keys). Local-only safeStorage blob;
+  // API keys, BYOK (Bring Your Own Keys). Local-only safeStorage blob;
   // the renderer JSON-encodes the full ApiKeysProfile and hands it across
-  // as a single string. No cloud sync, no soul wiring yet — scaffolding.
+  // as a single string. No cloud sync, no soul wiring yet, scaffolding.
   apiKeysGet: (): Promise<string | null> =>
     ipcRenderer.invoke('apiKeys:get'),
   apiKeysSet: (payload: string): Promise<boolean> =>
@@ -81,7 +101,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('apiKeys:clear'),
 
   // ----------------------------------------------------------------------
-  // Soul lifecycle — main spawns (or attaches to) soul on app start and
+  // Soul lifecycle, main spawns (or attaches to) soul on app start and
   // streams stdout/stderr lines through 'soul:log' until the boot
   // marker fires 'soul:ready'. The LoadingScreen subscribes to log;
   // App.tsx subscribes to ready to gate the main UI (and therefore the
@@ -90,13 +110,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   soul: {
     /** One-shot snapshot of the current soul state. Used by the
      *  boot screen on mount/refresh to hydrate before subscribing
-     *  to future log events — otherwise a Cmd-R after soul booted
+     *  to future log events, otherwise a Cmd-R after soul booted
      *  leaves the screen waiting on events that already fired. */
     getStatus: (): Promise<{
       ready: boolean;
       recentLogs: { stream: 'stdout' | 'stderr' | 'meta'; line: string }[];
       elapsedMs: number;
+      ports: SoulPortsPayload | null;
     }> => ipcRenderer.invoke('soul:get-status'),
+    /** Latest discovered ports, or null while soul is still booting.
+     *  Renderer code that constructs URLs should prefer onPorts() +
+     *  the snapshot's ports field over hardcoded 8765/8080/8888. */
+    getPorts: (): Promise<SoulPortsPayload | null> =>
+      ipcRenderer.invoke('soul:get-ports'),
     onLog: (
       cb: (data: { stream: 'stdout' | 'stderr' | 'meta'; line: string }) => void,
     ): (() => void) => {
@@ -112,6 +138,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('soul:ready', handler);
       return () => ipcRenderer.removeListener('soul:ready', handler);
     },
+    onPorts: (cb: (ports: SoulPortsPayload) => void): (() => void) => {
+      const handler = (_evt: IpcRendererEvent, ports: SoulPortsPayload) =>
+        cb(ports);
+      ipcRenderer.on('soul:ports', handler);
+      return () => ipcRenderer.removeListener('soul:ports', handler);
+    },
     onExit: (
       cb: (data: { code: number | null; signal: NodeJS.Signals | null }) => void,
     ): (() => void) => {
@@ -125,7 +157,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // ----------------------------------------------------------------------
-  // First-run setup pipeline — provisions the runtime under
+  // First-run setup pipeline, provisions the runtime under
   // ~/Library/Application Support/Unclaw/runtime/ on a packaged install
   // (downloads UE app, creates Python venv, fetches model assets). The
   // SetupWizard subscribes to onLog/onStage for live progress; start()
@@ -178,7 +210,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // ----------------------------------------------------------------------
-  // Auto-updater — runs once per session after setup, before main app.
+  // Auto-updater, runs once per session after setup, before main app.
   // Fetches the remote manifest, compares per category, downloads + swaps
   // any drifted ones. Renderer subscribes to onSnapshot for full state
   // (per-category progress) and calls start() to kick the pipeline.
@@ -203,7 +235,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 });
 
-// Shape mirror of updateCoordinator.UpdateSnapshot — kept inline rather than
+// Shape mirror of updateCoordinator.UpdateSnapshot, kept inline rather than
 // imported because preload runs in a separate bundle that can't see TS-only
 // types from the main process bundle.
 type UpdateCategoryStateShape =

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { Pin, PinOff, LogOut, Settings, Trash2, LogIn, UserCircle2, RotateCcw } from 'lucide-react';
+import { getSoulBaseUrl } from '../services/soulBase';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -23,7 +24,10 @@ const menuItemStyle: React.CSSProperties = {
   fontSize: 13,
   fontWeight: 500,
   letterSpacing: '-0.01em',
-  transition: 'background 120ms var(--ease-out-quart)',
+  // Cohesive with the SettingsPanel rail-item easing. The 160ms duration
+  // is just slow enough that the row "settles" rather than snapping when
+  // the user sweeps the menu with the cursor.
+  transition: 'background var(--duration-fast) var(--ease-out-quart), color var(--duration-fast) var(--ease-out-quart)',
 };
 
 interface TitlebarUser {
@@ -361,27 +365,51 @@ export function Titlebar({
                       // window edge. Windows/Linux: profile on the left —
                       // popover anchors left:0 so it grows to the right.
                       ...(isMacPlatform ? { right: 0 } : { left: 0 }),
-                      minWidth: 240,
+                      minWidth: 248,
                       padding: 6,
-                      borderRadius: 12,
+                      borderRadius: 14,
                       background: 'var(--glass-bg-panel)',
                       backdropFilter: 'var(--glass-blur)',
                       WebkitBackdropFilter: 'var(--glass-blur)',
-                      border: '1px solid var(--glass-border-focus)',
+                      border: '1px solid var(--glass-border)',
+                      // Use the shared panel-ground shadow so the popover
+                      // sits in the same depth language as the SettingsPanel
+                      // and widget panels. The accent-tinted underglow at
+                      // the bottom warms the menu without color-tinting
+                      // any of its content rows.
                       boxShadow: [
-                        '0 1px 0 rgba(255,255,255,0.06) inset',
-                        '0 12px 28px -8px rgba(0,0,0,0.45)',
+                        'var(--shadow-panel-ground)',
+                        '0 12px 28px -12px rgba(196, 68, 68, 0.18)',
                       ].join(', '),
+                      overflow: 'hidden',
                     }}
                   >
+                    {/* Hairline-top ambient highlight, matching the
+                        SettingsPanel + ChatPane + SoulBootScreen pattern. */}
+                    <span
+                      aria-hidden
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 12,
+                        right: 12,
+                        height: 1,
+                        pointerEvents: 'none',
+                        background: 'linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.16), transparent)',
+                      }}
+                    />
                     <div
                       style={{
-                        padding: '10px 12px 8px',
-                        borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
-                        marginBottom: 4,
+                        padding: '12px 12px 10px',
+                        // Gradient hairline separator instead of a flat
+                        // border-bottom. Reads less like a panel rule
+                        // and more like a real piece of light catching
+                        // the lip of the identity card.
+                        position: 'relative',
+                        marginBottom: 6,
                         display: 'flex',
                         flexDirection: 'column',
-                        gap: 2,
+                        gap: 3,
                       }}
                     >
                       <span
@@ -421,6 +449,22 @@ export function Titlebar({
                           Local-only session
                         </span>
                       )}
+                      {/* Gradient hairline closing the identity card.
+                          Fades from a faint mid-tone in the middle to
+                          transparent at both edges so the separator
+                          reads as ambient light rather than a ruled line. */}
+                      <span
+                        aria-hidden
+                        style={{
+                          position: 'absolute',
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          height: 1,
+                          pointerEvents: 'none',
+                          background: 'linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.10), transparent)',
+                        }}
+                      />
                     </div>
                     {/* Settings — opens the in-app SettingsPanel modal
                         where users reconfigure LLM provider/model/key,
@@ -457,7 +501,7 @@ export function Titlebar({
                       role="menuitem"
                       onClick={() => {
                         setProfileOpen(false);
-                        const url = 'http://127.0.0.1:8765/';
+                        const url = `${getSoulBaseUrl()}/`;
                         // Open in the user's default browser via Electron's
                         // shell.openExternal. The auth:open-external IPC
                         // handler accepts any http(s) URL — name's a misnomer

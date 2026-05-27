@@ -281,7 +281,7 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
             letterSpacing: '0.18em',
             color: 'rgba(255, 255, 255, 0.28)',
             fontVariantNumeric: 'tabular-nums',
-            marginTop: -10,
+            marginTop: 4,
           }}
         >
           {timeStr}

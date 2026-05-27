@@ -148,13 +148,15 @@ export function ChatPane({
             bottom: 0,
             width,
             zIndex: 35,
-            // Cool dark gray — deliberately cooler than the app's
-            // warm `--bg-void` (#050506) so it reads as a different
-            // surface. A faint vertical wash adds depth without
-            // looking gradient-y.
+            // Warm navy-tinged dark, picks up the same ambient family
+            // as the frosted-slate chrome (the panels use
+            // `rgba(40, 48, 65, x)`). The pane stays solid (not glass)
+            // because reading long copy through backdrop blur is
+            // tiring, but the hue makes it feel like a continuation
+            // of the workspace rather than a separate cold sidebar.
             background:
-              'linear-gradient(180deg, #18181d 0%, #16161b 60%, #141418 100%)',
-            borderLeft: '1px solid rgba(255, 255, 255, 0.07)',
+              'linear-gradient(180deg, rgba(26, 22, 24, 1) 0%, rgba(20, 17, 19, 1) 60%, rgba(15, 13, 14, 1) 100%)',
+            borderLeft: '1px solid rgba(255, 255, 255, 0.06)',
             // Inner shadow on the left edge so the pane reads as
             // "carved out of the window" rather than floating.
             boxShadow: 'inset 1px 0 0 rgba(255, 255, 255, 0.04)',
@@ -165,6 +167,23 @@ export function ChatPane({
             WebkitAppRegion: 'no-drag',
           } as React.CSSProperties}
         >
+          {/* Ambient top hairline — same detail every opened panel
+              in the app carries. Pulls the chat pane into the shared
+              material vocabulary even though it's tonally cooler than
+              the frosted slate surfaces. */}
+          <span
+            aria-hidden
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 8,
+              right: 8,
+              height: 1,
+              pointerEvents: 'none',
+              background: 'linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.12), transparent)',
+            }}
+          />
+
           {/* Resize handle on the left edge — 6px wide, full height,
               col-resize cursor. Hover reveals a faint accent stripe so
               the affordance is discoverable without being noisy.
@@ -221,17 +240,17 @@ export function ChatPane({
               // clears the roomier header (top:18 + ~32 stack +
               // breathing room).
               position: 'absolute',
-              top: 64,
+              top: 72,
               left: 0,
               right: 0,
               bottom: 0,
               overflowY: 'auto',
               overflowX: 'hidden',
-              // Reserve room at the bottom so the floating InputBar
-              // (which slides into the pane region when open) never
-              // covers the last message. Generous because the bar's
-              // height varies with content + persona row.
-              padding: '12px 14px 150px',
+              // Wider horizontal padding (18 vs 14) so neither user
+              // nor assistant text crowds the pane edges. Bottom
+              // reserve unchanged: covers the floating InputBar
+              // height at its tallest (with attachments + persona row).
+              padding: '14px 18px 150px',
               // Custom thin scrollbar — see styles.css scoped class.
               scrollbarGutter: 'stable both-edges',
             }}
@@ -256,25 +275,32 @@ export function ChatPane({
                         />
                       );
                     }
-                    // Spacing rule: tighter on user→assistant
-                    // follow-ups, looser before a new user turn.
+                    // Spacing rhythm without bubbles — the visual
+                    // "turn boundary" now comes from spacing alone, so
+                    // role transitions get more breath than continuations.
+                    //   user → assistant  : 10 (close follow, she's replying)
+                    //   assistant → user  : 22 (boundary, new question lifting)
+                    //   tool   → assistant: 8  (tight, the result is hers)
+                    //   same role chain   : 4  (rare; streaming partials, ack)
                     const t = it.turn;
                     const prevIsUser =
                       prev && prev.kind === 'turn' && prev.turn.role === 'user';
                     const prevIsAssistant =
                       prev && prev.kind === 'turn' && prev.turn.role === 'assistant';
                     const prevIsTool = prev && prev.kind === 'tool';
-                    const tightTop =
-                      (prevIsUser && t.role === 'assistant')
-                      || (prevIsTool && t.role === 'assistant');
-                    const looseTop = prevIsAssistant && t.role === 'user';
+                    const sameRole =
+                      prev && prev.kind === 'turn' && prev.turn.role === t.role;
+                    let top = 14;
+                    if (i === 0)                                    top = 0;
+                    else if (sameRole)                              top = 4;
+                    else if (prevIsTool && t.role === 'assistant')  top = 8;
+                    else if (prevIsUser && t.role === 'assistant')  top = 10;
+                    else if (prevIsAssistant && t.role === 'user')  top = 22;
                     return (
                       <MessageRow
                         key={`turn-${t.ts}`}
                         turn={t}
-                        marginTop={
-                          i === 0 ? 0 : tightTop ? 6 : looseTop ? 14 : 10
-                        }
+                        marginTop={top}
                       />
                     );
                   })}
@@ -401,85 +427,105 @@ function MessageRow({
   marginTop: number;
 }) {
   if (turn.role === 'user') {
+    // User: pill bubble, right-aligned. Soft white-alpha so it reads
+    // as a quiet glass tag over the stream rather than competing with
+    // the warm-coal chrome. Asymmetric: assistant stays bubble-less
+    // (plain left-aligned text) so the role distinction is "you
+    // speak in a tag, she speaks in a sentence" — keeps the surface
+    // editorial while marking your turns clearly.
     return (
       <div
         style={{
           marginTop,
           display: 'flex',
-          justifyContent: 'flex-end',
+          flexDirection: 'column',
+          alignItems: 'flex-end',
+          gap: turn.content && turn.images && turn.images.length > 0 ? 6 : 0,
         }}
       >
-        <div
-          style={{
-            // Soft user-bubble. Asymmetric corner on the bottom-right
-            // (the speech-tail side) breaks the "iMessage-blue" cliché
-            // while keeping clear directionality.
-            maxWidth: '82%',
-            padding: '7px 11px',
-            borderRadius: '14px 14px 4px 14px',
-            background: 'rgba(255, 255, 255, 0.07)',
-            border: '1px solid rgba(255, 255, 255, 0.05)',
-            color: 'var(--text-primary)',
-            fontSize: 13,
-            lineHeight: 1.5,
-            letterSpacing: '-0.003em',
-            wordBreak: 'break-word',
-            whiteSpace: 'pre-wrap',
-          }}
-        >
-          {turn.images && turn.images.length > 0 && (
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                gap: 4,
-                // Gap below the image grid only when text follows.
-                marginBottom: turn.content ? 6 : 0,
-              }}
-            >
-              {turn.images.map((b64, i) => (
-                <img
-                  key={i}
-                  src={`data:image/png;base64,${b64}`}
-                  alt=""
-                  style={{
-                    maxWidth: 144,
-                    maxHeight: 144,
-                    width: 'auto',
-                    height: 'auto',
-                    borderRadius: 8,
-                    objectFit: 'cover',
-                    display: 'block',
-                    border: '1px solid rgba(255, 255, 255, 0.06)',
-                  }}
-                />
-              ))}
-            </div>
-          )}
-          {turn.content}
-        </div>
+        {turn.images && turn.images.length > 0 && (
+          <div
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: 4,
+              justifyContent: 'flex-end',
+              maxWidth: '78%',
+            }}
+          >
+            {turn.images.map((b64, i) => (
+              <img
+                key={i}
+                src={`data:image/png;base64,${b64}`}
+                alt=""
+                style={{
+                  maxWidth: 132,
+                  maxHeight: 132,
+                  width: 'auto',
+                  height: 'auto',
+                  borderRadius: 8,
+                  objectFit: 'cover',
+                  display: 'block',
+                  border: '1px solid rgba(255, 255, 255, 0.06)',
+                }}
+              />
+            ))}
+          </div>
+        )}
+        {turn.content && (
+          <div
+            style={{
+              maxWidth: '78%',
+              padding: '8px 14px',
+              background: 'rgba(255, 255, 255, 0.08)',
+              border: '1px solid rgba(255, 255, 255, 0.06)',
+              borderRadius: 18,
+              color: 'var(--text-primary)',
+              fontSize: 13,
+              fontWeight: 500,
+              lineHeight: 1.45,
+              letterSpacing: '-0.003em',
+              textAlign: 'left',
+              wordBreak: 'break-word',
+              whiteSpace: 'pre-wrap',
+            }}
+          >
+            {turn.content}
+          </div>
+        )}
       </div>
     );
   }
 
-  // Assistant: plain left-aligned text, no bubble, no stripe. The
-  // user-bubble alignment (right) vs assistant text-flush-left is
-  // enough directional contrast on its own. Citations from any
-  // web_search call land below as small `via host.com` chips —
-  // attribution without dragging the eye away from the prose.
+  // Assistant: plain left-aligned text, regular weight (400). The
+  // weight + alignment contrast against the user line (right, 500)
+  // is enough directional cue without bubbles or chrome. Max width
+  // gives the line a comfortable measure rather than sprawling
+  // edge-to-edge in a wide pane. Citations from any web_search call
+  // land below as an editorial "via X · Y · Z" footnote.
   return (
     <div
       style={{
         marginTop,
-        color: 'var(--text-primary)',
-        fontSize: 13,
-        lineHeight: 1.5,
-        letterSpacing: '-0.003em',
-        wordBreak: 'break-word',
-        whiteSpace: 'pre-wrap',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'flex-start',
       }}
     >
-      {turn.content}
+      <div
+        style={{
+          maxWidth: '94%',
+          color: 'var(--text-primary)',
+          fontSize: 13,
+          fontWeight: 400,
+          lineHeight: 1.55,
+          letterSpacing: '-0.003em',
+          wordBreak: 'break-word',
+          whiteSpace: 'pre-wrap',
+        }}
+      >
+        {turn.content}
+      </div>
       {turn.sources && turn.sources.length > 0 && (
         <SourceChips sources={turn.sources} />
       )}
@@ -510,33 +556,46 @@ function SourceChips({ sources }: { sources: NonNullable<Turn['sources']> }) {
   return (
     <div
       style={{
-        marginTop: 6,
+        marginTop: 8,
         display: 'flex',
         flexWrap: 'wrap',
-        gap: 4,
+        alignItems: 'center',
+        gap: 0,
+        fontSize: 10.5,
+        color: 'var(--text-ghost)',
+        letterSpacing: '0.005em',
       }}
     >
+      <span style={{ marginRight: 6 }}>via</span>
       {unique.map((s, i) => (
-        <a
-          key={i}
-          href={s.uri}
-          target="_blank"
-          rel="noreferrer noopener"
-          title={s.uri}
-          style={{
-            fontSize: 10.5,
-            padding: '2px 7px',
-            borderRadius: 999,
-            background: 'rgba(255, 255, 255, 0.04)',
-            border: '1px solid rgba(255, 255, 255, 0.06)',
-            color: 'var(--text-secondary)',
-            textDecoration: 'none',
-            letterSpacing: '-0.002em',
-            cursor: 'pointer',
-          }}
-        >
-          {s.label}
-        </a>
+        <span key={i} style={{ display: 'inline-flex', alignItems: 'center' }}>
+          <a
+            href={s.uri}
+            target="_blank"
+            rel="noreferrer noopener"
+            title={s.uri}
+            style={{
+              color: 'var(--text-secondary)',
+              textDecoration: 'none',
+              cursor: 'pointer',
+              borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+              transition: 'border-color var(--duration-fast) var(--ease-out-quart), color var(--duration-fast) var(--ease-out-quart)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.color = 'var(--text-primary)';
+              e.currentTarget.style.borderBottomColor = 'rgba(255, 255, 255, 0.22)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = 'var(--text-secondary)';
+              e.currentTarget.style.borderBottomColor = 'rgba(255, 255, 255, 0.08)';
+            }}
+          >
+            {s.label}
+          </a>
+          {i < unique.length - 1 && (
+            <span aria-hidden style={{ margin: '0 6px', color: 'var(--text-ghost)' }}>·</span>
+          )}
+        </span>
       ))}
     </div>
   );
@@ -599,36 +658,52 @@ function EmptyState() {
     <div
       style={{
         height: '100%',
-        minHeight: 180,
+        minHeight: 220,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: 6,
+        gap: 12,
         padding: '24px 16px',
         textAlign: 'center',
       }}
     >
+      {/* Slow-breathing ember dot. The thin horizontal stripe felt
+          mid-loading; a single softly-pulsing dot reads as "the room
+          is ready when you are" without implying anything's working. */}
       <span
         aria-hidden
         style={{
-          width: 22,
-          height: 2,
-          borderRadius: 2,
+          width: 8,
+          height: 8,
+          borderRadius: 4,
           background: 'var(--accent)',
-          opacity: 0.55,
-          boxShadow: '0 0 8px rgba(196, 68, 68, 0.45)',
-          marginBottom: 6,
+          opacity: 0.62,
+          boxShadow: '0 0 14px rgba(196, 68, 68, 0.45)',
+          animation: 'voice-breathing 3.6s ease-in-out infinite',
         }}
       />
       <div
         style={{
-          fontSize: 12.5,
-          color: 'var(--text-secondary)',
-          letterSpacing: '0.005em',
+          fontSize: 11,
+          fontWeight: 600,
+          letterSpacing: '0.16em',
+          textTransform: 'uppercase',
+          color: 'var(--text-ghost)',
         }}
       >
-        nothing yet
+        Conversation
+      </div>
+      <div
+        style={{
+          fontSize: 13,
+          color: 'var(--text-secondary)',
+          letterSpacing: '-0.005em',
+          lineHeight: 1.5,
+          maxWidth: 220,
+        }}
+      >
+        Whatever you say lands here, paired with what comes back.
       </div>
     </div>
   );

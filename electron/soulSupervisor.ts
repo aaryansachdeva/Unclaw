@@ -1,10 +1,10 @@
-// Soul subprocess supervisor — the Electron main side of the
+// Soul subprocess supervisor, the Electron main side of the
 // "launching Unclaw also launches soul" flow.
 //
 // What this module does:
 //   * On app start, check whether a soul instance is already serving
 //     127.0.0.1:8765/health (e.g. the user is running it in a terminal
-//     for dev). If yes, attach to it — don't spawn a duplicate.
+//     for dev). If yes, attach to it, don't spawn a duplicate.
 //   * Otherwise spawn `bash run_soul.sh` as a child process. Set
 //     start_new_session=True equivalent so killing soul also kills the
 //     UE child it spawns.
@@ -28,16 +28,32 @@ import { spawn, ChildProcess, execFile } from 'child_process';
 import path from 'path';
 import http from 'http';
 
-const SOUL_HEALTH_URL = 'http://127.0.0.1:8765/health';
+// Legacy/fallback port for external-soul probing. When the user runs
+// soul standalone in a terminal and we attach to it, we don't know
+// which port it picked; ports.json is the canonical discovery path,
+// this fallback covers the case where the file is missing/stale and
+// the user explicitly pinned --port 8765.
+const SOUL_LEGACY_HTTP_PORT = 8765;
 const SOUL_HEALTH_TIMEOUT_MS = 1200;
 // Marker soul prints once everything is up (the actual line is:
-// "[soul] READY  —  listening on 127.0.0.1:8765"). We match a substring
-// so a future banner tweak doesn't break the gate as long as the word
-// "READY" still appears.
+// "[soul] READY ,  listening on 127.0.0.1:NNNN"). Substring match so
+// future banner tweaks don't break the gate as long as "READY" appears.
 const SOUL_READY_MARKER = '[soul] READY';
+// Ports banner, soul prints this BEFORE the READY marker (declared
+// after _signalling_startup in server.py). Format is stable:
+//   "[ports] http=NNNN streamer=NNNN player=NNNN"
+const SOUL_PORTS_RE =
+  /\[ports\] http=(\d+) streamer=(\d+) player=(\d+)/;
+
+export interface SoulPorts {
+  http: number;
+  signallingStreamer: number;
+  signallingPlayer: number;
+}
 
 let soulProc: ChildProcess | null = null;
 let alreadyReadyFired = false;
+let livePorts: SoulPorts | null = null;
 
 interface LogPayload {
   stream: 'stdout' | 'stderr' | 'meta';
@@ -48,7 +64,7 @@ interface LogPayload {
 // REPLAY current state on mount. Without this, if the user refreshes
 // the renderer mid-session (Cmd-R, hot reload, or after a UE crash
 // when they refresh to recover) the freshly mounted boot screen sees
-// none of the events that already fired — it sits forever on
+// none of the events that already fired, it sits forever on
 // "listening for soul…". The boot screen calls getSoulSnapshot() at
 // mount time, hydrates from the snapshot, and THEN starts listening
 // for new lines via the IPC channel. No event-replay race.
@@ -61,12 +77,22 @@ export function getSoulSnapshot(): {
   ready: boolean;
   recentLogs: LogPayload[];
   elapsedMs: number;
+  ports: SoulPorts | null;
 } {
   return {
     ready: soulIsReady,
     recentLogs: recentLogs.slice(),
     elapsedMs: soulSpawnAt ? Date.now() - soulSpawnAt : 0,
+    ports: livePorts,
   };
+}
+
+/** Live ports soul is bound to. Null until the [ports] banner has been
+ *  parsed (or ports.json read for an external-attach soul). Consumers
+ *  should treat the null window as "soul is booting" and wait for the
+ *  'soul:ports' event before constructing URLs. */
+export function getSoulPorts(): SoulPorts | null {
+  return livePorts;
 }
 
 function emit(window: BrowserWindow, channel: string, payload?: unknown): void {
@@ -95,14 +121,78 @@ function maybeFireReady(window: BrowserWindow, line: string): void {
   }
 }
 
+function maybeParsePorts(window: BrowserWindow, line: string): void {
+  // Parse exactly once per soul session, the banner is printed by the
+  // _announce_ports_startup hook, which fires once during startup.
+  if (livePorts !== null) return;
+  const m = line.match(SOUL_PORTS_RE);
+  if (!m) return;
+  livePorts = {
+    http: parseInt(m[1], 10),
+    signallingStreamer: parseInt(m[2], 10),
+    signallingPlayer: parseInt(m[3], 10),
+  };
+  emit(window, 'soul:ports', livePorts);
+}
+
+/**
+ * Resolve the data dir soul writes ports.json into. Mirrors the precedence
+ * run_soul.sh applies: packaged install uses <userData>/runtime/data,
+ * dev falls back to the repo's soul/data/. Both paths are computed
+ * statically, no IPC, no async, so this is safe to call before soul boots.
+ */
+function getSoulDataDir(): string {
+  if (app.isPackaged) {
+    return path.join(getRuntimeDir(), 'data');
+  }
+  // Dev: same default run_soul.sh uses (": ${SOUL_DATA_DIR:=$REPO/soul/data}").
+  const overrideDir = process.env.SOUL_DATA_DIR;
+  if (overrideDir) return overrideDir;
+  // Walk up from this file: electron/soulSupervisor.ts → UnClaw/ → Unclaw-Mac/ → soul/data
+  const repoRoot = path.resolve(__dirname, '..', '..');
+  return path.join(repoRoot, 'soul', 'data');
+}
+
+/** Best-effort read of soul's ports.json. Returns null if missing/stale/
+ *  malformed. Used to discover an external-attach soul's HTTP port
+ *  before doing /health. */
+function readPortsJson(): SoulPorts | null {
+  try {
+    const fs = require('fs') as typeof import('fs');
+    const file = path.join(getSoulDataDir(), 'ports.json');
+    if (!fs.existsSync(file)) return null;
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<{
+      http: number; signalling_streamer: number; signalling_player: number;
+      pid: number;
+    }>;
+    if (!raw.http || !raw.signalling_streamer || !raw.signalling_player) {
+      return null;
+    }
+    return {
+      http: raw.http,
+      signallingStreamer: raw.signalling_streamer,
+      signallingPlayer: raw.signalling_player,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Quick TCP probe for an existing soul. Used to decide whether to
  * spawn a new instance or attach to one the user is running externally
- * (e.g. `./run_soul.sh` in a terminal during development).
+ * (e.g. `./run_soul.sh` in a terminal during development). Tries
+ * ports.json first (covers dynamic-port soul), falls back to the
+ * legacy 8765 default.
  */
 function probeExistingSoul(): Promise<boolean> {
+  // Discover the candidate port: ports.json wins (matches a soul that
+  // picked dynamic ports), 8765 is the legacy explicit-pin default.
+  const fromFile = readPortsJson();
+  const port = fromFile?.http ?? SOUL_LEGACY_HTTP_PORT;
+  const url = `http://127.0.0.1:${port}/health`;
   return new Promise((resolve) => {
-    const req = http.get(SOUL_HEALTH_URL, { timeout: SOUL_HEALTH_TIMEOUT_MS }, (res) => {
+    const req = http.get(url, { timeout: SOUL_HEALTH_TIMEOUT_MS }, (res) => {
       // Any 2xx counts. Drain + discard the body.
       res.resume();
       resolve(res.statusCode !== undefined && res.statusCode < 400);
@@ -113,16 +203,16 @@ function probeExistingSoul(): Promise<boolean> {
 }
 
 /**
- * The packaged-install runtime root — everything the user downloaded on
+ * The packaged-install runtime root, everything the user downloaded on
  * first launch lives under here. Mirrors the Windows
  * `%LOCALAPPDATA%\Unclaw-Soul\_runtime\` layout.
  *
- *   runtime/python-env/                — uv-managed venv
- *   runtime/assets/{Audio2Lipsync,...} — downloaded model code + checkpoints
- *   runtime/unreal/Unclaw Character.app — downloaded UE Shipping build
- *   runtime/data/                      — soul runtime data (reminders,
+ *   runtime/python-env/               , uv-managed venv
+ *   runtime/assets/{Audio2Lipsync,...}, downloaded model code + checkpoints
+ *   runtime/unreal/Unclaw Character.app, downloaded UE Shipping build
+ *   runtime/data/                     , soul runtime data (reminders,
  *                                          memory, crash dumps)
- *   runtime/.setup-complete            — idempotent first-run gate
+ *   runtime/.setup-complete           , idempotent first-run gate
  */
 export function getRuntimeDir(): string {
   return path.join(app.getPath('userData'), 'runtime');
@@ -141,15 +231,15 @@ function isPackagedSetupComplete(): boolean {
 /**
  * Resolve `run_soul.sh` on disk. Order of precedence:
  *   1. UNCLAW_SOUL_REPO env override (for dev pointing at a non-sibling soul)
- *   2. Auto-updater overlay — <userData>/runtime/soul/run_soul.sh — newer
+ *   2. Auto-updater overlay, <userData>/runtime/soul/run_soul.sh, newer
  *      than the DMG-bundled baseline when the updater has dropped a fresh
  *      soul tarball. Code-signed .app contents are read-only post-install,
  *      so we can't write into Resources/soul-src/; the overlay lives in
  *      userData where we have write access.
- *   3. Packaged build baseline — Resources/soul-src/run_soul.sh inside the
+ *   3. Packaged build baseline, Resources/soul-src/run_soul.sh inside the
  *      .app. Used on first launch (before any update has landed) and as a
  *      permanent fallback if the overlay is missing/corrupted.
- *   4. Dev — walk up from app path looking for a sibling soul/ checkout
+ *   4. Dev, walk up from app path looking for a sibling soul/ checkout
  */
 function resolveSoulScript(): { script: string; cwd: string } | null {
   const fs = require('fs') as typeof import('fs');
@@ -157,7 +247,7 @@ function resolveSoulScript(): { script: string; cwd: string } | null {
   if (override) {
     return { script: path.join(override, 'run_soul.sh'), cwd: override };
   }
-  // Auto-updater overlay — checked FIRST so a freshly-dropped soul takes
+  // Auto-updater overlay, checked FIRST so a freshly-dropped soul takes
   // precedence over the baseline. The overlay dir is only present after
   // the updater has successfully installed a soul category bump.
   if (app.isPackaged) {
@@ -213,7 +303,7 @@ function spawnSoul(window: BrowserWindow): boolean {
   // exactly like a terminal-launched `./run_soul.sh` invocation.
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    // Dynamic backbuffer match via MatchViewportRes — the new MacInputHandler
+    // Dynamic backbuffer match via MatchViewportRes, the new MacInputHandler
     // SetCommandHandler("Resolution.Width", ...) (UE plugin rebuild) handles
     // the SDK's resize messages and runs r.SetRes WxHw. UE picks its own
     // sensible default at boot (typically the host display dimensions in
@@ -262,7 +352,7 @@ function spawnSoul(window: BrowserWindow): boolean {
       // grand-children (notably UE, which soul spawns in its own
       // session) orphaned to launchd.
       //
-      // Critically: we do NOT call soulProc.unref() — that would
+      // Critically: we do NOT call soulProc.unref(), that would
       // tell Electron not to wait on the child during shutdown, and
       // we explicitly DO want stopSoul() to control the lifecycle.
       detached: true,
@@ -274,7 +364,7 @@ function spawnSoul(window: BrowserWindow): boolean {
 
   // Persistent on-disk log file in addition to the in-memory IPC stream.
   // Without this, when something breaks on a user's machine we can't ask
-  // them to send logs — the IPC ring buffer only survives until the
+  // them to send logs, the IPC ring buffer only survives until the
   // Electron window closes. Daily-rotated to keep size manageable; old
   // files stay around for retrospective debug. Path mirrors the runtime
   // dir convention so support paths are uniform.
@@ -305,6 +395,7 @@ function spawnSoul(window: BrowserWindow): boolean {
       const line = raw.replace(/\r/g, '');
       if (!line) continue;
       log(window, stream, line);
+      maybeParsePorts(window, line);
       maybeFireReady(window, line);
     }
   };
@@ -342,6 +433,9 @@ function spawnSoul(window: BrowserWindow): boolean {
 export async function startSoul(window: BrowserWindow): Promise<void> {
   alreadyReadyFired = false;
   soulIsReady = false;
+  // Reset livePorts so a respawn doesn't surface the dead session's
+  // ports to the renderer while we wait for the new [ports] banner.
+  livePorts = null;
   recentLogs.length = 0;
   soulSpawnAt = Date.now();
 
@@ -363,10 +457,28 @@ export async function startSoul(window: BrowserWindow): Promise<void> {
   if (existing) {
     log(window, 'meta', '[unclaw] soul already running externally, attaching');
     alreadyReadyFired = true;
+    soulIsReady = true;
+    // Hydrate livePorts from ports.json, the external soul wrote it
+    // on its own startup, so we don't have a [ports] banner to parse
+    // but the file is authoritative. Falls back to the legacy port if
+    // ports.json isn't present (older soul, or the user explicitly
+    // pinned with --port 8765 and skipped ports.json writes somehow).
+    livePorts = readPortsJson() ?? {
+      http: SOUL_LEGACY_HTTP_PORT,
+      // We can't know the legacy signalling ports for sure if the
+      // file is missing, best effort with the old defaults, matching
+      // what soul shipped pre-dynamic-ports.
+      signallingStreamer: 8888,
+      signallingPlayer: 8080,
+    };
     // Short tick so renderer has time to mount its log subscription
     // before the ready event fires. Otherwise the LoadingScreen never
-    // sees 'soul:ready' and gets stuck.
-    setTimeout(() => emit(window, 'soul:ready'), 100);
+    // sees 'soul:ready' and gets stuck. Emit ports BEFORE ready so
+    // the renderer's init-soul-base resolves on the same render frame.
+    setTimeout(() => {
+      if (livePorts) emit(window, 'soul:ports', livePorts);
+      emit(window, 'soul:ready');
+    }, 100);
     return;
   }
   // Sweep stale processes from a prior crashed/killed Unclaw session
@@ -375,7 +487,7 @@ export async function startSoul(window: BrowserWindow): Promise<void> {
   // process tree can survive and continue holding ports 8765/8888/8080.
   // The next launch then can't bind those ports and silently fails to
   // ever signal-ready, leaving the user stuck on SoulBootScreen.
-  // Auto-kill anything whose argv we can positively identify as ours —
+  // Auto-kill anything whose argv we can positively identify as ours , 
   // be conservative: a generic process holding port 8888 we leave alone
   // and just log a warning.
   await sweepStaleProcesses(window);
@@ -394,7 +506,7 @@ export async function startSoul(window: BrowserWindow): Promise<void> {
  */
 async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
   const psOutput = await new Promise<string>((resolve) => {
-    // `ps -A -o pid=,command=` — full command line for every process the
+    // `ps -A -o pid=,command=`, full command line for every process the
     // user can see. We post-filter by argv pattern.
     execFile('/bin/ps', ['-A', '-o', 'pid=,command='], (err, stdout) => {
       if (err) {
@@ -428,7 +540,7 @@ async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
     if (pid === myPid) continue;
     if (soulProc && pid === soulProc.pid) continue;
     if (!ourPatterns.some((re) => re.test(cmd))) continue;
-    // Filter out the .app path matching our DMG-bundled UE — we only
+    // Filter out the .app path matching our DMG-bundled UE, we only
     // care about orphans that haven't been reaped. A still-living
     // Electron-main owner means the process belongs to a parallel
     // Unclaw instance and we shouldn't touch it. Conservative: only
@@ -446,25 +558,25 @@ async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
   for (const { pid, cmd } of stale) {
     log(window, 'meta', `  pid=${pid}: ${cmd}`);
     try {
-      // SIGTERM first — give the process a chance to clean up. If it's
+      // SIGTERM first, give the process a chance to clean up. If it's
       // wedged, we follow up with SIGKILL after a short grace window.
       process.kill(pid, 'SIGTERM');
     } catch {
-      // ESRCH (already exited) — fine.
+      // ESRCH (already exited), fine.
     }
   }
   // Brief grace window for SIGTERM to land + processes to release their
   // ports. 800 ms is well under the user-visible "is it stuck?" threshold
   // but long enough for clean Python shutdown hooks to run.
   await new Promise((r) => setTimeout(r, 800));
-  // SIGKILL any survivors. By this point they've ignored SIGTERM —
+  // SIGKILL any survivors. By this point they've ignored SIGTERM , 
   // unblock the ports unconditionally.
   for (const { pid } of stale) {
     try {
-      process.kill(pid, 0); // probe — throws if dead
+      process.kill(pid, 0); // probe, throws if dead
       process.kill(pid, 'SIGKILL');
     } catch {
-      // gone — good
+      // gone, good
     }
   }
 }
@@ -472,7 +584,7 @@ async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
 /**
  * Kill the spawned soul + everything it spawned (UE, MCP subprocesses)
  * on app quit. Idempotent. If soul was attached externally, this is a
- * no-op — the user owns that process.
+ * no-op, the user owns that process.
  *
  * Strategy:
  *   1. Negative-PID SIGTERM addresses the entire process group, so soul,
@@ -485,10 +597,10 @@ async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
  *      shutdown hook unwinds MCP sessions + the UE supervisor's stop()
  *      method does its own SIGTERM on UE).
  *   3. Negative-PID SIGKILL the survivors. By that point anything still
- *      breathing is wedged — better to force-quit than leak processes
+ *      breathing is wedged, better to force-quit than leak processes
  *      across app sessions.
  *
- * Called synchronously from the `will-quit` hook, so we can't await —
+ * Called synchronously from the `will-quit` hook, so we can't await , 
  * the SIGKILL fallback runs after a setTimeout that may not complete
  * before app exit on a fast user quit. That's acceptable: SIGKILL on
  * a process group with no parent left over is the OS's job at that
@@ -507,10 +619,17 @@ export function stopSoul(): void {
       // it's actually a group leader.
       process.kill(-pid, sig);
     } catch {
-      // ESRCH (no such process) is fine — already exited.
+      // ESRCH (no such process) is fine, already exited.
     }
   };
 
   killGroup('SIGTERM');
-  setTimeout(() => killGroup('SIGKILL'), 2000);
+  // Soul's FastAPI shutdown hook (_on_shutdown in server.py) runs
+  // synchronously on SIGTERM and itself SIGTERMs the UE child, then
+  // waits up to ~8s for UE to release its GPU/audio devices cleanly
+  // before SIGKILLing it. If we SIGKILL soul faster than that, soul
+  // dies mid-shutdown and UE is left orphaned (it's in a separate
+  // process group via start_new_session=True so OUR killpg here
+  // doesn't reach it). 10s gives the whole chain room to drain.
+  setTimeout(() => killGroup('SIGKILL'), 10000);
 }

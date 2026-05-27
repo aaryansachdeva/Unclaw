@@ -5,7 +5,7 @@
 // The widget icons are NOT in here anymore — they live in WidgetRail
 // on the right edge of the window. The slash-menu still anchors above
 // this bar, and `/news`, `/weather`, `/stocks`, `/reminders`, `/dance`,
-// `/kiss`, `/hello`, `/clear` all work from the input.
+// `/kiss`, `/hello`, `/celebrate`, `/clear` all work from the input.
 
 import {
   forwardRef,
@@ -75,7 +75,7 @@ interface InputBarProps {
   onOpenSheet: (key: SheetKey) => void;
   /** Slash-command animation dispatcher. */
   onDispatchAnimation: (
-    name: 'give_a_kiss' | 'do_dance' | 'say_hello' | 'react_as_star_wars_fan',
+    name: 'give_a_kiss' | 'do_dance' | 'say_hello' | 'react_as_star_wars_fan' | 'celebrate',
   ) => void;
   /** Slash command for /clear. */
   onClearMemory: () => void;
@@ -597,9 +597,14 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
           ? 'var(--glass-border-focus)'
           : 'var(--glass-border)';
 
+  // Resting shadow uses the panel-rest token for cohesion with the
+  // SettingsPanel and widget panels. The voice-active variant keeps
+  // its accent glow but layers it OVER the same resting shadow so the
+  // material vocabulary stays consistent (we don't get a flat "panel
+  // becomes spotlight" jump on voice activation).
   const surfaceBoxShadow = voiceActive
-    ? '0 1px 0 rgba(255,255,255,0.10) inset, 0 8px 28px -8px rgba(0,0,0,0.40), 0 0 24px -4px rgba(196, 68, 68, 0.45)'
-    : '0 1px 0 rgba(255,255,255,0.10) inset, 0 8px 28px -8px rgba(0,0,0,0.40)';
+    ? 'var(--shadow-panel-rest), 0 0 24px -4px rgba(196, 68, 68, 0.45)'
+    : 'var(--shadow-panel-rest)';
 
   return (
     <motion.div
@@ -609,22 +614,30 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       style={{
         position: 'relative',
         width: '100%',
-        // 24px (Tailwind `rounded-3xl`) — matches the old project's
-        // bar exactly. Less aggressive than a full pill, reads as
-        // a soft-edged rectangle rather than capsule.
-        borderRadius: 24,
+        // 24px soft-edged rectangle (less aggressive than a full pill).
+        borderRadius: 'var(--radius-pill-lg)',
+        // Frosted slate material per "The Frosted Slate Rule" in
+        // DESIGN.md. White-alpha was the pre-doctrine surface; it
+        // disappeared against bright skin tones in the streamed
+        // character. The base + hover tokens are the same material
+        // language the SettingsPanel and widget pills speak.
         background: isFocused
-          ? 'rgba(255, 255, 255, 0.14)'
-          : 'rgba(255, 255, 255, 0.08)',
-        backdropFilter: 'blur(32px) saturate(1.4)',
-        WebkitBackdropFilter: 'blur(32px) saturate(1.4)',
+          ? 'var(--glass-bg-hover)'
+          : 'var(--glass-bg)',
+        backdropFilter: 'var(--glass-blur)',
+        WebkitBackdropFilter: 'var(--glass-blur)',
         border: `1px solid ${surfaceBorder}`,
         boxShadow: surfaceBoxShadow,
         transition:
-          'background 0.25s var(--ease-out-quart), border-color 0.25s var(--ease-out-quart), box-shadow 0.25s var(--ease-out-quart)',
+          'background var(--duration-base) var(--ease-out-quart), border-color var(--duration-base) var(--ease-out-quart), box-shadow var(--duration-base) var(--ease-out-quart)',
         overflow: 'hidden',
       }}
     >
+      {/* Hairline-top — the same ambient-light highlight the SettingsPanel
+          and SoulBootScreen carry. Pulls the bar into the shared material
+          vocabulary so the bottom chrome reads as "made of the same
+          glass" as everything else that opens above it. */}
+      <span className="hairline-top" style={{ left: 18, right: 18 }} aria-hidden />
       {/* AI-response gradient sweep. One-shot accent wash crossing
           left → right when the AI's reply lands. */}
       <AnimatePresence>
@@ -862,66 +875,75 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
           {/* Spacer */}
           <div style={{ flex: 1 }} />
 
-          {/* Right action cluster: + button (image attach) when the
-              chat model supports vision; send when text, voice when
-              empty (same 36x36 slot crossfades). */}
-          {canAttachImages && (
-            <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                style={{ display: 'none' }}
-                onChange={handleFileChange}
-              />
-              <PlusButton onClick={handlePickFiles} disabled={inputLocked} />
-            </>
-          )}
+          {/* Right action cluster: chat-pane toggle, then + image-attach
+              (when the chat model supports vision), then mic/send. Reads
+              as one unit: [chat-pane][+ attach][mic / send]. The chat-pane
+              + the + are wrapped in their own sub-flex with a tight 2px
+              gap so they read as a paired control, while the outer row
+              gap (8px) still spaces them away from the mic/send slot. */}
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 2,
+              flexShrink: 0,
+            }}
+          >
+            {onToggleChatPane && (
+              <button
+                type="button"
+                onClick={onToggleChatPane}
+                aria-label={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
+                aria-pressed={chatPaneOpen}
+                title={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
+                style={{
+                  flexShrink: 0,
+                  width: 32,
+                  height: 32,
+                  borderRadius: 8,
+                  background: chatPaneOpen ? 'var(--glass-bg-hover)' : 'transparent',
+                  border: 'none',
+                  color: chatPaneOpen ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  transition: 'all 0.15s var(--ease-out-quart)',
+                }}
+                onMouseEnter={(e) => {
+                  if (chatPaneOpen) return;
+                  e.currentTarget.style.background = 'var(--glass-bg-hover)';
+                  e.currentTarget.style.color = 'var(--text-primary)';
+                }}
+                onMouseLeave={(e) => {
+                  if (chatPaneOpen) return;
+                  e.currentTarget.style.background = 'transparent';
+                  e.currentTarget.style.color = 'var(--text-secondary)';
+                }}
+              >
+                {chatPaneOpen ? (
+                  <PanelRightClose size={18} strokeWidth={2} />
+                ) : (
+                  <PanelRightOpen size={18} strokeWidth={2} />
+                )}
+              </button>
+            )}
 
-          {/* Chat-pane toggle. Sits in the right-action cluster next to
-              the mic so the "session controls" cluster reads as one unit:
-              [+ attach][chat-pane][mic / send]. */}
-          {onToggleChatPane && (
-            <button
-              type="button"
-              onClick={onToggleChatPane}
-              aria-label={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
-              aria-pressed={chatPaneOpen}
-              title={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
-              style={{
-                flexShrink: 0,
-                width: 32,
-                height: 32,
-                borderRadius: 8,
-                background: chatPaneOpen ? 'var(--glass-bg-hover)' : 'transparent',
-                border: 'none',
-                color: chatPaneOpen ? 'var(--text-primary)' : 'var(--text-secondary)',
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                fontFamily: 'inherit',
-                transition: 'all 0.15s var(--ease-out-quart)',
-              }}
-              onMouseEnter={(e) => {
-                if (chatPaneOpen) return;
-                e.currentTarget.style.background = 'var(--glass-bg-hover)';
-                e.currentTarget.style.color = 'var(--text-primary)';
-              }}
-              onMouseLeave={(e) => {
-                if (chatPaneOpen) return;
-                e.currentTarget.style.background = 'transparent';
-                e.currentTarget.style.color = 'var(--text-secondary)';
-              }}
-            >
-              {chatPaneOpen ? (
-                <PanelRightClose size={18} strokeWidth={2} />
-              ) : (
-                <PanelRightOpen size={18} strokeWidth={2} />
-              )}
-            </button>
-          )}
+            {canAttachImages && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={handleFileChange}
+                />
+                <PlusButton onClick={handlePickFiles} disabled={inputLocked} />
+              </>
+            )}
+          </div>
 
           <div
             style={{
@@ -1014,28 +1036,32 @@ function InlineChevron({
       onClick={onClick}
       disabled={disabled}
       aria-label={direction === 'prev' ? 'Previous agent' : 'Next agent'}
-      className="glass-btn"
       style={{
         width: 22,
         height: 22,
-        borderRadius: '50%',
-        background: 'rgba(255, 255, 255, 0.05)',
-        border: '1px solid rgba(255, 255, 255, 0.10)',
+        borderRadius: 6,
+        background: 'transparent',
+        border: 'none',
         color: 'var(--text-secondary)',
         cursor: disabled ? 'not-allowed' : 'pointer',
         flexShrink: 0,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: 'inherit',
+        transition: 'all 0.15s var(--ease-out-quart)',
       }}
       onMouseEnter={(e) => {
         if (disabled) return;
-        e.currentTarget.style.background = 'rgba(255,255,255,0.14)';
+        e.currentTarget.style.background = 'var(--glass-bg-hover)';
         e.currentTarget.style.color = 'var(--text-primary)';
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+        e.currentTarget.style.background = 'transparent';
         e.currentTarget.style.color = 'var(--text-secondary)';
       }}
     >
-      <Icon size={12} strokeWidth={2.4} />
+      <Icon size={16} strokeWidth={3} style={{ transform: 'translateY(1px)' }} />
     </motion.button>
   );
 }
@@ -1060,33 +1086,33 @@ function PlusButton({
       disabled={disabled}
       aria-label="Attach image"
       title="Attach image"
-      className="glass-btn"
       style={{
         flexShrink: 0,
-        width: 36,
-        height: 36,
-        borderRadius: '50%',
-        background: 'rgba(255,255,255,0.06)',
-        border: '1px solid rgba(255,255,255,0.10)',
+        width: 32,
+        height: 32,
+        borderRadius: 8,
+        background: 'transparent',
+        border: 'none',
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
         color: 'var(--text-secondary)',
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.5 : 1,
-        transition: 'background 0.2s var(--ease-out-quart), color 0.2s var(--ease-out-quart)',
+        fontFamily: 'inherit',
+        transition: 'all 0.15s var(--ease-out-quart)',
       }}
       onMouseEnter={e => {
         if (disabled) return;
-        e.currentTarget.style.background = 'rgba(255,255,255,0.12)';
+        e.currentTarget.style.background = 'var(--glass-bg-hover)';
         e.currentTarget.style.color = 'var(--text-primary)';
       }}
       onMouseLeave={e => {
-        e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+        e.currentTarget.style.background = 'transparent';
         e.currentTarget.style.color = 'var(--text-secondary)';
       }}
     >
-      <Plus size={16} strokeWidth={2.2} />
+      <Plus size={18} strokeWidth={2} />
     </motion.button>
   );
 }

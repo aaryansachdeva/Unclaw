@@ -12,7 +12,7 @@
 
 import { fetchApiKeys } from './apiKeys';
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 export interface SoulChatHistoryTurn {
   role: 'user' | 'assistant';
@@ -171,7 +171,7 @@ export async function chatViaSoul(
     console.warn('[soulChat] failed to read api keys', err);
   }
 
-  const res = await fetch(`${SOUL_URL}/chat`, {
+  const res = await fetch(`${getSoulBaseUrl()}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -241,7 +241,7 @@ export async function fireIdle(opts: {
     body.llm_api_key = keys.llm_api_key;
   }
   try {
-    const res = await fetch(`${SOUL_URL}/idle`, {
+    const res = await fetch(`${getSoulBaseUrl()}/idle`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -348,7 +348,7 @@ export async function* streamChatViaSoul(
     body.tts_provider = 'kokoro';
   }
 
-  const res = await fetch(`${SOUL_URL}/chat_stream_audio`, {
+  const res = await fetch(`${getSoulBaseUrl()}/chat_stream_audio`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

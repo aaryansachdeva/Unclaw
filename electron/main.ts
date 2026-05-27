@@ -16,8 +16,9 @@ import {
 } from 'electron';
 import path from 'path';
 import fs from 'fs';
+import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
-import { startSoul, stopSoul, getSoulSnapshot } from './soulSupervisor';
+import { startSoul, stopSoul, getSoulSnapshot, getSoulPorts } from './soulSupervisor';
 import { getSetupSnapshot, runSetup } from './setupCoordinator';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
@@ -31,7 +32,7 @@ let tray: Tray | null = null;
 let pendingCapture: { image: Electron.NativeImage; display: Display } | null = null;
 
 // Slightly larger and noticeably squarer than the original 420x760
-// rectangle — gives the wizard's bottom panel + the streamed face
+// rectangle, gives the wizard's bottom panel + the streamed face
 // enough room to breathe while still feeling like a sidekick window.
 const WINDOW_WIDTH = 600;
 const WINDOW_HEIGHT = 780;
@@ -47,7 +48,7 @@ const SCREENSHOT_SHORTCUT = 'Control+Shift+G';
 // a fresh screenshot via IPC to the already-mounted page. No HTML parse,
 // no image decode delay, no second-paint flash.
 //
-// Drag-release auto-commits — there's no confirm/tick step. Esc cancels.
+// Drag-release auto-commits, there's no confirm/tick step. Esc cancels.
 const OVERLAY_HTML = `<!DOCTYPE html>
 <html><head><meta charset="utf-8" />
 <style>
@@ -62,7 +63,7 @@ const OVERLAY_HTML = `<!DOCTYPE html>
     width: 100vw; height: 100vh;
     object-fit: cover; pointer-events: none;
     -webkit-user-drag: none;
-    /* Hidden until we have a screenshot to show — avoids the alt-text
+    /* Hidden until we have a screenshot to show, avoids the alt-text
        artifact that flashed when src was an empty data URL. */
     display: none;
   }
@@ -224,16 +225,16 @@ const OVERLAY_HTML = `<!DOCTYPE html>
 // ---------------------------------------------------------------------
 //
 // Constructing a fresh BrowserWindow on every shortcut press is what
-// causes the visible "shift" — Windows DWM has to add a new window to
+// causes the visible "shift", Windows DWM has to add a new window to
 // the desktop tree, re-stack, recompose. The fix used by every polished
 // Electron screenshot tool (e.g. nashaofu/screenshots) is:
 //
 //   1) Create the overlay BrowserWindow ONCE at app startup, hidden.
 //   2) Reuse it across captures: hide on commit/cancel, show on next.
-//   3) Use `type: 'toolbar'` on Win32 — a Win32 toolbar window has
+//   3) Use `type: 'toolbar'` on Win32, a Win32 toolbar window has
 //      different DWM stack handling than the default WS_OVERLAPPED
 //      and doesn't disturb other windows when shown/hidden.
-//   4) Use `kiosk: true` AFTER show — bypasses Windows' usual window-
+//   4) Use `kiosk: true` AFTER show, bypasses Windows' usual window-
 //      manager animations.
 //   5) `paintWhenInitiallyHidden: false` so the renderer doesn't burn
 //      cycles before first show.
@@ -305,7 +306,7 @@ async function triggerScreenshot(): Promise<void> {
     return;
   }
 
-  // Wait for the renderer to be ready — only meaningful on the very
+  // Wait for the renderer to be ready, only meaningful on the very
   // first call after app start; resolves instantly on every subsequent
   // capture.
   await overlayReady;
@@ -396,7 +397,7 @@ ipcMain.on('screenshot:cancel', () => {
 // ---------------------------------------------------------------------
 
 // Single shared NativeImage for the brand. Reused for the BrowserWindow
-// icon, the Tray, and macOS dock. Sourced from `resources/icon.png` —
+// icon, the Tray, and macOS dock. Sourced from `resources/icon.png` , 
 // the OAuth success page still uses LOGO_BASE64 separately because it
 // renders inside the user's external browser and can't read local
 // files. `__dirname` at runtime is `<project>/dist/electron/`, so
@@ -416,8 +417,8 @@ function createWindow() {
     y: Math.round((screenH - WINDOW_HEIGHT) / 2),
     frame: false,
     // macOS: surface the real OS traffic lights (close/min/full-screen)
-    // in the top-left. They're the actual NSWindow buttons — hover-pulse,
-    // dark-mode adapt, accessibility, full-screen-on-option-click — all
+    // in the top-left. They're the actual NSWindow buttons, hover-pulse,
+    // dark-mode adapt, accessibility, full-screen-on-option-click, all
     // for free. Windows/Linux ignore titleBarStyle silently and keep the
     // frame:false chromeless treatment, so Titlebar.tsx's custom min/close
     // buttons still render there.
@@ -437,6 +438,19 @@ function createWindow() {
     // Window icon (taskbar / Alt-Tab / titlebar). Without this Electron
     // falls back to its default React-style icon.
     icon: APP_ICON,
+    // macOS focus quirk fix. By default, when our floating
+    // `alwaysOnTop` window is not the focused app and the user clicks
+    // anywhere in its content area, AppKit only raises the window and
+    // swallows the click; the streamed character + chrome don't
+    // receive the pointerdown, and the input bar / widgets feel
+    // dead until a second click. The titlebar drag region is a native
+    // NSView so it activates the window correctly on first click,
+    // which is why this looked like "only titlebar clicks focus".
+    // `acceptFirstMouse: true` makes the first content click both
+    // raise the window AND propagate to whatever was clicked. The
+    // screenshot overlay window already has this set; missing here
+    // was an oversight.
+    acceptFirstMouse: true,
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
@@ -447,7 +461,7 @@ function createWindow() {
   // Always-on-top level: 'floating' (NSFloatingWindowLevel = 3) instead
   // of 'screen-saver' (level 1000). The screen-saver level promotes the
   // window into macOS's "accessory" panel category, which auto-hides the
-  // dock icon for the owning app — users had no way to see Unclaw was
+  // dock icon for the owning app, users had no way to see Unclaw was
   // running or quit it from the dock. 'floating' keeps the window above
   // normal app windows (which is the 99% case) while letting the dock
   // icon stay visible. Trade-off: full-screen video / Screen Sharing can
@@ -471,7 +485,7 @@ function createWindow() {
   // detached devtools so we can inspect WebRTC peer state, console errors,
   // and the React tree on user machines without rebuilding the whole DMG
   // each time something goes wrong in the field. Packaged builds normally
-  // don't surface devtools at all — this shortcut adds the escape hatch.
+  // don't surface devtools at all, this shortcut adds the escape hatch.
   mainWindow.webContents.on('before-input-event', (_event, input) => {
     const isToggle =
       (input.meta || input.control) &&
@@ -493,7 +507,7 @@ function createWindow() {
 }
 
 function createTray() {
-  // Resize down for the system tray — Windows expects 16×16 (or 32×32
+  // Resize down for the system tray, Windows expects 16×16 (or 32×32
   // on hi-DPI). The full 256×256 brand image renders too large and
   // sometimes refuses to display at all on Win32. resize() returns a
   // new NativeImage; the source APP_ICON is untouched and stays
@@ -520,6 +534,60 @@ function createTray() {
 ipcMain.on('window:minimize', () => mainWindow?.minimize());
 ipcMain.on('window:close', () => app.quit());
 
+// Explicit focus from the renderer. The PixelStreaming library
+// captures pointer events on the streamed <video> to forward to UE
+// (mouse position, click, scroll) and that capture can keep AppKit
+// from running its normal "click in content → focus the window"
+// behavior, especially for `alwaysOnTop` floating windows. The
+// renderer hooks a capture-phase mousedown listener and fires this
+// IPC when the BrowserWindow isn't focused yet; we then call
+// `focus()` here so the next interaction (typing, dragging) lands
+// on us instead of leaking to whichever app was previously focused.
+// Open Terminal.app with a pre-filled command. Used by the SettingsPanel's
+// Claude Code subscription card so the user can run `claude setup-token`
+// without leaving Unclaw to type the command themselves. Uses osascript
+// (AppleScript) rather than `open -a Terminal` so we can inject the
+// command into a fresh tab and avoid clobbering any existing session.
+ipcMain.handle('terminal:open-with-command', async (_event, command: string) => {
+  if (typeof command !== 'string' || !command.trim()) {
+    return { ok: false, error: 'no command provided' };
+  }
+  // Escape double quotes for AppleScript embedding. Commands like
+  // `claude setup-token` have no shell metacharacters worth worrying
+  // about beyond quote balancing.
+  const safe = command.replace(/"/g, '\\"');
+  const { exec } = await import('node:child_process');
+  return new Promise<{ ok: boolean; error?: string }>((resolve) => {
+    exec(
+      `osascript -e 'tell application "Terminal" to do script "${safe}"' ` +
+        `-e 'tell application "Terminal" to activate'`,
+      (err) => {
+        if (err) resolve({ ok: false, error: err.message });
+        else resolve({ ok: true });
+      },
+    );
+  });
+});
+
+ipcMain.on('window:focus', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isFocused()) return;
+  // Three-step macOS focus reclaim. The window is at NSFloatingWindowLevel
+  // (per `setAlwaysOnTop(true, 'floating')` in createWindow), which means:
+  //   * BrowserWindow.focus() raises THIS window and marks it as key, but
+  //   * the owning Electron app isn't necessarily the frontmost app, so
+  //     AppKit can hand activation back to whichever app actually was
+  //     frontmost the moment the PixelStreaming pointer handlers run.
+  // app.focus({steal:true}) makes Electron the frontmost app first; then
+  // moveTop ensures floating-level windows of OUR app sit above each
+  // other correctly; then BrowserWindow.focus locks in key-window status.
+  // The result: clicking the streamed character behaves like clicking
+  // any other app's content area.
+  try { app.focus({ steal: true }); } catch { /* not critical */ }
+  try { mainWindow.moveTop(); } catch { /* not critical */ }
+  mainWindow.focus();
+});
+
 // Renderer can ask for a SNAPSHOT of soul state. Used by SoulBootScreen
 // on mount (and on every re-mount after a Cmd-R / hot reload) so it
 // hydrates with whatever log lines + ready-status already happened
@@ -527,16 +595,17 @@ ipcMain.on('window:close', () => app.quit());
 // session left the boot screen stuck on "listening for soul…" forever
 // because the IPC events had already fired into the void.
 ipcMain.handle('soul:get-status', () => getSoulSnapshot());
+ipcMain.handle('soul:get-ports', () => getSoulPorts());
 
 // First-run setup pipeline. SetupWizard subscribes to 'setup:log' +
 // 'setup:stage' for live progress; getStatus is the snapshot for
 // hydration on mount (parallel to soul:get-status). start is what the
-// wizard calls when it mounts to kick the pipeline — idempotent on the
+// wizard calls when it mounts to kick the pipeline, idempotent on the
 // coordinator side, safe to call multiple times.
 ipcMain.handle('setup:get-status', () => getSetupSnapshot());
 
 // Runtime auto-updater. Renderer's UpdateOverlay subscribes to
-// 'update:snapshot' (full state object replaces stage events here —
+// 'update:snapshot' (full state object replaces stage events here , 
 // per-category progress fits naturally in one payload). Get-status is
 // the hydration call so the overlay can mount mid-update without
 // missing earlier events.
@@ -562,7 +631,7 @@ ipcMain.handle('setup:start', async () => {
   return runSetup(mainWindow);
 });
 ipcMain.on('window:toggle-pin', (_event, pinned: boolean) => {
-  // Same level as the createWindow setup — 'screen-saver' is the
+  // Same level as the createWindow setup, 'screen-saver' is the
   // highest standard level and survives full-screen apps stealing
   // focus. When unpinned we drop back to a normal window.
   mainWindow?.setAlwaysOnTop(pinned, 'screen-saver');
@@ -618,7 +687,7 @@ function shutdownOAuthServer(): void {
     try {
       oauthServer.close();
     } catch {
-      // ignore — server may already be closed
+      // ignore, server may already be closed
     }
     oauthServer = null;
   }
@@ -645,7 +714,7 @@ const OAUTH_SUCCESS_HTML = `<!doctype html>
         'Segoe UI', Roboto, sans-serif;
       -webkit-font-smoothing: antialiased;
     }
-    /* Layered ambient background — a deep navy/black base, two warm
+    /* Layered ambient background, a deep navy/black base, two warm
        radial blooms (one accent-tinted, one cool slate) and a faint
        grid-noise vignette so the page never looks like a flat black
        sheet even when the card is small. */
@@ -658,7 +727,7 @@ const OAUTH_SUCCESS_HTML = `<!doctype html>
       display: flex; align-items: center; justify-content: center;
       padding: 32px;
     }
-    /* Soft grain — pure CSS, no asset. Adds organic texture to the
+    /* Soft grain, pure CSS, no asset. Adds organic texture to the
        background washes. */
     body::before {
       content: '';
@@ -691,7 +760,7 @@ const OAUTH_SUCCESS_HTML = `<!doctype html>
       width: min(420px, 100%);
       padding: 40px 36px 32px;
       text-align: center;
-      /* Glassy — same aesthetic as the in-app SignInScreen. */
+      /* Glassy, same aesthetic as the in-app SignInScreen. */
       background: rgba(14, 16, 26, 0.42);
       border: 1px solid rgba(255, 255, 255, 0.10);
       border-radius: 24px;
@@ -712,7 +781,7 @@ const OAUTH_SUCCESS_HTML = `<!doctype html>
       to   { opacity: 1; transform: translateY(0); }
     }
 
-    /* Logo — real UnClaw mark, embedded base64. Breathes via a
+    /* Logo, real UnClaw mark, embedded base64. Breathes via a
        drop-shadow keyframe instead of opacity so the alpha edge stays
        crisp. */
     .logo-wrap {
@@ -743,7 +812,7 @@ const OAUTH_SUCCESS_HTML = `<!doctype html>
       50%      { filter: drop-shadow(0 0 30px rgba(196, 68, 68, 0.46)); }
     }
 
-    /* Inline accent rule above the headline — small, deliberate. */
+    /* Inline accent rule above the headline, small, deliberate. */
     .rule {
       display: inline-block;
       width: 22px; height: 2px; border-radius: 2px;
@@ -859,7 +928,7 @@ async function startOAuthLoopback(): Promise<OAuthCallbackPayload> {
     server.on('error', (err) => {
       const r = oauthResolver;
       shutdownOAuthServer();
-      // EADDRINUSE most likely — surface a clear message.
+      // EADDRINUSE most likely, surface a clear message.
       const msg =
         (err as NodeJS.ErrnoException)?.code === 'EADDRINUSE'
           ? `Port ${OAUTH_LOOPBACK_PORT} is in use. Close any other UnClaw or sign-in tab and try again.`
@@ -909,7 +978,7 @@ app.on('will-quit', () => {
 
 // Persist the JWT in an encrypted file under userData. Returns true
 // on success, false if encryption isn't available on this platform
-// (Linux without a keyring) — in that case the renderer should fall
+// (Linux without a keyring), in that case the renderer should fall
 // back to keeping the token in memory only.
 ipcMain.handle('auth:set-token', (_event, token: string) => {
   if (typeof token !== 'string' || !token) return false;
@@ -956,13 +1025,13 @@ ipcMain.handle('auth:clear-token', () => {
 });
 
 // =====================================================================
-// API keys (BYOK) — local-only persistence via safeStorage.
+// API keys (BYOK), local-only persistence via safeStorage.
 // =====================================================================
 //
 // Pure scaffolding for now: the renderer collects provider/model/key
 // fields in the onboarding wizard, hands the whole object over here,
 // and we encrypt-and-write to <userData>/apiKeys.bin. No cloud sync,
-// no soul wiring — soul keeps using its own .env keys until we wire
+// no soul wiring, soul keeps using its own .env keys until we wire
 // these through to the chat path. The "sync across devices" toggle
 // is stored alongside the keys but is non-functional UI for now.
 
@@ -1020,7 +1089,7 @@ ipcMain.on('screenshot:trigger', () => {
 });
 
 app.whenReady().then(() => {
-  // macOS dock icon — the BrowserWindow `icon` prop only affects the
+  // macOS dock icon, the BrowserWindow `icon` prop only affects the
   // window/taskbar on Win/Linux; the dock is its own surface. No-op
   // on Win/Linux because `app.dock` is undefined there.
   //
@@ -1029,11 +1098,11 @@ app.whenReady().then(() => {
   // promotes the window's collection-behavior with NSWindowCollectionBehaviorTransient,
   // which macOS treats as "accessory" and auto-hides the dock icon.
   // Without the explicit show(), Unclaw is reachable only from the
-  // status-bar tray — no way for users to see it's running or quit it
+  // status-bar tray, no way for users to see it's running or quit it
   // via Cmd+Q. show() overrides the transient-window dock-hiding.
   if (process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(APP_ICON);
-    app.dock.show().catch(() => { /* show() can reject on some macOS versions — non-fatal */ });
+    app.dock.show().catch(() => { /* show() can reject on some macOS versions, non-fatal */ });
   }
 
   // `geolocation` lets the Weather widget call navigator.geolocation
@@ -1065,7 +1134,7 @@ app.whenReady().then(() => {
   });
   if (!registered) {
     console.warn(
-      `[screenshot] failed to register ${SCREENSHOT_SHORTCUT} — another app likely owns it`,
+      `[screenshot] failed to register ${SCREENSHOT_SHORTCUT}, another app likely owns it`,
     );
   }
 
@@ -1089,12 +1158,37 @@ app.on('will-quit', () => {
   // MCP subprocess teardown) run cleanly. No-op if soul was attached
   // externally (the user owns that process and we don't kill it).
   stopSoul();
+  // Safety net: stopSoul SIGTERMs soul's process group, but two
+  // categories of children escape that:
+  //   (a) UE Character, launched by soul with start_new_session=True
+  //       so it's in its OWN process group, not soul's. Soul's
+  //       _on_shutdown hook SIGTERMs UE explicitly, but if soul is
+  //       killed before that runs, UE survives as an orphan.
+  //   (b) In-tree FastMCP servers (code_exec / screen_capture /
+  //       computer_control), soul spawns these as stdio children;
+  //       they handle parent-death by exiting on stdin close, but
+  //       only AFTER soul actually closes the pipe. If soul wedges,
+  //       they linger. The npx-based MCPs (playwright/memory/fs/fetch)
+  //       exit cleanly via Node's signal handlers and don't need
+  //       a sweep.
+  // -f matches the full argv so we catch the .app inner binary AND
+  // the python -m mcp_servers/* invocations. Synchronous so each
+  // sweep lands before app exit; this is a quit-path safety net so
+  // the small spawn cost is fine.
+  for (const pattern of ['Unclaw Character', 'soul/mcp_servers']) {
+    try {
+      spawnSync('pkill', ['-f', pattern], { stdio: 'ignore' });
+    } catch {
+      // pkill missing or denied, launchd will reap orphans whose
+      // parent (Electron) just exited.
+    }
+  }
 });
 
 app.on('window-all-closed', () => {
   // Unclaw is a single-window foreground experience, not a typical
   // Mac menubar/background app. Closing the window means the user is
-  // done — quit the whole app so `will-quit` fires and `stopSoul()`
+  // done, quit the whole app so `will-quit` fires and `stopSoul()`
   // can SIGTERM the soul subprocess. Without this, on macOS the app
   // stayed alive with no window and soul + UE leaked across sessions.
   app.quit();

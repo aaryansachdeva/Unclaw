@@ -53,7 +53,7 @@ function applyBlur(el: HTMLElement) {
  *  publishes it. The label's offset is the standard-time offset, not
  *  the live DST-adjusted value — that matches Kintone's catalog and
  *  avoids labels that drift twice a year. */
-const TZ_CATALOG: Array<{ id: string; label: string }> = [
+export const TZ_CATALOG: Array<{ id: string; label: string }> = [
   { id: 'Etc/GMT+12',                  label: '(UTC-12:00) International Date Line West' },
   { id: 'Etc/GMT+11',                  label: '(UTC-11:00) Coordinated Universal Time-11' },
   { id: 'Pacific/Honolulu',            label: '(UTC-10:00) Hawaii' },

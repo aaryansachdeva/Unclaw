@@ -2,7 +2,7 @@
 //
 // Bumping a release:
 //   1. Re-build the artifact (UE shipping, runtime asset bundle, etc.)
-//   2. Upload to R2 under a NEW versioned key — never reuse a key, even
+//   2. Upload to R2 under a NEW versioned key, never reuse a key, even
 //      with the same content. Cloudflare's edge cache treats key-as-URL
 //      and a stale 1700-second-cached body can ship a buggy build for a
 //      long time after the R2 object updates (we hit this on Windows
@@ -13,15 +13,15 @@
 //      will re-run setup for the new artifacts.
 //
 // The setup coordinator hard-fails if a download SHA doesn't match the
-// declared value — never silently install whatever the CDN served.
+// declared value, never silently install whatever the CDN served.
 
 export interface RemoteAsset {
   /** Public R2 URL the setup wizard fetches over HTTPS. */
   url: string;
-  /** Hex-encoded SHA-256 of the entire file. `null` only in dev — the
+  /** Hex-encoded SHA-256 of the entire file. `null` only in dev, the
    *  coordinator refuses to install a TBD-SHA artifact in packaged builds. */
   sha256: string | null;
-  /** Total bytes — surfaces ETA + progress percentage in the UI without
+  /** Total bytes, surfaces ETA + progress percentage in the UI without
    *  having to read Content-Length first (lets us validate that too). */
   sizeBytes: number;
 }
@@ -32,7 +32,7 @@ export interface SetupManifest {
   releaseTag: string;
 
   /** uv + python-build-standalone target. uv handles the download
-   *  + extraction once it's bootstrapped — we just tell it which
+   *  + extraction once it's bootstrapped, we just tell it which
    *  CPython to install. 3.11 is what soul targets (matches the
    *  Windows bundle). */
   pythonVersion: string;
@@ -49,7 +49,7 @@ export interface SetupManifest {
   unreal: RemoteAsset;
 
   /** Bundle: lipsync + t2f source + ONNX checkpoints + .mlpackage
-   *  directories — everything `run_soul.sh` expects to find under
+   *  directories, everything `run_soul.sh` expects to find under
    *  $REPO/{Audio2Lipsync,ExpressModelv8,LipSyncModelv1,
    *  LipSyncModelv6_small,soul-models}/. Extracted to
    *  runtime/assets/. */
@@ -57,27 +57,24 @@ export interface SetupManifest {
 }
 
 export const MANIFEST: SetupManifest = {
-  releaseTag: '2026.0525.10-mac-dev',
+  releaseTag: '2026.0527.01-mac',
   pythonVersion: '3.11',
   minFreeDiskBytes: 15 * 1024 * 1024 * 1024, // 15 GB
 
   unreal: {
-    // 2026.0525.09 Dev build — re-spin of 0525.08 with the inner binary rename
-    // that 0525.08 missed (carve-out only renamed the .app, not Contents/MacOS/).
-    // Soul's unreal_runtime.py expects MacOS/<CFBundleExecutable> to exist; the
-    // 0525.08 bundle still had MacOS/AudioTestProject02 and CFBundleExecutable
-    // didn't match -> "launch failed: .app missing inner binary" on every spawn.
+    // 2026.0527.01 Mac build, ships the LiveLinkFaceStreamComponent
+    // cmdline-port override (reads -SoulPort=NNNN at BeginPlay so the
+    // dynamic-ports flow reaches UE), plus the PixelStreaming2NativeMac
+    // Tier 1 plugin from prior cycle.
     //
-    // Contents: PixelStreaming2NativeMac plugin (Tier 1) — low-latency H264 with
-    // SW-fallback auto-retry (bounded 2 attempts), full input handler
-    // (mouse/kbd/touch/UIInteraction), encoder lifecycle crash-proofing.
-    //
-    // Carve-out (now complete): rename .app, rename inner binary to match
-    // CFBundleExecutable, set CFBundleName/DisplayName/IconFile/LSUIElement,
-    // replace icon, delete Assets.car, ad-hoc re-sign WITHOUT --options runtime.
-    url: 'https://files.fotonlabs.com/mac/unreal/unreal-2026.0525.09-dev-mac.zip',
-    sha256: '1bc1f98c04c4d1ea416feb2800b99312f5cd5b9245e44f35ad9801796f6facbd',
-    sizeBytes: 1_902_903_676,
+    // Carve-out applied: rename .app + inner binary to "Unclaw Character",
+    // CFBundleName/DisplayName/IconFile set, LSUIElement true (hides Dock
+    // entry), custom AppIcon.icns, Assets.car deleted, ad-hoc re-signed
+    // WITHOUT --options runtime (libtbb team-ID mismatch crash-loops if
+    // hardened runtime is on, see Mac - Known Issues and Gotchas).
+    url: 'https://files.fotonlabs.com/mac/unreal/unreal-2026.0527.01-mac.zip',
+    sha256: 'b1fc3c951f4cc5a98ca0cf31ee90904a2c423e143c9535cf4e50088b128ec0b4',
+    sizeBytes: 1_902_906_141,
   },
 
   runtimeAssets: {

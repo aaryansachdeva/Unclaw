@@ -6,7 +6,7 @@
 // app. The onboarding wizard hits this on mount + every time the user
 // opens the provider dropdown so the list stays fresh.
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 /** A model entry as returned by soul's /providers. Cloud providers report
  *  `id` + `label` only; Ollama also includes size/param/quant for the
@@ -51,7 +51,7 @@ export interface SoulProvidersResponse {
  *  can show a "soul offline" state instead of throwing. */
 export async function fetchSoulProviders(): Promise<SoulProvidersResponse | null> {
   try {
-    const res = await fetch(`${SOUL_URL}/providers`, {
+    const res = await fetch(`${getSoulBaseUrl()}/providers`, {
       signal: AbortSignal.timeout(3000),
     });
     if (!res.ok) return null;

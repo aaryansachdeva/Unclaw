@@ -182,13 +182,19 @@ export function Dropdown({
     [value, options],
   );
 
-  /** Recompute trigger-anchor coords for the floating menu. */
+  /** Recompute trigger-anchor coords for the floating menu. Uses the
+   *  CURRENTLY VISIBLE option count (filtered) so when the user types
+   *  in the search box and the list shrinks, the menu's anchor point
+   *  shifts to keep it glued to the trigger instead of floating off. */
   const measure = useCallback(() => {
     const t = triggerRef.current;
     if (!t) return;
     const r = t.getBoundingClientRect();
     const margin = 8;
-    const desiredHeight = Math.min(menuMaxHeight, options.length * 36 + 12);
+    // Visible row count + search bar (when present) + padding.
+    const rowsHeight = Math.max(1, filteredOptions.length) * 36;
+    const searchExtra = searchable ? 44 : 0;
+    const desiredHeight = Math.min(menuMaxHeight, rowsHeight + searchExtra + 12);
     const spaceBelow = window.innerHeight - r.bottom - margin;
     const spaceAbove = r.top - margin;
     const placeAbove = spaceBelow < desiredHeight && spaceAbove > spaceBelow;
@@ -199,7 +205,7 @@ export function Dropdown({
       width: r.width,
       placeAbove,
     });
-  }, [menuMaxHeight, options.length]);
+  }, [menuMaxHeight, filteredOptions.length, searchable]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -426,10 +432,14 @@ export function Dropdown({
                 left: menuRect.left,
                 width: menuRect.width,
                 maxHeight: menuMaxHeight,
-                overflowY: 'auto',
-                background: 'var(--glass-bg-panel)',
-                backdropFilter: 'var(--glass-blur)',
-                WebkitBackdropFilter: 'var(--glass-blur)',
+                // Warm coal, matching the SettingsPanel shell. The
+                // global --glass-bg-panel is `rgba(40, 48, 65, x)` which
+                // reads as navy under `saturate(1.7)`, and the dropdown
+                // is everywhere (onboarding, settings, both facets) so
+                // it's the loudest place the AI-blue shows up.
+                background: 'rgba(28, 24, 26, 0.92)',
+                backdropFilter: 'blur(28px) saturate(1.0)',
+                WebkitBackdropFilter: 'blur(28px) saturate(1.0)',
                 border: '1px solid var(--glass-border-focus)',
                 borderRadius: 12,
                 padding: 6,
@@ -442,18 +452,22 @@ export function Dropdown({
                 transformOrigin: menuRect.placeAbove
                   ? 'bottom left'
                   : 'top left',
+                // Search bar (when present) sits OUTSIDE the scroll
+                // area so it never collides with the first option.
+                // Flex column keeps them stacked; the scroll lives on
+                // the inner options container only.
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
               }}
             >
               {searchable && (
                 <div
                   style={{
-                    position: 'sticky',
-                    top: -6,
-                    margin: '-6px -6px 4px -6px',
-                    padding: '8px 10px',
-                    background: 'var(--glass-bg-panel)',
+                    padding: '2px 2px 6px',
                     borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
-                    zIndex: 1,
+                    marginBottom: 4,
+                    flex: '0 0 auto',
                   }}
                 >
                   <input
@@ -487,6 +501,11 @@ export function Dropdown({
                   />
                 </div>
               )}
+              <div style={{
+                flex: '1 1 auto',
+                overflowY: 'auto',
+                minHeight: 0,
+              }}>
               {filteredOptions.length === 0 && (
                 <div style={{
                   padding: '14px 12px',
@@ -567,6 +586,7 @@ export function Dropdown({
                   </button>
                 );
               })}
+              </div>
             </motion.div>
           )}
         </AnimatePresence>,

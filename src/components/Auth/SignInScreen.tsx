@@ -194,9 +194,30 @@ export function SignInScreen({ onSignedIn, onSkipLogin }: Props) {
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
-          gap: 22,
+          // Variable spacing between sections. The uniform 22px collapsed
+          // the visual hierarchy (logo, title, body, error all sat at the
+          // same distance from each other); explicit margin on internals
+          // lets the eye breathe between the hero pair and the form.
+          gap: 18,
         }}
       >
+        {/* Ambient top hairline — the same detail the SettingsPanel
+            and ChatPane carry. Pulls the sign-in card into the shared
+            material vocabulary even though it lives over hyperspace
+            rather than the streamed character. */}
+        <span
+          aria-hidden
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 18,
+            right: 18,
+            height: 1,
+            pointerEvents: 'none',
+            background: 'linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent)',
+          }}
+        />
+
         {/* Logo — hero element, dominates the card. */}
         <div
           style={{
@@ -321,16 +342,20 @@ export function SignInScreen({ onSignedIn, onSkipLogin }: Props) {
               gap: 8,
               alignItems: 'flex-start',
               fontSize: 12.5,
-              color: 'var(--danger)',
+              color: '#f1b5b5',
               padding: '8px 12px',
-              background: 'rgba(200, 122, 122, 0.10)',
-              border: '1px solid rgba(200, 122, 122, 0.25)',
-              borderRadius: 8,
+              // Cohesive with the SettingsPanel status-chip-error pattern.
+              // Slight bump in border tint so the alert reads sharper
+              // against the brighter hyperspace-lensed glass card.
+              background: 'rgba(196, 68, 68, 0.12)',
+              border: '1px solid rgba(196, 68, 68, 0.35)',
+              borderRadius: 10,
               width: '100%',
               boxSizing: 'border-box',
+              letterSpacing: '-0.005em',
             }}
           >
-            <AlertCircle size={14} strokeWidth={2} style={{ flexShrink: 0, marginTop: 1 }} />
+            <AlertCircle size={14} strokeWidth={2} style={{ flexShrink: 0, marginTop: 1, color: 'var(--accent)' }} />
             <span style={{ lineHeight: 1.4 }}>{error}</span>
           </div>
         )}

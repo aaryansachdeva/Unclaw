@@ -11,7 +11,7 @@
 // `null` / empty list / a no-op error string. The Reminders panel uses
 // that signal to silently hide itself rather than spamming the console.
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 export interface Reminder {
   id: string;
@@ -49,7 +49,7 @@ async function safeJson<T>(res: Response): Promise<T | null> {
 export async function listReminders(): Promise<RemindersListResult> {
   let res: Response;
   try {
-    res = await fetch(`${SOUL_URL}/reminders`, { method: 'GET' });
+    res = await fetch(`${getSoulBaseUrl()}/reminders`, { method: 'GET' });
   } catch (err) {
     return {
       available: false,
@@ -82,7 +82,7 @@ export interface ReminderInput {
 }
 
 export async function createReminder(input: ReminderInput): Promise<Reminder | null> {
-  const res = await fetch(`${SOUL_URL}/reminders`, {
+  const res = await fetch(`${getSoulBaseUrl()}/reminders`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -99,7 +99,7 @@ export async function updateReminder(
   id: string,
   patch: Partial<ReminderInput>,
 ): Promise<Reminder | null> {
-  const res = await fetch(`${SOUL_URL}/reminders/${encodeURIComponent(id)}`, {
+  const res = await fetch(`${getSoulBaseUrl()}/reminders/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
@@ -109,7 +109,7 @@ export async function updateReminder(
 }
 
 export async function deleteReminder(id: string): Promise<boolean> {
-  const res = await fetch(`${SOUL_URL}/reminders/${encodeURIComponent(id)}`, {
+  const res = await fetch(`${getSoulBaseUrl()}/reminders/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   });
   return res.ok || res.status === 204;
@@ -117,7 +117,7 @@ export async function deleteReminder(id: string): Promise<boolean> {
 
 export async function completeReminder(id: string): Promise<Reminder | null> {
   const res = await fetch(
-    `${SOUL_URL}/reminders/${encodeURIComponent(id)}/complete`,
+    `${getSoulBaseUrl()}/reminders/${encodeURIComponent(id)}/complete`,
     { method: 'POST' },
   );
   if (!res.ok) return null;

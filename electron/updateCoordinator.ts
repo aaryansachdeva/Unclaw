@@ -8,7 +8,7 @@
 //   * If no updates are available, returns immediately (~1 round-trip
 //     latency to fetch the manifest).
 //   * If an update is available, the UpdateOverlay UI shows progress and
-//     the user can defer ("Update later") — only `app` updates are forced.
+//     the user can defer ("Update later"), only `app` updates are forced.
 //   * If the remote manifest can't be fetched (offline, R2 outage), we
 //     log + skip update, never block launch.
 //
@@ -46,7 +46,7 @@ import {
 } from './appShellUpdater';
 
 // ----------------------------------------------------------------------
-// Types — IPC contract with the renderer's UpdateOverlay
+// Types, IPC contract with the renderer's UpdateOverlay
 // ----------------------------------------------------------------------
 
 export interface UpdateCategoryProgress {
@@ -81,7 +81,7 @@ export interface UpdateSnapshot {
 }
 
 // ----------------------------------------------------------------------
-// Module-scope state — last update result, surfaced via IPC snapshot.
+// Module-scope state, last update result, surfaced via IPC snapshot.
 // ----------------------------------------------------------------------
 
 let snapshot: UpdateSnapshot = {
@@ -129,10 +129,10 @@ function updatePaths(): UpdatePaths {
     root,
     ledger: path.join(root, '.installed-versions.json'),
     staging: path.join(root, 'staging'),
-    // `soul` overlay — soulSupervisor.resolveSoulScript prefers this
+    // `soul` overlay, soulSupervisor.resolveSoulScript prefers this
     // directory over the DMG-bundled Resources/soul-src when present.
     soul: path.join(root, 'soul'),
-    // Same paths as the setup coordinator's runStageUnreal / runStageModels —
+    // Same paths as the setup coordinator's runStageUnreal / runStageModels , 
     // updater writes to the same locations so no migration is needed.
     unreal: path.join(root, 'unreal'),
     assets: path.join(root, 'assets'),
@@ -144,7 +144,7 @@ function readLedger(paths: UpdatePaths): InstalledVersions {
     if (!fs.existsSync(paths.ledger)) return {};
     return JSON.parse(fs.readFileSync(paths.ledger, 'utf-8'));
   } catch {
-    // Corrupted ledger — treat as empty so we re-establish ground truth.
+    // Corrupted ledger, treat as empty so we re-establish ground truth.
     return {};
   }
 }
@@ -259,7 +259,7 @@ function mirrorAppShellIntoSnapshot(
     snapshot.categories[existing] = mapped;
   }
   // If Squirrel has staged an app-shell update, surface the global
-  // restart prompt — the user clicking "Restart now" calls
+  // restart prompt, the user clicking "Restart now" calls
   // autoUpdater.quitAndInstall() so Squirrel actually swaps the bundle.
   if (mapped.state === 'ready') {
     snapshot.restartRequired = true;
@@ -276,7 +276,7 @@ async function installCategory(
   if (id === 'app') {
     // electron-updater owns the app shell category. The app-shell state
     // bridge (subscribed in runUpdateCheck) mirrors Squirrel's events
-    // into the snapshot's `app` row — nothing for us to do here.
+    // into the snapshot's `app` row, nothing for us to do here.
     return;
   }
 
@@ -308,7 +308,7 @@ async function installCategory(
   setCategory(window, id, { state: 'applying', progress: null, detail: 'Unpacking…' });
 
   // Extract to a sibling staging dir, then atomically swap. Never extract
-  // straight into destDir — a crash mid-extract would leave the install
+  // straight into destDir, a crash mid-extract would leave the install
   // half-written with the old contents partially overwritten.
   const newDir = path.join(paths.staging, `${id}-${entry.version}-extracted`);
   if (fs.existsSync(newDir)) fs.rmSync(newDir, { recursive: true, force: true });
@@ -336,7 +336,7 @@ async function installCategory(
   }
 
   // Old version + downloaded zip → garbage. Best-effort; if cleanup
-  // fails (file locked, etc.) we don't care — staging is wiped on next
+  // fails (file locked, etc.) we don't care, staging is wiped on next
   // launch anyway.
   try {
     if (fs.existsSync(oldBackup)) fs.rmSync(oldBackup, { recursive: true, force: true });
@@ -361,12 +361,12 @@ async function installCategory(
  * Run the post-launch update check. Resolves with a snapshot describing
  * what (if anything) was installed and whether a restart is needed.
  *
- * Safe to call multiple times — second call returns the cached snapshot
+ * Safe to call multiple times, second call returns the cached snapshot
  * if one is already in flight or done for this session.
  */
 export async function runUpdateCheck(window: BrowserWindow | null): Promise<UpdateSnapshot> {
   if (!app.isPackaged) {
-    // Dev runs always use the sibling repos — never auto-update.
+    // Dev runs always use the sibling repos, never auto-update.
     snapshot = {
       done: true, categories: [], restartRequired: false, fatalError: null,
     };
@@ -395,7 +395,7 @@ export async function runUpdateCheck(window: BrowserWindow | null): Promise<Upda
     // keeps its own internal cache; we re-subscribe on the next runUpdateCheck).
     setTimeout(() => unsubAppShell(), 60_000);
 
-    // Wipe any stale staging from a prior partial update — a crash mid-
+    // Wipe any stale staging from a prior partial update, a crash mid-
     // download/extract could have left junk that we don't need anymore
     // (atomic rename means whatever's in the dest dir is canonical).
     try {
@@ -413,7 +413,7 @@ export async function runUpdateCheck(window: BrowserWindow | null): Promise<Upda
     } catch (err) {
       const msg = (err as Error).message;
       emit(window, 'update:log',
-        `[updater] manifest fetch failed: ${msg} — proceeding with installed versions`);
+        `[updater] manifest fetch failed: ${msg}, proceeding with installed versions`);
       manifest = FALLBACK_MANIFEST;
     }
 
@@ -455,13 +455,13 @@ export async function runUpdateCheck(window: BrowserWindow | null): Promise<Upda
       } catch (err) {
         const msg = (err as Error).message;
         emit(window, 'update:log',
-          `[updater/${id}] install failed: ${msg} — keeping installed version ${ledger[id] ?? '(none)'}`);
+          `[updater/${id}] install failed: ${msg}, keeping installed version ${ledger[id] ?? '(none)'}`);
         setCategory(window, id, {
           state: 'failed',
           progress: null,
           detail: msg,
         });
-        // Don't abort — try the remaining categories. A failed unreal
+        // Don't abort, try the remaining categories. A failed unreal
         // shouldn't block a smaller soul update from landing.
       }
     }

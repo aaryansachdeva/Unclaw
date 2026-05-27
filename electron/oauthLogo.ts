@@ -1,5 +1,5 @@
 // UnClaw logo, 256x256 PNG, base64-encoded. Auto-generated from
-// src/assets/logo.png — embedded so the OAuth success page (rendered
+// src/assets/logo.png, embedded so the OAuth success page (rendered
 // inside the user's browser, not the renderer) can show the brand
 // mark without any asset-path resolution gymnastics.
 //

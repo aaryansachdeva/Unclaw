@@ -11,7 +11,7 @@
 // need to know about the subprocess; it only sees the install +
 // streaming endpoints.
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 export type Qwen3State = 'idle' | 'downloading' | 'installed' | 'error';
 
@@ -60,7 +60,7 @@ export interface Qwen3Status {
  *  download is in flight, every ~30s otherwise. Throws on transport
  *  failure (soul down). */
 export async function fetchQwen3Status(): Promise<Qwen3Status> {
-  const res = await fetch(`${SOUL_URL}/tts/qwen3/status`);
+  const res = await fetch(`${getSoulBaseUrl()}/tts/qwen3/status`);
   if (!res.ok) {
     throw new Error(`soul /tts/qwen3/status ${res.status}`);
   }
@@ -71,7 +71,7 @@ export async function fetchQwen3Status(): Promise<Qwen3Status> {
  *  progress, returns the current snapshot without restarting. The
  *  renderer treats this as fire-and-forget and polls /status. */
 export async function startQwen3Install(): Promise<Qwen3Status> {
-  const res = await fetch(`${SOUL_URL}/tts/qwen3/install`, { method: 'POST' });
+  const res = await fetch(`${getSoulBaseUrl()}/tts/qwen3/install`, { method: 'POST' });
   if (!res.ok) {
     throw new Error(`soul /tts/qwen3/install ${res.status}`);
   }
@@ -82,7 +82,7 @@ export async function startQwen3Install(): Promise<Qwen3Status> {
  *  by the account-reset flow + by users reclaiming disk. */
 export async function uninstallQwen3(): Promise<boolean> {
   try {
-    const res = await fetch(`${SOUL_URL}/tts/qwen3`, { method: 'DELETE' });
+    const res = await fetch(`${getSoulBaseUrl()}/tts/qwen3`, { method: 'DELETE' });
     return res.ok || res.status === 404;
   } catch {
     return false;

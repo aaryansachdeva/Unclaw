@@ -28,18 +28,36 @@ export function WidgetRail({
   triggerRefs,
 }: WidgetRailProps) {
   const reduce = useReducedMotion() ?? false;
+
+  // Per-child stagger. Wrapper fades + slides as one block; each pill
+  // then settles in 70ms after the next. Reads as "the rail wakes up
+  // from top to bottom" rather than every pill arriving at once.
+  const containerVariants = {
+    hidden: { opacity: 0, x: reduce ? 0 : -8, y: '-50%' as const },
+    visible: {
+      opacity: 1, x: 0, y: '-50%' as const,
+      transition: {
+        duration: 0.45,
+        delay: 0.3,
+        ease: EASE_OUT_EXPO,
+        staggerChildren: reduce ? 0 : 0.06,
+        delayChildren: reduce ? 0 : 0.18,
+      },
+    },
+  };
+  const itemVariants = {
+    hidden: { opacity: 0, y: reduce ? 0 : 4 },
+    visible: {
+      opacity: 1, y: 0,
+      transition: { duration: 0.42, ease: EASE_OUT_EXPO },
+    },
+  };
+
   return (
     <motion.div
-      // `y: '-50%'` is part of the animated transform so framer-motion
-      // doesn't clobber the inline `translateY(-50%)` we used to use
-      // for vertical centering. Without this fix the rail's TOP
-      // anchored at 50% (not its CENTER), and the SheetPanel's
-      // icon-offset alignment was off by ~half the rail's height.
-      initial={reduce
-        ? { opacity: 0, y: '-50%' }
-        : { opacity: 0, x: -8, y: '-50%' }}
-      animate={{ opacity: 1, x: 0, y: '-50%' }}
-      transition={{ duration: 0.5, delay: 0.4, ease: EASE_OUT_EXPO }}
+      variants={containerVariants}
+      initial="hidden"
+      animate="visible"
       style={{
         position: 'absolute',
         left: 14,
@@ -50,45 +68,55 @@ export function WidgetRail({
         zIndex: 30,
       }}
     >
-      <RailIcon
-        icon={Bell}
-        label="Reminders"
-        active={activeWidget === 'reminders'}
-        onClick={() => onToggle('reminders')}
-        badgeText={remindersCount > 0 ? String(remindersCount) : null}
-        badgeTone="neutral"
-        triggerRef={triggerRefs?.reminders}
-      />
-      <RailIcon
-        icon={BarChart3}
-        label="Stocks"
-        active={activeWidget === 'stocks'}
-        onClick={() => onToggle('stocks')}
-        badgeText={stocksDayPct == null ? null : formatStocksBadge(stocksDayPct)}
-        badgeTone={stocksDayPct == null ? 'neutral' : stocksDayPct >= 0 ? 'up' : 'down'}
-        triggerRef={triggerRefs?.stocks}
-      />
-      <RailIcon
-        icon={Newspaper}
-        label="Headlines"
-        active={activeWidget === 'news'}
-        onClick={() => onToggle('news')}
-        triggerRef={triggerRefs?.news}
-      />
-      <RailIcon
-        icon={Cloud}
-        label="Weather"
-        active={activeWidget === 'weather'}
-        onClick={() => onToggle('weather')}
-        triggerRef={triggerRefs?.weather}
-      />
-      <RailIcon
-        icon={Shirt}
-        label="Customization"
-        active={activeWidget === 'wardrobe'}
-        onClick={() => onToggle('wardrobe')}
-        triggerRef={triggerRefs?.wardrobe}
-      />
+      <motion.div variants={itemVariants}>
+        <RailIcon
+          icon={Bell}
+          label="Reminders"
+          active={activeWidget === 'reminders'}
+          onClick={() => onToggle('reminders')}
+          badgeText={remindersCount > 0 ? String(remindersCount) : null}
+          badgeTone="neutral"
+          triggerRef={triggerRefs?.reminders}
+        />
+      </motion.div>
+      <motion.div variants={itemVariants}>
+        <RailIcon
+          icon={BarChart3}
+          label="Stocks"
+          active={activeWidget === 'stocks'}
+          onClick={() => onToggle('stocks')}
+          badgeText={stocksDayPct == null ? null : formatStocksBadge(stocksDayPct)}
+          badgeTone={stocksDayPct == null ? 'neutral' : stocksDayPct >= 0 ? 'up' : 'down'}
+          triggerRef={triggerRefs?.stocks}
+        />
+      </motion.div>
+      <motion.div variants={itemVariants}>
+        <RailIcon
+          icon={Newspaper}
+          label="Headlines"
+          active={activeWidget === 'news'}
+          onClick={() => onToggle('news')}
+          triggerRef={triggerRefs?.news}
+        />
+      </motion.div>
+      <motion.div variants={itemVariants}>
+        <RailIcon
+          icon={Cloud}
+          label="Weather"
+          active={activeWidget === 'weather'}
+          onClick={() => onToggle('weather')}
+          triggerRef={triggerRefs?.weather}
+        />
+      </motion.div>
+      <motion.div variants={itemVariants}>
+        <RailIcon
+          icon={Shirt}
+          label="Customization"
+          active={activeWidget === 'wardrobe'}
+          onClick={() => onToggle('wardrobe')}
+          triggerRef={triggerRefs?.wardrobe}
+        />
+      </motion.div>
     </motion.div>
   );
 }

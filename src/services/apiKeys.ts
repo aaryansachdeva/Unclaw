@@ -13,10 +13,12 @@ export type LLMProviderId =
   | 'openai'      // OpenAI Cloud — gpt-4o-mini default, gpt-5.4 family
   | 'ollama'      // Local Ollama daemon — any locally-pulled model
   | 'deepseek'    // DeepSeek API (OpenAI-compatible) — deepseek-chat, -reasoner
-  | 'openrouter'  // OpenRouter — one key, every cloud model (Claude/Gemini/etc.)
   | 'xai'         // xAI Grok (OpenAI-compatible) — grok-2-latest, grok-beta
   | 'anthropic'   // Anthropic Claude (OpenAI-compat shim) — claude-3.x family
-  | 'gemini';     // Google Gemini (OpenAI-compat shim) — gemini-2.x family
+  | 'gemini'      // Google Gemini (OpenAI-compat shim) — gemini-2.x family
+  | 'claude-code' // Anthropic Claude via Pro/Max subscription (CLI OAuth, keyless)
+  | 'gemini-cli'  // Google Gemini free tier / Pro via `gemini` CLI (OAuth, keyless)
+  | 'codex';      // OpenAI Codex CLI via ChatGPT Plus / Pro subscription (OAuth, keyless)
 
 /** Which backend runs the agentic / escalation loop. Aliased to LLMProviderId
  *  so any provider the user has a working chat key for can also drive
@@ -250,13 +252,6 @@ export const LLM_PROVIDERS: ProviderInfo[] = [
     models: [],
   },
   {
-    id: 'openrouter',
-    label: 'OpenRouter',
-    signupUrl: 'https://openrouter.ai/keys',
-    requiresApiKey: true,
-    models: [],
-  },
-  {
     id: 'xai',
     label: 'xAI Grok',
     signupUrl: 'https://console.x.ai/',
@@ -277,17 +272,53 @@ export const LLM_PROVIDERS: ProviderInfo[] = [
     requiresApiKey: true,
     models: [],
   },
+  // Claude Code subscription auth — keyless. User authenticates once via
+  // `claude setup-token` in their terminal; soul probes the local CLI for
+  // install + OAuth state via /validate_keys (no key in the request body).
+  // Billing routes through the user's Agent SDK credit pool, not the API.
+  {
+    id: 'claude-code',
+    label: 'Claude Code CLI',
+    signupUrl: 'https://www.anthropic.com/pricing',
+    requiresApiKey: false,
+    models: [],
+  },
+  // Gemini CLI — keyless. User runs `gemini` once and signs in with a
+  // Google account. Free tier (60 req/min, 1000/day) on personal
+  // accounts, or Pro/Ultra subscription quota. Built-in google_web_search
+  // is on by default — no Gemini API key needed for grounded answers.
+  {
+    id: 'gemini-cli',
+    label: 'Gemini CLI',
+    signupUrl: 'https://geminicli.com/',
+    requiresApiKey: false,
+    models: [],
+  },
+  // OpenAI Codex CLI — keyless. User runs `codex login` once and signs
+  // in with their ChatGPT account. GPT-5.x family routed through their
+  // ChatGPT Plus / Pro subscription credit.
+  {
+    id: 'codex',
+    label: 'Codex CLI (ChatGPT subscription)',
+    signupUrl: 'https://openai.com/chatgpt/pricing/',
+    requiresApiKey: false,
+    models: [],
+  },
 ];
 
 
-/** Per-provider filter that strips non-chat models out of a raw
- *  /v1/models response. OpenAI ships 100+ entries (embeddings, image,
- *  audio, moderation) we never want in a chat picker. Each provider
- *  has a slightly different naming convention so we gate per-id.
+/** Defense-in-depth chat-model filter. Soul's per-provider validators
+ *  already filter using each provider's native capability metadata
+ *  where available:
+ *    * Gemini  → `supportedGenerationMethods.includes('generateContent')`
+ *    * Anthropic → `type === 'model'` (all are chat by API contract)
+ *  For OpenAI and Groq, the /v1/models endpoint has no machine-readable
+ *  type field, so we rely on name-pattern allowlists.
  *
- *  Returns the input id list filtered to chat-capable models, in the
- *  same order. Unknown providers pass through untouched (best-effort:
- *  trust the upstream list). */
+ *  This function runs AFTER the server-side filter. For providers with
+ *  rich capability metadata it's a near-no-op; for OpenAI/Groq it's the
+ *  primary filter. Returns IDs in input order.
+ */
 export function filterChatModels(
   provider: LLMProviderId,
   rawIds: readonly string[],
@@ -296,43 +327,93 @@ export function filterChatModels(
     const lower = id.toLowerCase();
     switch (provider) {
       case 'openai': {
-        // Reject obvious non-chat families. Accept gpt-* + o-series (o1, o3, o4)
-        // + chatgpt-* + anything explicitly named "chat".
-        const reject = [
-          'embedding', 'whisper', 'tts-', 'dall-e', 'davinci', 'babbage',
-          'ada', 'curie', 'moderation', 'omni-moderation', 'image-',
-          'gpt-image', 'computer-use', 'audio-preview', 'realtime',
-          'transcribe', 'codex',
+        // OpenAI publishes no type/modality field on /v1/models. We
+        // maintain an explicit non-chat denylist of every published
+        // non-conversational family + a positive allowlist for known
+        // chat prefixes. Drop a release? Append to one of the two.
+        const nonChat = [
+          'embedding',         // text-embedding-3-*, text-embedding-ada-*
+          'whisper',           // whisper-1, whisper-large-*
+          'tts-',              // tts-1, tts-1-hd
+          'dall-e',            // dall-e-2, dall-e-3
+          'gpt-image',         // gpt-image-1
+          'image-',            // future image variants
+          'omni-moderation',   // omni-moderation-latest
+          'moderation',        // text-moderation-stable / -latest
+          'davinci', 'babbage', 'ada', 'curie',  // GPT-3 base series
+          'computer-use',      // gpt-4o-mini-tts and other -use suffixed
+          'realtime',          // gpt-4o-realtime-preview, audio
+          'audio-preview',     // gpt-4o-audio-preview
+          'transcribe',        // gpt-4o-mini-transcribe
+          'search-preview',    // gpt-4o-search-preview (web-search-only variant)
+          'codex',             // codex-*, legacy code completion
         ];
-        if (reject.some((r) => lower.includes(r))) return false;
-        return lower.startsWith('gpt-')
-          || /^o\d/.test(lower)
-          || lower.startsWith('chatgpt-')
-          || lower.includes('chat');
+        if (nonChat.some((r) => lower.includes(r))) return false;
+        // Positive allowlist of chat-capable prefixes.
+        return lower.startsWith('gpt-')         // gpt-3.5/4/4o/4.1/5/5.4/...
+          || /^o\d/.test(lower)                  // o1, o3, o4-mini
+          || lower.startsWith('chatgpt-');       // chatgpt-4o-latest
       }
+
       case 'anthropic':
+        // Anthropic's /v1/models lists only chat-capable Claude models
+        // (the API contract excludes non-Messages models). Belt-and-
+        // suspenders: require the `claude-` prefix.
         return lower.startsWith('claude-');
+
+      case 'claude-code':
+        // Subscription auth — soul returns the alias catalog
+        // (sonnet / opus / haiku) which the CLI resolves to the latest
+        // model in each family on the user's plan tier. All chat.
+        return true;
+
+      case 'gemini-cli':
+      case 'codex':
+        // Both return curated chat-capable model lists from soul's
+        // keyless detector. No name filter needed.
+        return true;
+
       case 'gemini': {
-        // Keep gemini-* generative; drop embeddings + AQA + image-only.
+        // Server-side filter (supportedGenerationMethods) already
+        // restricts to chat. This is belt-and-suspenders for the
+        // edge case where soul returns an unfiltered legacy response.
         if (lower.includes('embedding') || lower.includes('aqa')) return false;
-        if (lower.includes('image-generation') || lower.includes('tts')) return false;
-        return lower.startsWith('gemini-');
+        if (lower.includes('imagen') || lower.includes('image-generation')) return false;
+        if (lower.includes('text-bison') || lower.includes('chat-bison')) return false; // PaLM legacy
+        if (lower.includes('tts')) return false;
+        return lower.startsWith('gemini-') || lower.startsWith('learnlm-');
       }
+
       case 'groq': {
-        // Groq hosts a small mix; drop the non-text models. Everything
-        // else routes through their chat endpoint.
-        const reject = ['whisper', 'tts', 'guard', 'embedding', 'distil'];
-        if (reject.some((r) => lower.includes(r))) return false;
+        // Groq hosts a curated mix of OSS models. /v1/models has no
+        // type field, so we filter by family name + reject non-chat.
+        const nonChat = [
+          'whisper',           // whisper-large-v3, whisper-large-v3-turbo
+          'distil-whisper',    // distil-whisper-large-v3-en
+          'tts',               // playai-tts, playai-tts-arabic
+          'guard',             // llama-guard-3-8b (safety classifier)
+          'embedding',         // future embeddings if Groq adds them
+        ];
+        if (nonChat.some((r) => lower.includes(r))) return false;
+        // Anything else hosted on Groq is text-chat (Qwen, Llama,
+        // Mixtral, Gemma, DeepSeek, GPT-OSS, Kimi, etc.).
         return true;
       }
+
       case 'deepseek':
+        // DeepSeek's /v1/models lists `deepseek-chat` and
+        // `deepseek-reasoner`. Both chat. Future additions following
+        // the same `deepseek-` prefix pass through.
         return lower.startsWith('deepseek-');
+
       case 'xai':
+        // xAI's lineup is the Grok family. /v1/models lists
+        // `grok-2-latest`, `grok-2-1212`, `grok-vision-beta`, etc.
         return lower.startsWith('grok-');
-      case 'openrouter':
-        // OpenRouter routes everything; anything in /models is callable.
-        return true;
+
       case 'ollama':
+        // Local Ollama tags vary wildly. Anything the user pulled
+        // is fair game.
         return true;
     }
   };
@@ -603,15 +684,31 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
   } else {
     if (!profile.elevenlabs_api_key) missing.push('ElevenLabs API key');
   }
-  // Agentic gates: only enforced when the user opted in. On the local
-  // path (`agentic_provider === 'ollama'`) the chat-tier Ollama model
-  // doubles as the agentic model, so no extra model / key is required
-  // — only that chat itself is on a tools-capable Ollama model.
+  // Agentic gates: only enforced when the user opted in. Three paths:
+  //   * Ollama local: chat-tier Ollama model doubles as the agentic
+  //     model. Only requires that chat itself is on a tools-capable
+  //     Ollama model.
+  //   * Keyless CLI (claude-code / gemini-cli / codex): no API key,
+  //     no required model (the CLI uses sensible defaults if blank,
+  //     and the agentic_model dropdown populates live from the
+  //     CLI's catalog post-auto-probe). The user just needs to be
+  //     signed in to the local CLI, which the CliProviderStatusCard
+  //     surfaces, but the wizard doesn't gate Finish on it.
+  //   * Cloud API (openai / anthropic / gemini / deepseek): needs both
+  //     a model id and the matching API key (or "use same as chat"
+  //     when chat is OpenAI).
   if (profile.agentic_enabled) {
-    if (profile.agentic_provider === 'ollama') {
+    const ap = profile.agentic_provider;
+    const isKeylessCli = ap === 'claude-code' || ap === 'gemini-cli' || ap === 'codex';
+    if (ap === 'ollama') {
       if (profile.llm_provider !== 'ollama' || !modelSupportsTools(profile.llm_model)) {
         missing.push('Tools-capable Ollama chat model');
       }
+    } else if (isKeylessCli) {
+      // Nothing to enforce at the field-validation layer. Sign-in
+      // status surfaces via the CliProviderStatusCard, the wizard
+      // lets the user finish either way (they can wake the sign-in
+      // flow later from Settings if needed).
     } else {
       const reuseChat = profile.agentic_use_same_as_chat
         && profile.llm_provider === 'openai'
@@ -620,7 +717,15 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
         missing.push('Agentic model');
       }
       if (!reuseChat && !profile.agentic_api_key) {
-        missing.push('OpenAI key for agentic');
+        // Label reflects the picked backend so the "Required to
+        // finish" panel doesn't say "OpenAI key" when the user
+        // selected Anthropic / Gemini / DeepSeek.
+        const providerLabel =
+          ap === 'anthropic' ? 'Anthropic'
+          : ap === 'gemini' ? 'Gemini'
+          : ap === 'deepseek' ? 'DeepSeek'
+          : 'OpenAI';
+        missing.push(`${providerLabel} key for agentic`);
       }
     }
   }
@@ -642,7 +747,7 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
 // PARALLEL and returns per-key results. Surfaces a typo as a precise
 // error during onboarding instead of as a 502 on first chat.
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 export interface KeyValidationOutcome {
   ok: boolean;
@@ -655,6 +760,13 @@ export interface KeyValidationOutcome {
    *  TTS). Frontend falls back to the baked LLM_PROVIDERS catalog when
    *  this is empty. */
   models?: string[];
+  /** Claude Code subscription-auth specifics. `needs_setup_token` flags
+   *  the "binary installed but not signed in" state so the settings card
+   *  can show the `claude setup-token` instruction. `binary_path` +
+   *  `version` are surfaced for the green-check ready state. */
+  needs_setup_token?: boolean;
+  binary_path?: string;
+  version?: string;
 }
 
 export interface KeyValidationResult {
@@ -685,7 +797,7 @@ export interface KeyValidationResult {
 export async function validateKeys(
   profile: ApiKeysProfile,
 ): Promise<KeyValidationResult> {
-  const res = await fetch(`${SOUL_URL}/validate_keys`, {
+  const res = await fetch(`${getSoulBaseUrl()}/validate_keys`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

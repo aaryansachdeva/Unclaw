@@ -12,7 +12,7 @@ Electron desktop AI companion app. Streams a 3D Unreal Engine character via Pixe
 
 ## Design Context
 
-> **Source of truth: `.impeccable.md`.** Full tokens, materials-by-component table, and rationale live there. The summary below is the version to skim before any UI change.
+> **Source of truth: `PRODUCT.md` (strategy + principles) + `DESIGN.md` (tokens + components).** Both live at the project root and are managed via `/impeccable`. The summary below is the version to skim before any UI change.
 
 ### Brand Personality
 **Sleek, intimate, alive.** A presence, not a tool. Premium and warm despite the dark palette. 3-word personality: **warm · present · refined**.

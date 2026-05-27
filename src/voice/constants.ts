@@ -47,14 +47,19 @@ export const MAX_UTTERANCE_MS = 30_000;
 export const BARGE_IN_PROB = 0.78;
 export const BARGE_IN_FRAMES = 8;             // ~256 ms of strong speech
 
-// Whisper API. Matches the soul.exe /transcribe proxy contract.
-export const TRANSCRIBE_URL = 'http://127.0.0.1:8765/transcribe';
+// Whisper API. Matches soul's /transcribe proxy contract. Resolved
+// dynamically from the live HTTP port soul picked at boot (default 0 =
+// OS picks); see services/soulBase for the source of truth.
+import { getSoulBaseUrl } from '../services/soulBase';
+export function getTranscribeUrl(): string {
+  return `${getSoulBaseUrl()}/transcribe`;
+}
 export const WHISPER_LANGUAGE = 'en';   // 'auto' for multilingual
 export const WHISPER_MODEL = 'whisper-large-v3-turbo';
 
 // Anti-hallucination knobs. Whisper (Groq's turbo build especially)
 // loves to fill near-silent audio with "Thank you." / "Thanks for
-// watching." / "you" — leftovers from its YouTube training data.
+// watching." / "you", leftovers from its YouTube training data.
 // Three layers of defense:
 //   1. Peak-amplitude gate before sending. We use peak rather than RMS
 //      because pause-heavy utterances ("uhh... ok then") average out

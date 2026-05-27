@@ -20,7 +20,7 @@
 
 import type { SoulChatResult } from './soulChat';
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 const CLOUD_URL = 'https://api.unclaw.io';
 
 export type UserSchedule = 'early_bird' | 'night_owl' | 'mixed';
@@ -78,7 +78,7 @@ export interface WardrobeSettings {
 /** GET /user_settings — null when nothing has been saved yet. The wizard
  *  uses null as the trigger to mount on app start. */
 export async function fetchSettings(): Promise<UserSettings | null> {
-  const res = await fetch(`${SOUL_URL}/user_settings`);
+  const res = await fetch(`${getSoulBaseUrl()}/user_settings`);
   if (!res.ok) {
     const err = await res.text().catch(() => res.statusText);
     throw new Error(`soul /user_settings GET ${res.status}: ${err.slice(0, 200)}`);
@@ -89,7 +89,7 @@ export async function fetchSettings(): Promise<UserSettings | null> {
 
 /** PUT /user_settings — full replace. Used by the wizard's Finish button. */
 export async function saveSettings(settings: UserSettings): Promise<UserSettings> {
-  const res = await fetch(`${SOUL_URL}/user_settings`, {
+  const res = await fetch(`${getSoulBaseUrl()}/user_settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings),
@@ -105,7 +105,7 @@ export async function saveSettings(settings: UserSettings): Promise<UserSettings
 export async function patchSettings(
   updates: Partial<UserSettings>,
 ): Promise<UserSettings> {
-  const res = await fetch(`${SOUL_URL}/user_settings`, {
+  const res = await fetch(`${getSoulBaseUrl()}/user_settings`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -121,7 +121,7 @@ export async function patchSettings(
  *  After this resolves, the next /user_settings GET returns null and
  *  the wizard fires in firstRun mode. */
 export async function deleteSettings(): Promise<void> {
-  const res = await fetch(`${SOUL_URL}/user_settings`, { method: 'DELETE' });
+  const res = await fetch(`${getSoulBaseUrl()}/user_settings`, { method: 'DELETE' });
   if (!res.ok && res.status !== 404) {
     const err = await res.text().catch(() => res.statusText);
     throw new Error(`soul /user_settings DELETE ${res.status}: ${err.slice(0, 200)}`);
@@ -166,7 +166,7 @@ async function _onboardingBodyFromKeys(): Promise<Record<string, unknown>> {
  *  voice they actually selected (cache is keyed by provider+voice). */
 export async function fetchOnboardingWelcome(): Promise<SoulChatResult> {
   const body = await _onboardingBodyFromKeys();
-  const res = await fetch(`${SOUL_URL}/onboarding/welcome`, {
+  const res = await fetch(`${getSoulBaseUrl()}/onboarding/welcome`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -187,7 +187,7 @@ export async function fetchOnboardingGreet(
 ): Promise<SoulChatResult> {
   const body = await _onboardingBodyFromKeys();
   if (systemExtension) body.system_extension = systemExtension;
-  const res = await fetch(`${SOUL_URL}/onboarding/greet`, {
+  const res = await fetch(`${getSoulBaseUrl()}/onboarding/greet`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

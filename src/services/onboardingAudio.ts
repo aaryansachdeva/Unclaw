@@ -19,7 +19,7 @@
 
 import type { SoulChatResult } from './soulChat';
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 export type PreGenLine =
   | 'welcome'
@@ -95,7 +95,7 @@ export async function playPreGenAudio(line: PreGenLine): Promise<SoulChatResult>
   const audio_base64 = await blobToBase64(blob);
 
   const meta = META[line];
-  const res = await fetch(`${SOUL_URL}/generate`, {
+  const res = await fetch(`${getSoulBaseUrl()}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

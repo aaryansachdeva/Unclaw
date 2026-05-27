@@ -7,7 +7,7 @@
 //   /express surprise → expressFace('surprise') → UE plays a face
 //   that interprets "surprise" via the Text2Face model.
 
-const SOUL_URL = 'http://127.0.0.1:8765';
+import { getSoulBaseUrl } from './soulBase';
 
 export interface ExpressResult {
   /** Job id — UE polls /result/{id} for the cached face frames. */
@@ -32,7 +32,7 @@ export interface ExpressResult {
 export async function expressFace(prompt: string): Promise<ExpressResult> {
   const trimmed = prompt.trim();
   if (!trimmed) throw new Error('expressFace: prompt is required');
-  const r = await fetch(`${SOUL_URL}/t2f`, {
+  const r = await fetch(`${getSoulBaseUrl()}/t2f`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt: trimmed }),

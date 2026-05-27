@@ -25,6 +25,18 @@
   --accent-dim: rgba(196, 68, 68, 0.08);
   --accent-glow: rgba(196, 68, 68, 0.14);
   --accent-strong: rgba(196, 68, 68, 0.32);
+
+  /* Mood accent — picks up the lighting color the user chose for the
+     character in wardrobe mode. Defaults to ember red so the system is
+     intact pre-wardrobe-load; gets overridden at runtime from
+     App.tsx's `applyMoodAccent` effect whenever the user changes
+     lighting. Used in a few intentionally small spots so the chrome
+     subtly "lights up" the same hue as the character. NEVER replaces
+     the system `--accent` (focus rings, save buttons, error chips
+     all stay ember red so meaning doesn't shift with mood). */
+  --mood-accent:       #c44444;
+  --mood-tint-faint:   rgba(255, 255, 255, 0.18);
+  --mood-tint-soft:    rgba(196, 68, 68, 0.14);
   --live: #8cbf8a;
   --danger: #c87a7a;
 
@@ -43,10 +55,76 @@
   --glass-border: rgba(255, 255, 255, 0.12);
   --glass-border-focus: rgba(255, 255, 255, 0.20);
   --glass-blur: blur(36px) saturate(1.7);
+  /* Lighter blur for ambient (hover) surfaces. The full 36px is for
+     opened panels; pill hovers feel snappier at 22px and stay closer
+     to the stream's color. Same saturation boost so the material
+     vocabulary still reads as one thing. */
+  --glass-blur-ambient: blur(22px) saturate(1.5);
 
   /* Easing */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+
+  /* Motion durations. Promoted into tokens so future components stop
+     hardcoding 0.16s / 0.22s / 0.32s inline. Keeps the cadence of the
+     app consistent: small chrome transitions feel snappy (fast), panel
+     entries feel grounded (base), monument-level reveals breathe (slow). */
+  --duration-instant: 90ms;
+  --duration-fast:    160ms;
+  --duration-base:    220ms;
+  --duration-slow:    320ms;
+  --duration-stately: 460ms;
+
+  /* Radii scale. Matches the DESIGN.md spec vocabulary so any
+     component can reference `var(--radius-lg)` instead of guessing
+     between 12px and 14px. The pill values stay separate so the
+     intent ("this IS a pill") is explicit at the call site. */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 16px;
+  --radius-xxl: 18px;
+  --radius-pill-sm: 11px;
+  --radius-pill-lg: 24px;
+  --radius-circle: 50%;
+
+  /* Spacing scale. Same logic as radii: stops inline guesswork. */
+  --space-hair: 4px;
+  --space-xs:   6px;
+  --space-sm:   8px;
+  --space-md:   10px;
+  --space-base: 12px;
+  --space-ml:   14px;
+  --space-lg:   16px;
+  --space-xl:   20px;
+  --space-xxl:  24px;
+  --space-xxxl: 32px;
+
+  /* Elevation tokens. Promoted from inline strings scattered through
+     SettingsPanel, the widget panels, and UpdateOverlay. The inset
+     highlight is what makes the glass feel like real material catching
+     ambient light, per "The Inset Highlight Rule" in DESIGN.md; the
+     two-layer ambient gives panels physical weight without a hard
+     shadow line. */
+  --shadow-panel-rest:
+    0 1px 0 rgba(255, 255, 255, 0.06) inset,
+    0 4px 14px rgba(0, 0, 0, 0.30);
+  --shadow-panel-ground:
+    0 1px 0 rgba(255, 255, 255, 0.06) inset,
+    0 30px 70px -16px rgba(0, 0, 0, 0.62),
+    0 14px 32px -10px rgba(0, 0, 0, 0.45);
+  --shadow-button-glow:
+    0 4px 14px -4px rgba(196, 68, 68, 0.55);
+  --shadow-thumb-grip:
+    0 1px 3px rgba(0, 0, 0, 0.35);
+
+  /* Floating text that sits on the stream without chrome (Greeting,
+     hover-only pill labels at rest). Pairs with a matching drop-shadow
+     filter on adjacent icons. Per the "Text-shadow over backdrop"
+     principle in PRODUCT.md. */
+  --text-shadow-floating: 0 1px 2px rgba(0, 0, 0, 0.55);
+  --text-shadow-display:  0 2px 8px rgba(0, 0, 0, 0.65);
 }
 
 * {
@@ -160,6 +238,16 @@ textarea::placeholder {
   50%      { transform: scale(1.05); }
 }
 
+/* Settings save-bar primary button entrance pulse. When the action
+   bar slides up because changes are pending, the warm glow widens
+   then contracts once. Box-shadow-only so the button itself doesn't
+   twitch in place. */
+@keyframes settings-save-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(196, 68, 68, 0.55); }
+  40%  { box-shadow: 0 6px 22px -6px rgba(196, 68, 68, 0.72); }
+  100% { box-shadow: var(--shadow-button-glow, 0 4px 14px -4px rgba(196, 68, 68, 0.55)); }
+}
+
 /* Sheet body — thin scrollbar so the panel content can scroll
    without the default 3px chrome grabbing the eye. */
 .sheet-scroll::-webkit-scrollbar { width: 6px; }
@@ -237,6 +325,96 @@ textarea::placeholder {
 @keyframes typewriter-caret-blink {
   0%, 50%   { opacity: 1; }
   50.01%, 100% { opacity: 0; }
+}
+
+/* =====================================================================
+   Shared utility classes — the cohesion layer
+   ===================================================================== */
+
+/* `.glass-panel` — the canonical material for opened surfaces (Settings
+   shell, widget panels, the floating popovers in the Titlebar gear
+   menu). Bundles the four ingredients that make our frosted slate
+   look like real material catching light: the panel-tier alpha, the
+   blur+saturate filter, the 1px frosted-light border, and the
+   panel-ground shadow with its load-bearing inset highlight at the
+   top edge. Drop this class on any container that wants to read as
+   "an opened surface" and skip duplicating the spec inline. */
+.glass-panel {
+  background: var(--glass-bg-panel);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-panel-ground);
+}
+
+/* `.glass-panel-rest` — for hover-revealed surfaces that don't earn the
+   full opened-panel ground shadow (WidgetRail pill hover state,
+   inline expand affordances). Same material, lighter weight. */
+.glass-panel-rest {
+  background: var(--glass-bg-hover);
+  backdrop-filter: var(--glass-blur-ambient);
+  -webkit-backdrop-filter: var(--glass-blur-ambient);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-panel-rest);
+}
+
+/* `.hairline-top` — the 1px gradient highlight that the SettingsPanel
+   shell uses across its top edge. Reads as ambient light catching the lip
+   of the glass; the panels feel weighted without it and lifted with it.
+   Applied via `position: absolute; top: 0; left: <inset>; right: <inset>`
+   inside any container that should pick up this signature detail.
+
+   The mid-stop tint reads from `--mood-tint-faint`, which is dynamically
+   updated by App.tsx when the user picks a wardrobe lighting color. So
+   the hairlines across every panel subtly pick up the same light the
+   character is bathed in: warm amber lighting → amber-tinted hairline,
+   moonlight blue → blue-tinted hairline, magenta → magenta-tinted, etc.
+   Default is a neutral white-alpha so first-launch reads as ambient light,
+   not as a mood claim. */
+.hairline-top {
+  position: absolute;
+  top: 0;
+  left: 16px;
+  right: 16px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--mood-tint-faint),
+    transparent
+  );
+  transition: background var(--duration-base) var(--ease-out-quart);
+}
+
+/* `.text-floating` — text that sits over the pixel stream without a chrome
+   surface (Greeting time/date, hover-only pill labels at rest). The
+   shadow makes the type legible against any frame the stream renders;
+   pair with `.icon-floating` on adjacent icons so they get the same
+   drop-shadow filter. */
+.text-floating {
+  text-shadow: var(--text-shadow-floating);
+}
+.text-display-floating {
+  text-shadow: var(--text-shadow-display);
+}
+.icon-floating {
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+}
+
+/* `settle-up` — staggered entrance for elements that should appear with
+   a small upward translate + fade. Used by the WidgetRail to orchestrate
+   the bottom row on mount; pair with an inline `animation-delay` per
+   child to stagger. The translate is 4px and the curve is ease-out-expo
+   so the motion feels breathy rather than mechanical. */
+@keyframes settle-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.settle-up {
+  animation: settle-up var(--duration-slow) var(--ease-out-expo) both;
 }
 
 /* Reduced motion */

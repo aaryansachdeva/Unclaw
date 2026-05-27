@@ -7,8 +7,8 @@
 //   * the local "committed / tentative" string state
 //
 // Two operational modes (set on start()):
-//   * 'push'       — caller controls stop. We never auto-finalize.
-//   * 'continuous' — caller (the VAD endpointer in useVoiceAgent)
+//   * 'push'      , caller controls stop. We never auto-finalize.
+//   * 'continuous', caller (the VAD endpointer in useVoiceAgent)
 //                    decides when to call finalize(). Same code path
 //                    as 'push', the mode is just a hint to the server
 //                    for logging.
@@ -17,7 +17,13 @@
 // a plain TypeScript class with an event emitter so the React layer
 // stays thin.
 
-const SOUL_WS_URL = 'ws://127.0.0.1:8765/transcribe-stream';
+import { getSoulBaseUrl } from '../services/soulBase';
+
+// Derive ws:// from soul's live HTTP base. URL.parse + protocol swap
+// is overkill; the host:port is loopback-only and predictable.
+function soulWsUrl(): string {
+  return getSoulBaseUrl().replace(/^http/, 'ws') + '/transcribe-stream';
+}
 const SAMPLE_RATE = 16_000;
 // RELATIVE path (`./`), not absolute (`/`). See vadEngine.ts for the
 // same Electron file:// trap.
@@ -88,12 +94,12 @@ export class StreamingTranscriber {
   /** Open a streaming session WITHOUT taking the mic. The caller
    *  feeds audio in via `pushFrame()`. Used by VoiceController
    *  in continuous mode so a single mic + worklet drives both VAD
-   *  and Moonshine — no double-capture. */
+   *  and Moonshine, no double-capture. */
   async startFeed(mode: StreamingMode): Promise<void> {
     if (this.active) return;
     this.active = true;
     try {
-      this.ws = new WebSocket(SOUL_WS_URL);
+      this.ws = new WebSocket(soulWsUrl());
       this.ws.binaryType = 'arraybuffer';
       this.wsOpenPromise = new Promise<void>((resolve, reject) => {
         const ws = this.ws!;
@@ -133,7 +139,7 @@ export class StreamingTranscriber {
     this.updateLevel(samples);
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    // Float32Array.buffer is the right thing to send — typed-array
+    // Float32Array.buffer is the right thing to send, typed-array
     // copy isn't necessary because send() schedules from the buffer
     // pointer and the renderer's worklet just allocated this frame.
     ws.send(samples.buffer);
@@ -157,7 +163,7 @@ export class StreamingTranscriber {
     }
   }
 
-  /** Open mic + WebSocket and begin streaming. Idempotent — calling
+  /** Open mic + WebSocket and begin streaming. Idempotent, calling
    *  start() while already running is a no-op. */
   async start(mode: StreamingMode): Promise<void> {
     if (this.active) return;
@@ -166,7 +172,7 @@ export class StreamingTranscriber {
     try {
       // 1. Mic capture at 16 kHz mono. The AudioContext is created at
       //    SAMPLE_RATE so the worklet receives audio at the rate
-      //    Moonshine wants — no resampling needed downstream.
+      //    Moonshine wants, no resampling needed downstream.
       this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
       // Some browsers / Electron versions return a context that's
       // suspended until a user gesture. Sign-in flow ensures we have
@@ -200,7 +206,7 @@ export class StreamingTranscriber {
         // the connect handshake.
         this.updateLevel(data.samples);
         // Only forward when the WS is open. Frames captured before the
-        // connect handshake completes are dropped — typically tens of
+        // connect handshake completes are dropped, typically tens of
         // ms of leading audio, well within the pre-roll the user
         // hasn't started speaking through yet.
         const ws = this.ws;
@@ -214,7 +220,7 @@ export class StreamingTranscriber {
       // 2. WebSocket. Open in parallel with the mic setup above; the
       //    onmessage handler above gates frame sends on readyState so
       //    nothing leaks before handshake completes.
-      this.ws = new WebSocket(SOUL_WS_URL);
+      this.ws = new WebSocket(soulWsUrl());
       this.ws.binaryType = 'arraybuffer';
 
       this.wsOpenPromise = new Promise<void>((resolve, reject) => {
@@ -259,7 +265,7 @@ export class StreamingTranscriber {
       return '';
     }
     // Dedupe: if a finalize is already pending, wait on the same
-    // resolver. Defensive — the renderer's keyup handler shouldn't
+    // resolver. Defensive, the renderer's keyup handler shouldn't
     // race itself, but spurious double-fire from the OS does happen.
     if (this.finalResolver) {
       return new Promise<string>((resolve, reject) => {
