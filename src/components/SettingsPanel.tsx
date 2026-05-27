@@ -2024,39 +2024,35 @@ const SCRIM_STYLE: React.CSSProperties = {
   position: 'fixed',
   inset: 0,
   zIndex: 1000,
-  // Middle ground: a soft veil over the stream that lets the character
-  // stay recognizable while pushing the settings shell forward. 28%
-  // alpha + 8px blur, down from the original 58% + 20px which made
-  // the stream go murky and dark. Saturate kept at 1.0 so the veil
-  // doesn't add a color shift on top of the alpha.
-  background: 'rgba(6, 6, 8, 0.28)',
-  backdropFilter: 'blur(8px) saturate(1.0)',
-  WebkitBackdropFilter: 'blur(8px) saturate(1.0)',
+  // Lighter veil now (was 28% / 8px). The shell carries enough of its
+  // own contrast at alpha 0.94 that the scrim only needs to hint at
+  // depth, not darken the stream. Blur is still useful so the bright
+  // bokeh from the character doesn't bleed sharp edges into the shell.
+  background: 'rgba(6, 6, 8, 0.16)',
+  backdropFilter: 'blur(6px) saturate(1.0)',
+  WebkitBackdropFilter: 'blur(6px) saturate(1.0)',
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
-  padding: '36px 24px',
+  padding: '28px 20px',
   fontFamily: '"Plus Jakarta Sans", system-ui, -apple-system, sans-serif',
 };
 
 const SHELL_STYLE: React.CSSProperties = {
   position: 'relative',
-  width: 'min(700px, 100%)',
-  height: 'min(640px, calc(100vh - 72px))',
+  width: 'min(620px, 100%)',
+  height: 'min(580px, calc(100vh - 56px))',
   borderRadius: 18,
-  // Warm coal (28,24,26) replaces the navy frosted-slate. The shell
-  // is deliberately scoped off the global --glass-bg-panel so the
-  // always-on chrome (input bar, agent switcher) keeps the slate
-  // material while the settings surface reads as warm-neutral glass.
-  // `saturate(1.1)` instead of `1.7` because saturation boost was
-  // pulling the navy up; without navy there's nothing worth amplifying.
-  // Deeper alpha (0.90) + heavier blur (54px) so the shell reads as
-  // its own surface rather than a translucent overlay over the stream.
-  background: 'rgba(28, 24, 26, 0.90)',
-  backdropFilter: 'blur(54px) saturate(1.1)',
-  WebkitBackdropFilter: 'blur(54px) saturate(1.1)',
+  // Warm coal (28,24,26) with saturate(1.0) — saturate ≥ 1.05 pulls
+  // the navy ambient of the stream UP through the shell's 6% alpha
+  // window and re-tints the panel blue, which is exactly the "AI
+  // looking blue" complaint. Holding saturate at 1.0 + bumping alpha
+  // to 0.94 keeps the surface warm-neutral.
+  background: 'rgba(28, 24, 26, 0.94)',
+  backdropFilter: 'blur(48px) saturate(1.0)',
+  WebkitBackdropFilter: 'blur(48px) saturate(1.0)',
   border: '1px solid rgba(255, 255, 255, 0.10)',
-  boxShadow: 'var(--shadow-panel-ground, 0 30px 70px -16px rgba(0, 0, 0, 0.62))',
+  boxShadow: 'var(--shadow-panel-ground, 0 24px 56px -14px rgba(0, 0, 0, 0.58))',
   color: 'var(--text-primary, #f0f1f5)',
   overflow: 'hidden',
   display: 'flex',
@@ -2096,13 +2092,13 @@ const LOADING_STYLE: React.CSSProperties = {
 };
 
 const HEADER_STYLE: React.CSSProperties = {
-  padding: '20px 28px 12px',
+  padding: '16px 22px 8px',
 };
 
 const FACET_NAV_STYLE: React.CSSProperties = {
   display: 'flex',
   gap: 2,
-  padding: '0 20px',
+  padding: '0 18px',
   borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
 };
 
@@ -2129,7 +2125,7 @@ const BODY_STYLE: React.CSSProperties = {
   flex: '1 1 auto',
   minHeight: 0,
   overflowY: 'auto',
-  padding: '20px 28px 96px',
+  padding: '16px 22px 84px',
 };
 
 const ACTIONBAR_STYLE: React.CSSProperties = {
@@ -2138,12 +2134,15 @@ const ACTIONBAR_STYLE: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: 10,
-  padding: '10px 20px 12px',
+  padding: '9px 18px 11px',
   borderTop: '1px solid rgba(255, 255, 255, 0.06)',
-  // De-blued gradient to match the warmer shell: was (20, 24, 32).
-  background: 'linear-gradient(to top, rgba(22, 18, 20, 0.82), rgba(22, 18, 20, 0.34))',
-  backdropFilter: 'blur(20px) saturate(1.5)',
-  WebkitBackdropFilter: 'blur(20px) saturate(1.5)',
+  // De-blued gradient: was (20, 24, 32), now matches the shell's warm
+  // coal. saturate(1.0) (was 1.5) prevents the action bar from boosting
+  // the stream's navy at exactly the moment the user is focused on it
+  // (where the AI-tinted look was most noticeable).
+  background: 'linear-gradient(to top, rgba(22, 18, 20, 0.86), rgba(22, 18, 20, 0.38))',
+  backdropFilter: 'blur(20px) saturate(1.0)',
+  WebkitBackdropFilter: 'blur(20px) saturate(1.0)',
 };
 
 const NATIVE_INPUT_STYLE: React.CSSProperties = {
