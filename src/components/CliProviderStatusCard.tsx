@@ -43,22 +43,37 @@ interface CliProviderMeta {
   readyDetail: string;
 }
 
+// Install commands track the OFFICIAL recommended install method per
+// vendor (re-verified 2026-05-27). Claude + Codex have native one-line
+// installers that don't require Node.js, those are now the canonical
+// path; the npm packages still work but are no longer the first
+// recommendation. Gemini CLI is still npm-only on Mac (no native
+// installer published yet) and needs Node 20+.
 const CLI_PROVIDER_META: Partial<Record<LLMProviderId, CliProviderMeta>> = {
   'claude-code': {
     displayName: 'Claude Code',
-    installCmd: 'npm install -g @anthropic-ai/claude-code',
+    // Native installer per https://code.claude.com/docs/en/setup — no
+    // Node.js, auto-updates in background. Alt: `brew install
+    // claude-code` or `npm install -g @anthropic-ai/claude-code`.
+    installCmd: 'curl -fsSL https://claude.ai/install.sh | bash',
     setupCmd: 'claude setup-token',
     readyDetail: "Chat and agentic route through your Claude Pro or Max plan's Agent SDK credit.",
   },
   'gemini-cli': {
     displayName: 'Gemini CLI',
+    // npm is the official path per https://geminicli.com/docs/get-started
+    // /installation/ — requires Node 20+. Alt: `brew install gemini-cli`.
     installCmd: 'npm install -g @google/gemini-cli',
     setupCmd: 'gemini',
     readyDetail: 'Free tier covers 1000 requests/day on your personal Google account. Pro/Ultra subscription quota beyond that.',
   },
   'codex': {
     displayName: 'Codex',
-    installCmd: 'npm install -g @openai/codex',
+    // Native installer per https://developers.openai.com/codex/cli — no
+    // Node.js required. Alt: `npm install -g @openai/codex` (Node 18+).
+    // WARNING: `npm i -g codex` (no scope) installs an unrelated 2012
+    // package, must use the `@openai/` scope when going via npm.
+    installCmd: 'curl -fsSL https://chatgpt.com/codex/install.sh | sh',
     setupCmd: 'codex login',
     readyDetail: 'GPT-5.x family routed through your ChatGPT Plus / Pro subscription credit.',
   },

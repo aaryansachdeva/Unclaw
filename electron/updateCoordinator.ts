@@ -35,6 +35,7 @@ import {
   downloadWithResumeAndVerify,
   runCommand,
   formatBytes,
+  syncSoulVenv,
 } from './setupCoordinator';
 import { getRuntimeDir } from './soulSupervisor';
 import {
@@ -272,12 +273,13 @@ async function installCategory(
   paths: UpdatePaths,
   id: UpdateCategoryId,
   entry: CategoryEntry,
-): Promise<void> {
+  ledger: InstalledVersions,
+): Promise<{ soulRequirementsSha?: string }> {
   if (id === 'app') {
     // electron-updater owns the app shell category. The app-shell state
     // bridge (subscribed in runUpdateCheck) mirrors Squirrel's events
     // into the snapshot's `app` row, nothing for us to do here.
-    return;
+    return {};
   }
 
   const destDir = id === 'soul' ? paths.soul
@@ -346,11 +348,45 @@ async function installCategory(
       `[updater/${id}] cleanup warning: ${(err as Error).message}`);
   }
 
+  // For the `soul` overlay, re-sync the venv against the newly-shipped
+  // requirements-mac.txt. Cheap (~5s) when reqs unchanged, full pip
+  // install when they did. Without this, a soul update that added a
+  // pip dep (e.g. mlx-whisper replacing useful-moonshine-onnx in the
+  // 2026-05-27 STT swap) would land the new source but never install
+  // the new package, breaking `import mlx_whisper` at runtime.
+  let soulRequirementsSha: string | undefined;
+  if (id === 'soul') {
+    setCategory(window, id, {
+      state: 'applying',
+      progress: null,
+      detail: 'Syncing Python packages…',
+    });
+    try {
+      const syncResult = await syncSoulVenv(
+        window, destDir,
+        ledger.soul_requirements_sha ?? null,
+      );
+      if (syncResult.sha) {
+        soulRequirementsSha = syncResult.sha;
+      }
+    } catch (err) {
+      // pip-sync failure is NOT fatal to the soul update, the new
+      // source code is already installed. Surface the warning but
+      // leave the ledger SHA un-updated so we retry on next cycle.
+      // Runtime imports of the new dep will lazy-fail with a clear
+      // ImportError until pip-sync succeeds.
+      const msg = (err as Error).message;
+      emit(window, 'update:log',
+        `[updater/${id}] venv-sync warning: ${msg}, keeping previous requirements sha`);
+    }
+  }
+
   setCategory(window, id, {
     state: 'ready',
     progress: 1,
     detail: `Installed ${entry.version}. Restart Unclaw to apply.`,
   });
+  return { soulRequirementsSha };
 }
 
 // ----------------------------------------------------------------------
@@ -448,8 +484,11 @@ export async function runUpdateCheck(window: BrowserWindow | null): Promise<Upda
     let needsRestart = false;
     for (const { id, entry } of work) {
       try {
-        await installCategory(window, paths, id, entry);
+        const result = await installCategory(window, paths, id, entry, ledger);
         ledger[id] = entry.version;
+        if (result.soulRequirementsSha) {
+          ledger.soul_requirements_sha = result.soulRequirementsSha;
+        }
         writeLedger(paths, ledger);
         if (entry.globalRestartRequired) needsRestart = true;
       } catch (err) {

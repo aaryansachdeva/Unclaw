@@ -92,6 +92,13 @@ export interface InstalledVersions {
   soul?: string;
   unreal?: string;
   assets?: string;
+  /** SHA-256 of the requirements-mac.txt that was last pip-installed into
+   *  the venv. Compared against the SHA of the just-installed soul overlay's
+   *  requirements file, mismatch triggers a `uv pip install -r` against
+   *  the existing venv (see `syncSoulVenv` in setupCoordinator.ts). Lets a
+   *  soul update that adds/removes pip deps actually land them, without
+   *  forcing a full setup-wizard re-run. */
+  soul_requirements_sha?: string;
 }
 
 // ----------------------------------------------------------------------

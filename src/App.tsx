@@ -689,12 +689,46 @@ function AppMain() {
         Timestamp: new Date().toISOString(),
       });
 
+      // Escalation results are enqueued by soul with broadcast=False
+      // (the historic poll-emit-broadcast double-play guard), so the
+      // renderer is the authority on when UE fetches + plays each
+      // chunk. After the mood/text descriptor is in UE's hands, fire
+      // POST /broadcast/{id} to push the /ws "job" event UE needs to
+      // pull /result/{id} and play audio. Without this, the final
+      // agentic answer appeared as text but the avatar stayed silent
+      // (bug observed 2026-05-27: "what is the weather" escalates,
+      // transition reply is voiced, real answer is text-only).
+      //
+      // For non-escalation `/chat` results soul already broadcast at
+      // synthesis time, the second broadcast is a no-op JobId dedupe
+      // on UE's side, so safe to fire unconditionally.
+      if (result.id) {
+        void fetch(`${getSoulBaseUrl()}/broadcast/${result.id}`, {
+          method: 'POST',
+        }).catch((err) => {
+          console.warn('[chat] /broadcast ping failed', err);
+        });
+      }
+
       if (isAnimAction && action) {
         dispatchActionToUE(pixelStreaming, action, result.response);
       }
     }
 
     if (action && isReminderAction(action.name)) {
+      setRefreshKey(k => k + 1);
+    }
+    // Escalation results carry an `escalation_id` (soul sets it on the
+    // final dict). The agentic loop may have written reminders via the
+    // bridged MCP tools, in which case the reminder action never lands
+    // in `action` (the final answer's `action` is None for plain-text
+    // replies). Bump refreshKey unconditionally on any escalation
+    // result so the reminders panel, stocks/news/weather widgets, etc.
+    // re-fetch their state once the loop wraps up. Bug observed
+    // 2026-05-27: claude-code agentic created a reminder for "check in
+    // with Scholar" via mcp__unclaw__create_event_reminder, the row was
+    // written to soul's store but the UI never refreshed.
+    if ((result as { escalation_id?: string }).escalation_id) {
       setRefreshKey(k => k + 1);
     }
 

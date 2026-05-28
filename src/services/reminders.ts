@@ -16,8 +16,14 @@ import { getSoulBaseUrl } from './soulBase';
 export interface Reminder {
   id: string;
   title: string;
-  /** ISO 8601 timestamp ("2026-05-04T15:00:00") or empty string. */
+  /** ISO 8601 timestamp ("2026-05-04T15:00:00") or date-only
+   *  ("2026-05-04") when no time was given, or empty string. */
   when_iso: string;
+  /** Optional place the event happens: "Dr. Lim's office", "Zoom",
+   *  "123 Main St", "kitchen". Empty string when unspecified.
+   *  Soul-side schema gained this field 2026-05-27; older soul
+   *  builds return reminders without it, treat missing as "". */
+  location?: string;
   notes: string;
   created_at: string;
   /** ISO timestamp once marked complete; null while still active. */
@@ -78,6 +84,8 @@ export async function listReminders(): Promise<RemindersListResult> {
 export interface ReminderInput {
   title: string;
   when_iso?: string;
+  /** Optional place the event happens. Empty string allowed. */
+  location?: string;
   notes?: string;
 }
 
@@ -88,6 +96,7 @@ export async function createReminder(input: ReminderInput): Promise<Reminder | n
     body: JSON.stringify({
       title: input.title,
       when_iso: input.when_iso ?? '',
+      location: input.location ?? '',
       notes: input.notes ?? '',
     }),
   });

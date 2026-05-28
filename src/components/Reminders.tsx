@@ -59,7 +59,7 @@ export function RemindersPanel({
   }, [reminders.length, onCountChange]);
 
   const handleCreate = useCallback(async (input: {
-    title: string; when_iso: string; notes: string;
+    title: string; when_iso: string; location: string; notes: string;
   }) => {
     const created = await createReminder(input);
     if (created) setReminders(prev => [...prev, created]);
@@ -470,13 +470,15 @@ function UnavailableState() {
 // ---------- compose form ---------------------------------------------
 
 interface ComposeFormProps {
-  onSubmit: (input: { title: string; when_iso: string; notes: string }) => void;
+  onSubmit: (input: { title: string; when_iso: string;
+                       location: string; notes: string }) => void;
   onCancel: () => void;
 }
 
 function ComposeForm({ onSubmit, onCancel }: ComposeFormProps) {
   const [title, setTitle] = useState('');
   const [whenLocal, setWhenLocal] = useState('');
+  const [location, setLocation] = useState('');
   const [notes, setNotes] = useState('');
   const titleRef = useRef<HTMLInputElement | null>(null);
 
@@ -485,8 +487,13 @@ function ComposeForm({ onSubmit, onCancel }: ComposeFormProps) {
   const submit = useCallback(() => {
     const t = title.trim();
     if (!t) return;
-    onSubmit({ title: t, when_iso: whenLocal, notes: notes.trim() });
-  }, [title, whenLocal, notes, onSubmit]);
+    onSubmit({
+      title: t,
+      when_iso: whenLocal,
+      location: location.trim(),
+      notes: notes.trim(),
+    });
+  }, [title, whenLocal, location, notes, onSubmit]);
 
   return (
     <motion.div
@@ -529,6 +536,17 @@ function ComposeForm({ onSubmit, onCancel }: ComposeFormProps) {
             if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
           }}
           style={{ ...inputStyle, colorScheme: 'dark' }}
+        />
+        <input
+          type="text"
+          value={location}
+          onChange={e => setLocation(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter') { e.preventDefault(); submit(); }
+            if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+          }}
+          placeholder="Location (optional)"
+          style={inputStyle}
         />
         <input
           type="text"
@@ -680,10 +698,19 @@ function dayLabel(d: Date): string {
 }
 
 function formatRowSubtitle(r: Reminder): string {
+  // Subtitle stacks meta info in a compact line: time, then location
+  // (prefixed with "@"), then notes. Each piece is optional, separators
+  // appear only between non-empty pieces. Examples:
+  //   "9am @ Dr. Lim's office - bring insurance card"
+  //   "@ Zoom"
+  //   "3pm - call back"
   const time = formatClockOnly(r.when_iso);
+  const location = (r.location ?? '').trim();
   const notes = (r.notes ?? '').trim();
-  if (time && notes) return `${time} - ${notes}`;
-  return time || notes;
+  const head = location ? (time ? `${time} @ ${location}` : `@ ${location}`)
+                          : time;
+  if (head && notes) return `${head} - ${notes}`;
+  return head || notes;
 }
 
 function formatClockOnly(whenIso: string): string {

@@ -399,6 +399,103 @@ async function runStageRuntime(
   });
 }
 
+
+// ----------------------------------------------------------------------
+// Public helper: re-sync the existing venv against an updated
+// requirements-mac.txt. Called from `updateCoordinator.installCategory`
+// after a `soul` overlay extraction succeeds, so a soul update that
+// added/upgraded pip deps lands the new packages without forcing a
+// full setup-wizard re-run.
+//
+// Design rationale (see "do all the things get redownloaded" Q on
+// 2026-05-27): each manifest category is independent. A `soul` bump
+// only ships the source overlay; before this helper existed, a new
+// pip dep (e.g. mlx-whisper replacing useful-moonshine-onnx) would
+// land in the source but never get installed, breaking
+// `import mlx_whisper` at runtime. Bumping `UNCLAW_RELEASE_TAG` to
+// trigger a full setup-wizard re-run would work but re-pulls 2 GB
+// of UE + 700 MB of assets, neither of which changed. This helper
+// is the surgical fix: pip-sync only, ~5 s when nothing changed.
+//
+// SHA-gated: the caller passes the previously-installed
+// requirements-mac.txt SHA. If it matches the SHA of the new
+// file, we no-op (pip install would be a multi-second wasted
+// command). When it differs, we run `uv pip install -r ...` against
+// the existing venv path.
+// ----------------------------------------------------------------------
+
+export async function syncSoulVenv(
+  window: BrowserWindow | null,
+  soulOverlayDir: string,
+  lastInstalledSha: string | null,
+): Promise<{ ran: boolean; sha: string | null }> {
+  const paths = runtimePaths();
+  const requirementsFile = path.join(soulOverlayDir, 'requirements-mac.txt');
+
+  if (!fs.existsSync(requirementsFile)) {
+    // The new soul overlay didn't ship a requirements file, that's
+    // weird but not necessarily fatal (a malformed overlay would have
+    // failed extraction earlier). Skip pip-sync, keep the previously
+    // recorded SHA so we don't churn on every update cycle.
+    pushLog(window, 'meta',
+      '[venv-sync] requirements-mac.txt missing in overlay; skipping pip-install');
+    return { ran: false, sha: lastInstalledSha };
+  }
+
+  // SHA-256 the new requirements file. Cheap (~2 ms on a 1 KB file)
+  // compared to launching uv (~200 ms) + an empty pip install (~3 s).
+  const newSha = crypto.createHash('sha256')
+    .update(fs.readFileSync(requirementsFile))
+    .digest('hex');
+  if (lastInstalledSha && lastInstalledSha === newSha) {
+    // Requirements haven't changed since the last install. Skip the
+    // pip-sync entirely, the venv is already in lock-step with this
+    // soul overlay's deps.
+    pushLog(window, 'meta',
+      `[venv-sync] requirements unchanged (sha=${newSha.slice(0, 8)}); skipping pip-install`);
+    return { ran: false, sha: newSha };
+  }
+
+  pushLog(window, 'meta',
+    `[venv-sync] requirements changed (${
+      lastInstalledSha ? lastInstalledSha.slice(0, 8) : '(none)'
+    } → ${newSha.slice(0, 8)}); running uv pip install`);
+
+  // Sanity-check the venv exists. If it doesn't, the user is in a
+  // weird state (manual rm of the venv, or a half-finished setup);
+  // we can't pip-install into a non-existent venv. Caller logs the
+  // skip; STT/whatever new dep was supposed to land will lazy-fail
+  // at runtime.
+  const venvPython = path.join(paths.pythonEnv, 'bin', 'python');
+  if (!fs.existsSync(venvPython)) {
+    pushLog(window, 'meta',
+      `[venv-sync] venv missing at ${venvPython}; skipping pip-install`);
+    return { ran: false, sha: lastInstalledSha };
+  }
+
+  const uv = (await resolveUvPath()) ?? 'uv';
+  const uvEnv: NodeJS.ProcessEnv = {
+    UV_PYTHON_INSTALL_DIR: path.join(paths.root, 'python'),
+    UV_CACHE_DIR: path.join(paths.cache, 'uv'),
+  };
+
+  await runCommand(
+    window!,
+    uv,
+    [
+      'pip', 'install',
+      '--python', venvPython,
+      '-r', requirementsFile,
+      '--index-strategy', 'unsafe-best-match',
+    ],
+    { stream: true, extraEnv: uvEnv },
+  );
+  pushLog(window, 'meta',
+    `[venv-sync] pip install complete; new sha=${newSha.slice(0, 8)}`);
+  return { ran: true, sha: newSha };
+}
+
+
 // ----------------------------------------------------------------------
 // Stage 3: Unreal game
 // ----------------------------------------------------------------------
