@@ -57,7 +57,7 @@ export interface SetupManifest {
 }
 
 export const MANIFEST: SetupManifest = {
-  releaseTag: '2026.0527.01-mac',
+  releaseTag: '2026.0527.02-mac',
   pythonVersion: '3.11',
   minFreeDiskBytes: 15 * 1024 * 1024 * 1024, // 15 GB
 
