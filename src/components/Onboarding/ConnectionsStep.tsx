@@ -1199,8 +1199,8 @@ function VoiceSection({
           onChange={(v) => setTtsProvider(v as TtsProviderId)}
           options={[
             { id: 'elevenlabs', label: 'ElevenLabs' },
+            { id: 'supertonic', label: 'Supertonic-3' },
             { id: 'kokoro',     label: 'Kokoro' },
-            { id: 'qwen3',      label: 'Qwen3-TTS' },
           ]}
         />
       </FieldLabel>
@@ -1217,6 +1217,33 @@ function VoiceSection({
             visible={showElevenKey}
             onToggleVisible={onToggleElevenKey}
             autoComplete="off"
+          />
+        </FieldLabel>
+      )}
+
+      {/* Supertonic branch: built-in voices + Grace clone (auto-fetched
+          from R2 on first synth via supertonic_runtime._EXTRA_VOICES).
+          No install panel — the ~290 KB voice JSON downloads lazily
+          inside the first chat turn. */}
+      {values.tts_provider === 'supertonic' && (
+        <FieldLabel text="Voice">
+          <Dropdown
+            value={values.supertonic_voice ?? 'grace'}
+            onChange={(id) =>
+              onChange({ ...values, supertonic_voice: id || null })}
+            options={[
+              { id: 'grace', label: 'Grace (cloned)' },
+              { id: 'F1', label: 'F1 (built-in)' },
+              { id: 'F2', label: 'F2 (built-in)' },
+              { id: 'F3', label: 'F3 (built-in)' },
+              { id: 'F4', label: 'F4 (built-in)' },
+              { id: 'F5', label: 'F5 (built-in)' },
+              { id: 'M1', label: 'M1 (built-in)' },
+              { id: 'M2', label: 'M2 (built-in)' },
+              { id: 'M3', label: 'M3 (built-in)' },
+              { id: 'M4', label: 'M4 (built-in)' },
+              { id: 'M5', label: 'M5 (built-in)' },
+            ]}
           />
         </FieldLabel>
       )}

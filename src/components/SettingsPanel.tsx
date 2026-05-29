@@ -759,7 +759,7 @@ function VoiceFacet({ draft, update }: PaneContext) {
     <Composition
       eyebrow="the voice that speaks replies"
       title={ttsHeadline(draft.tts_provider)}
-      tagline="ElevenLabs renders in the cloud with high realism. Kokoro and Qwen3 run on your machine, no key required."
+      tagline="ElevenLabs renders in the cloud with high realism. Supertonic, Kokoro and Qwen3 run on your machine, no key required."
       sigil={<Voiceprint />}
     >
       <Stack>
@@ -769,8 +769,8 @@ function VoiceFacet({ draft, update }: PaneContext) {
             onChange={(v) => update('tts_provider', v as TtsProviderId)}
             options={[
               { id: 'elevenlabs', label: 'ElevenLabs (cloud, realistic)' },
+              { id: 'supertonic', label: 'Supertonic-3 (local, 31 languages, ~5× realtime)' },
               { id: 'kokoro',     label: 'Kokoro (local, open-weight)' },
-              { id: 'qwen3',      label: 'Qwen3-TTS (local, larger)' },
             ]}
             placeholder="Choose an engine"
           />
@@ -823,6 +823,27 @@ function VoiceFacet({ draft, update }: PaneContext) {
             />
           </FieldStack>
         )}
+
+        {draft.tts_provider === 'supertonic' && (
+          <FieldStack
+            label="Voice"
+            aside={
+              <InlineHint>
+                F1-F5 / M1-M5 built-in, or a Voice-Builder clone (e.g. grace)
+              </InlineHint>
+            }
+          >
+            <input
+              type="text"
+              placeholder="grace"
+              value={draft.supertonic_voice ?? ''}
+              onChange={(e) =>
+                update('supertonic_voice', e.target.value || null)
+              }
+              style={NATIVE_INPUT_STYLE}
+            />
+          </FieldStack>
+        )}
       </Stack>
     </Composition>
   );
@@ -831,8 +852,9 @@ function VoiceFacet({ draft, update }: PaneContext) {
 function ttsHeadline(p: TtsProviderId): string {
   switch (p) {
     case 'elevenlabs': return 'ElevenLabs.';
+    case 'supertonic': return 'Supertonic-3, local.';
     case 'kokoro':     return 'Kokoro, local.';
-    case 'qwen3':      return 'Qwen3-TTS, local.';
+    case 'qwen3':      return 'Qwen3-TTS (disabled).';
   }
 }
 

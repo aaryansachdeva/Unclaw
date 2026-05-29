@@ -140,6 +140,9 @@ export async function chatViaSoul(
     if (keys.tts_provider === 'qwen3' && keys.qwen3_voice) {
       body.voice_id = keys.qwen3_voice;
     }
+    if (keys.tts_provider === 'supertonic' && keys.supertonic_voice) {
+      body.voice_id = keys.supertonic_voice;
+    }
     // Agentic / escalation BYOK. Soul reads these on /chat and routes
     // to either _run_escalation (cloud) or _run_escalation_local based
     // on agentic_provider. The local path uses the chat-tier Ollama
@@ -311,15 +314,15 @@ export async function* streamChatViaSoul(
       body.llm_api_key = keys.llm_api_key;
     }
     // Forward whichever local provider the user picked. Soul's
-    // /chat_stream_audio gates on tts_provider in {kokoro, qwen3};
-    // the App.tsx caller restricts streaming to those two before
-    // calling us, so anything else here is a bug upstream.
+    // /chat_stream_audio admits {kokoro, supertonic}; the App.tsx
+    // caller restricts streaming to local providers before calling
+    // us, so anything else here is a bug upstream.
     body.tts_provider = keys.tts_provider;
     if (keys.tts_provider === 'kokoro' && keys.kokoro_voice) {
       body.voice_id = keys.kokoro_voice;
     }
-    if (keys.tts_provider === 'qwen3' && keys.qwen3_voice) {
-      body.voice_id = keys.qwen3_voice;
+    if (keys.tts_provider === 'supertonic' && keys.supertonic_voice) {
+      body.voice_id = keys.supertonic_voice;
     }
     // Agentic BYOK threading — same logic as chatViaSoul. Soul reads
     // these on the streaming endpoint too so escalation kicked off

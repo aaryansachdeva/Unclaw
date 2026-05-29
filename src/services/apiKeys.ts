@@ -437,9 +437,17 @@ export function getProvider(id: LLMProviderId | null | undefined): ProviderInfo 
 /** TTS provider the user picked.
  *  - elevenlabs: cloud / BYOK API key
  *  - kokoro: local 82M open-weight model (~325 MB), soul in-process
- *  - qwen3: local 0.6B model in an isolated subprocess venv (~5 GB
- *           total install: torch+transformers deps + HF model + voice). */
-export type TtsProviderId = 'elevenlabs' | 'kokoro' | 'qwen3';
+ *  - supertonic: local ONNX TTS (~400 MB model + lazy-fetched custom
+ *                voice JSONs from R2). Streaming + Grace clone shipped.
+ *  - qwen3: DISABLED for now while its runtime API stabilizes. The
+ *           value is kept in the union so legacy serialized profiles
+ *           still typecheck; the wizard no longer offers it as an
+ *           option and soul rejects it on /chat. */
+export type TtsProviderId =
+  | 'elevenlabs'
+  | 'kokoro'
+  | 'supertonic'
+  | 'qwen3';
 
 /** Sub-mode when `tts_provider === 'kokoro'`. `recommended` = soul
  *  downloads + runs Kokoro locally; `custom` = user has Kokoro
@@ -488,6 +496,12 @@ export interface ApiKeysProfile {
    *  when `tts_provider === 'qwen3'`. Defaults to the Grace clone soul
    *  downloads during install. */
   qwen3_voice: string | null;
+  /** Selected Supertonic voice id. Built-in voices are `M1`-`M5` /
+   *  `F1`-`F5`; custom voices are filename stems matching a JSON in
+   *  `<soul_data>/supertonic/voices/<name>.json` (typically exported
+   *  from Supertonic's Voice Builder web tool, e.g. `grace`). Only
+   *  consulted when `tts_provider === 'supertonic'`. Defaults to `F1`. */
+  supertonic_voice: string | null;
   /** Agentic features toggle. When false (default), the 20b's
    *  `escalate` action is suppressed in the system prompt and the
    *  fast-escalation regex no-ops; soul never spins up the agentic
@@ -572,9 +586,23 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   // Default to the KVoiceWalk-evolved Grace clone (`grace_kokoro.pt`),
   // which soul downloads from files.fotonlabs.com during install. New
   // users get persona-consistent voice out of the box if they pick
-  // Kokoro; they can still flip to any of the bundled 54 voices.
+  // Kokoro on Win/Linux; on Mac the MLX-Kokoro runtime can't load
+  // the .pt tensor, so `grace_kokoro` silently falls back to a
+  // bundled voice (`af_nicole`). Mac users who want the real Grace
+  // clone should pick the Supertonic-3 provider instead — which
+  // auto-fetches `grace_supertonic.json` and renders the actual
+  // cloned voice on-device.
   kokoro_voice:             'grace_kokoro',
   qwen3_voice:              'grace_qwen3',
+  // Supertonic-3 voice. Built-in `F1`-`F5` / `M1`-`M5`, or a custom
+  // KVoiceWalk-style JSON keyed by filename stem. Default `grace`: the
+  // Supertonic-trained Grace clone hosted at
+  // files.fotonlabs.com/mac/voices/grace_supertonic.json. On first
+  // synth, supertonic_runtime auto-fetches the ~290 KB JSON into
+  // `<soul_data>/supertonic/voices/grace.json` (cached + version-pinned
+  // alongside Kokoro's grace_kokoro.pt). Picking a different built-in
+  // (F2, M3, etc.) bypasses the CDN entirely.
+  supertonic_voice:         'grace',
   agentic_enabled:          false,
   agentic_provider:         'openai',
   agentic_use_same_as_chat: false,
@@ -676,11 +704,15 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
     // wizard's Check Keys step calls /validate_keys which probes that
     // state and surfaces "not installed" as a per-row failure with an
     // Install Kokoro button — no field-level entry needed here.
+  } else if (profile.tts_provider === 'supertonic') {
+    // Supertonic auto-downloads its ~400 MB model + lazy-fetches the
+    // selected custom voice JSON (e.g. `grace`) from R2 on first
+    // synth. No key, no install panel, no field-level requirement.
   } else if (profile.tts_provider === 'qwen3') {
-    // Same shape as Kokoro recommended: install state checked at
-    // Check-Keys time, install panel surfaces a hard failure when
-    // the venv / model / voice aren't on disk yet. No field-level
-    // requirement at this layer.
+    // DISABLED: the wizard no longer offers Qwen3, but a legacy
+    // serialized profile may still carry it. Treat as no required
+    // field; /validate_keys will fail the run and surface the
+    // disabled-provider error from soul.
   } else {
     if (!profile.elevenlabs_api_key) missing.push('ElevenLabs API key');
   }
