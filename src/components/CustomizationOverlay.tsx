@@ -22,7 +22,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronLeft, ChevronRight, Check, ArrowLeft } from 'lucide-react';
 import { LightingDial } from './LightingDial';
-import type { WardrobeSettings } from '../services/userSettings';
+import { ColorPickerPanel, hexToRgb01 } from './ColorPickerPanel';
+import type { WardrobeSettings, ClothingColor } from '../services/userSettings';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -57,6 +58,29 @@ export const ACCENT_COLORS: Array<{ label: string; hex: string; r: number; g: nu
   { label: 'Forest',     hex: '#74c98f', r: 0.45, g: 0.79, b: 0.56 },
 ];
 
+// Curated garment palette for the per-category color submenu. r/g/b are
+// 0-1 (sent verbatim as color1/color2 to UE's changeClothingColor, matching
+// the changeLightColor convention). Two-tone garments take a primary
+// (diffuse_color_1) and a secondary (diffuse_color_2) from this same set.
+export const CLOTHING_COLORS: Array<{ label: string; hex: string; r: number; g: number; b: number }> = [
+  { label: 'Black',    hex: '#1b1b1e', r: 0.106, g: 0.106, b: 0.118 },
+  { label: 'Charcoal', hex: '#3a3d42', r: 0.227, g: 0.239, b: 0.259 },
+  { label: 'Stone',    hex: '#8b8a84', r: 0.545, g: 0.541, b: 0.518 },
+  { label: 'Ivory',    hex: '#ece5d6', r: 0.925, g: 0.898, b: 0.839 },
+  { label: 'Sand',     hex: '#c8af89', r: 0.784, g: 0.686, b: 0.537 },
+  { label: 'Rust',     hex: '#b45f39', r: 0.706, g: 0.373, b: 0.224 },
+  { label: 'Burgundy', hex: '#792d39', r: 0.475, g: 0.176, b: 0.224 },
+  { label: 'Olive',    hex: '#6a6939', r: 0.416, g: 0.412, b: 0.224 },
+  { label: 'Forest',   hex: '#33543e', r: 0.200, g: 0.329, b: 0.243 },
+  { label: 'Navy',     hex: '#2a395b', r: 0.165, g: 0.224, b: 0.357 },
+  { label: 'Slate',    hex: '#556273', r: 0.333, g: 0.384, b: 0.451 },
+  { label: 'Plum',     hex: '#593a5b', r: 0.349, g: 0.227, b: 0.357 },
+];
+
+// Categories whose garment master exposes diffuse_color_1/2. Hair is a
+// groom (different material), so it has no clothing-color submenu.
+const COLORABLE: WardrobeCategory[] = ['top', 'bottom', 'shoes'];
+
 interface CustomizationOverlayProps {
   initial?: WardrobeSettings | null;
   onEmit: (payload: Record<string, unknown>) => void;
@@ -75,13 +99,54 @@ export function CustomizationOverlay({
   const [lightingAngle, setLightingAngle] = useState(clampAngle(initial?.lightingAngle ?? 0));
   const [accentColorIndex, setAccentColorIndex] = useState(clampAccent(initial?.accentColorIndex));
 
+  // null = master category list; a category = its detail submenu (stepper +,
+  // for colorable categories, the two color rows).
+  const [activeCategory, setActiveCategory] = useState<WardrobeCategory | null>(null);
+  // Per-category garment colors as palette indices. Defaults to (0,0).
+  const [clothingColors, setClothingColors] = useState<Record<'top' | 'bottom' | 'shoes', ClothingColor>>(() => ({
+    top:    clampColor(initial?.clothingColors?.top),
+    bottom: clampColor(initial?.clothingColors?.bottom),
+    shoes:  clampColor(initial?.clothingColors?.shoes),
+  }));
+  // Freeform accent (lighting) color override, set via the picker. Wins over
+  // accentColorIndex when present.
+  const [accentColorHex, setAccentColorHex] = useState<string | undefined>(initial?.accentColorHex);
+  // Open color picker, anchored to the swatch that opened it. null = closed.
+  type PickerTarget =
+    | { kind: 'clothing'; cat: 'top' | 'bottom' | 'shoes'; slot: 'c1' | 'c2' }
+    | { kind: 'accent' };
+  const [picker, setPicker] = useState<{ target: PickerTarget; rect: DOMRect } | null>(null);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        // In a category submenu, Escape backs out to the list first; only
+        // closes the whole overlay from the top level.
+        if (activeCategory !== null) setActiveCategory(null);
+        else onCancel();
+      }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [onCancel]);
+  }, [onCancel, activeCategory]);
+
+  // Wardrobe staging mode follows the active view. ON in the category list and
+  // the clothing details (full-body turntable to judge garments); OFF in the
+  // HAIR detail, where we want a head-focused view and the wardrobe body pose
+  // gets in the way. Fires on each ON/OFF transition (entering/leaving hair),
+  // and closing the overlay (unmount) always drops back to OFF. This is the
+  // single owner of wardrobeMode now — App.tsx no longer toggles it.
+  const wardrobeStageOn = activeCategory !== 'hair';
+  useEffect(() => {
+    onEmit({ EventType: wardrobeStageOn ? 'wardrobeModeOn' : 'wardrobeModeOff' });
+  }, [wardrobeStageOn, onEmit]);
+  // Unmount = customization closed -> wardrobe mode off. Read onEmit off a ref so
+  // a stream reconnect (which changes onEmit's identity) doesn't fire a spurious
+  // off mid-session — only true unmount triggers this.
+  const onEmitRef = useRef(onEmit);
+  onEmitRef.current = onEmit;
+  useEffect(() => () => { onEmitRef.current({ EventType: 'wardrobeModeOff' }); }, []);
 
   const getValue = (cat: WardrobeCategory): number => ({
     top: topIndex, bottom: bottomIndex, shoes: shoesIndex, hair: hairIndex,
@@ -113,26 +178,81 @@ export function CustomizationOverlay({
     onEmit({ EventType: 'changeLightAngle', lightAngle: String(angle) });
   }, [onEmit]);
 
+  const emitLightColor = useCallback((rgb: { r: number; g: number; b: number }) => {
+    onEmit({
+      EventType: 'changeLightColor',
+      'lightColor.r': rgb.r.toFixed(3),
+      'lightColor.g': rgb.g.toFixed(3),
+      'lightColor.b': rgb.b.toFixed(3),
+    });
+  }, [onEmit]);
+
   const handleAccent = useCallback((index: number) => {
     if (index < 0 || index >= ACCENT_COLORS.length) return;
     setAccentColorIndex(index);
-    const c = ACCENT_COLORS[index];
+    setAccentColorHex(undefined); // preset clears the custom override
+    emitLightColor(ACCENT_COLORS[index]);
+  }, [emitLightColor]);
+
+  const handleAccentCustom = useCallback((hex: string) => {
+    setAccentColorHex(hex);
+    emitLightColor(hexToRgb01(hex));
+  }, [emitLightColor]);
+
+  // UE's changeClothingColor takes BOTH tones every time + the category. Each
+  // slot's effective color is its custom hex if set, else the palette preset.
+  const emitClothingColor = useCallback((cat: 'top' | 'bottom' | 'shoes', pair: ClothingColor) => {
+    const a = pair.c1Hex ? hexToRgb01(pair.c1Hex) : CLOTHING_COLORS[pair.c1];
+    const b = pair.c2Hex ? hexToRgb01(pair.c2Hex) : CLOTHING_COLORS[pair.c2];
     onEmit({
-      EventType: 'changeLightColor',
-      'lightColor.r': c.r.toFixed(3),
-      'lightColor.g': c.g.toFixed(3),
-      'lightColor.b': c.b.toFixed(3),
+      EventType: 'changeClothingColor',
+      wardrobeCategory: cat,
+      'color1.r': a.r.toFixed(3), 'color1.g': a.g.toFixed(3), 'color1.b': a.b.toFixed(3),
+      'color2.r': b.r.toFixed(3), 'color2.g': b.g.toFixed(3), 'color2.b': b.b.toFixed(3),
     });
   }, [onEmit]);
+
+  // Preset pick: set the index AND clear that slot's custom hex (back to palette).
+  const handleClothingColor = useCallback((
+    cat: 'top' | 'bottom' | 'shoes', slot: 'c1' | 'c2', index: number,
+  ) => {
+    if (index < 0 || index >= CLOTHING_COLORS.length) return;
+    const hexKey = slot === 'c1' ? 'c1Hex' : 'c2Hex';
+    const nextPair: ClothingColor = { ...clothingColors[cat], [slot]: index, [hexKey]: undefined };
+    setClothingColors((prev) => ({ ...prev, [cat]: nextPair }));
+    emitClothingColor(cat, nextPair);
+  }, [clothingColors, emitClothingColor]);
+
+  // Custom pick (from the color picker): set the slot's freeform hex override.
+  const handleClothingCustom = useCallback((
+    cat: 'top' | 'bottom' | 'shoes', slot: 'c1' | 'c2', hex: string,
+  ) => {
+    const hexKey = slot === 'c1' ? 'c1Hex' : 'c2Hex';
+    const nextPair: ClothingColor = { ...clothingColors[cat], [hexKey]: hex };
+    setClothingColors((prev) => ({ ...prev, [cat]: nextPair }));
+    emitClothingColor(cat, nextPair);
+  }, [clothingColors, emitClothingColor]);
 
   const handleSave = useCallback(() => {
     onSave({
       topIndex, bottomIndex, shoesIndex, hairIndex,
-      lightingAngle, accentColorIndex,
+      lightingAngle, accentColorIndex, accentColorHex,
+      clothingColors,
     });
-  }, [onSave, topIndex, bottomIndex, shoesIndex, hairIndex, lightingAngle, accentColorIndex]);
+  }, [onSave, topIndex, bottomIndex, shoesIndex, hairIndex, lightingAngle, accentColorIndex, accentColorHex, clothingColors]);
 
-  const activeAccent = ACCENT_COLORS[accentColorIndex] ?? ACCENT_COLORS[0];
+  const activeAccent = accentColorHex
+    ? { label: 'Custom', hex: accentColorHex }
+    : (ACCENT_COLORS[accentColorIndex] ?? ACCENT_COLORS[0]);
+
+  // Hex shown by the picker for whatever it's currently targeting.
+  const pickerColor = (() => {
+    if (!picker) return '#ffffff';
+    if (picker.target.kind === 'accent') return accentColorHex ?? ACCENT_COLORS[accentColorIndex]?.hex ?? '#ffffff';
+    const p = clothingColors[picker.target.cat];
+    const slotHex = picker.target.slot === 'c1' ? p.c1Hex : p.c2Hex;
+    return slotHex ?? CLOTHING_COLORS[picker.target.slot === 'c1' ? p.c1 : p.c2]?.hex ?? '#ffffff';
+  })();
 
   return (
     <motion.div
@@ -258,20 +378,71 @@ export function CustomizationOverlay({
         display: 'flex',
         flexDirection: 'column',
         justifyContent: 'center',
-        gap: 32,
         pointerEvents: 'none',
+        width: 260,
       }}>
-        {CATEGORY_ORDER.map((cat, i) => (
-          <ChevronVignette
-            key={cat}
-            category={cat}
-            value={getValue(cat)}
-            max={WARDROBE_BOUNDS[cat]}
-            onPrev={() => handleStep(cat, -1)}
-            onNext={() => handleStep(cat, 1)}
-            delay={0.22 + i * 0.06}
-          />
-        ))}
+        <AnimatePresence mode="wait" initial={false}>
+          {activeCategory === null ? (
+            // ----- master: tappable category list -----
+            <motion.div
+              key="master"
+              initial={{ opacity: 0, x: -14 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -14 }}
+              transition={{ duration: 0.3, ease: EASE_OUT_EXPO }}
+              style={{ display: 'flex', flexDirection: 'column', gap: 4, pointerEvents: 'auto' }}
+            >
+              {CATEGORY_ORDER.map((cat, i) => (
+                <CategoryRow
+                  key={cat}
+                  category={cat}
+                  value={getValue(cat)}
+                  max={WARDROBE_BOUNDS[cat]}
+                  onOpen={() => setActiveCategory(cat)}
+                  delay={0.18 + i * 0.05}
+                />
+              ))}
+            </motion.div>
+          ) : (
+            // ----- detail: stepper (+ color rows for clothing) -----
+            <motion.div
+              key={`detail-${activeCategory}`}
+              initial={{ opacity: 0, x: 14 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 14 }}
+              transition={{ duration: 0.3, ease: EASE_OUT_EXPO }}
+              style={{ display: 'flex', flexDirection: 'column', gap: 24, pointerEvents: 'auto' }}
+            >
+              <BackToCategories onClick={() => setActiveCategory(null)} />
+              <ChevronVignette
+                category={activeCategory}
+                value={getValue(activeCategory)}
+                max={WARDROBE_BOUNDS[activeCategory]}
+                onPrev={() => handleStep(activeCategory, -1)}
+                onNext={() => handleStep(activeCategory, 1)}
+                delay={0}
+              />
+              {COLORABLE.includes(activeCategory) && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  {(['c1', 'c2'] as const).map((slot, idx) => {
+                    const cat = activeCategory as 'top' | 'bottom' | 'shoes';
+                    const pair = clothingColors[cat];
+                    return (
+                      <ColorRow
+                        key={slot}
+                        label={idx === 0 ? 'Color 1' : 'Color 2'}
+                        activeIndex={pair[slot]}
+                        customHex={slot === 'c1' ? pair.c1Hex : pair.c2Hex}
+                        onPick={(i) => handleClothingColor(cat, slot, i)}
+                        onOpenPicker={(rect) => setPicker({ target: { kind: 'clothing', cat, slot }, rect })}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* ===== Right column, dial, accent palette, save =============== */}
@@ -358,6 +529,7 @@ export function CustomizationOverlay({
           </div>
           <div style={{
             display: 'flex',
+            alignItems: 'center',
             gap: 12,
             padding: '2px 2px 4px 2px',
           }}>
@@ -366,10 +538,14 @@ export function CustomizationOverlay({
                 key={c.label}
                 color={c.hex}
                 label={c.label}
-                active={i === accentColorIndex}
+                active={!accentColorHex && i === accentColorIndex}
                 onClick={() => handleAccent(i)}
               />
             ))}
+            <CustomSwatch
+              customHex={accentColorHex}
+              onOpen={(rect) => setPicker({ target: { kind: 'accent' }, rect })}
+            />
           </div>
         </motion.div>
       </div>
@@ -416,6 +592,21 @@ export function CustomizationOverlay({
         <Check size={13} strokeWidth={2.6} />
         Save
       </motion.button>
+
+      {/* Freeform color picker popover, anchored to whichever swatch opened it. */}
+      <AnimatePresence>
+        {picker && (
+          <ColorPickerPanel
+            color={pickerColor}
+            anchorRect={picker.rect}
+            onChange={(hex) => {
+              if (picker.target.kind === 'accent') handleAccentCustom(hex);
+              else handleClothingCustom(picker.target.cat, picker.target.slot, hex);
+            }}
+            onClose={() => setPicker(null)}
+          />
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }
@@ -594,6 +785,210 @@ function ChevronBtn({ dir, onClick }: { dir: 'prev' | 'next'; onClick: () => voi
   );
 }
 
+// ============ category row (master list) ===============================
+// Tappable row: caps label · "n / N" · enter chevron. Opens the category's
+// detail submenu. Frosted-slate hover, whisper-quiet at rest.
+
+function CategoryRow({
+  category, value, max, onOpen, delay,
+}: {
+  category: WardrobeCategory; value: number; max: number; onOpen: () => void; delay: number;
+}) {
+  return (
+    <motion.button
+      type="button"
+      onClick={onOpen}
+      initial={{ opacity: 0, x: -16 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ duration: 0.45, ease: EASE_OUT_EXPO, delay }}
+      whileHover={{ x: 3 }}
+      whileTap={{ scale: 0.985 }}
+      style={{
+        pointerEvents: 'auto',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        width: 232,
+        padding: '11px 14px',
+        background: 'transparent',
+        border: '1px solid transparent',
+        borderRadius: 12,
+        cursor: 'pointer',
+        transition:
+          'background 200ms var(--ease-out-quart), border-color 200ms var(--ease-out-quart)',
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
+        e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.09)';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = 'transparent';
+        e.currentTarget.style.borderColor = 'transparent';
+      }}
+    >
+      <span style={{
+        flex: 1,
+        textAlign: 'left',
+        fontSize: 13,
+        fontWeight: 700,
+        letterSpacing: '0.22em',
+        textTransform: 'uppercase',
+        color: 'var(--text-primary)',
+        textShadow: '0 1px 3px rgba(0,0,0,0.55)',
+      }}>
+        {CATEGORY_LABELS[category]}
+      </span>
+      <span style={{
+        fontSize: 11,
+        fontWeight: 600,
+        color: 'var(--text-ghost)',
+        fontVariantNumeric: 'tabular-nums',
+        letterSpacing: '0.04em',
+        textShadow: '0 1px 3px rgba(0,0,0,0.55)',
+      }}>
+        {value + 1} / {max}
+      </span>
+      <ChevronRight
+        size={16}
+        strokeWidth={1.8}
+        style={{ color: 'var(--text-ghost)', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))' }}
+      />
+    </motion.button>
+  );
+}
+
+// ============ back-to-categories affordance ============================
+
+function BackToCategories({ onClick }: { onClick: () => void }) {
+  return (
+    <motion.button
+      type="button"
+      onClick={onClick}
+      whileHover={{ x: -2 }}
+      whileTap={{ scale: 0.96 }}
+      style={{
+        pointerEvents: 'auto',
+        alignSelf: 'flex-start',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 2px',
+        background: 'transparent',
+        border: 'none',
+        cursor: 'pointer',
+        color: 'var(--text-ghost)',
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: '0.22em',
+        textTransform: 'uppercase',
+        textShadow: '0 1px 3px rgba(0,0,0,0.55)',
+        filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))',
+      }}
+    >
+      <ChevronLeft size={14} strokeWidth={2} />
+      Categories
+    </motion.button>
+  );
+}
+
+// ============ color row (swatch strip) =================================
+// Section label + wrapping strip of garment swatches. Active swatch wears
+// a white ring (constant size, so picking never reflows the grid).
+
+function ColorRow({
+  label, activeIndex, customHex, onPick, onOpenPicker,
+}: {
+  label: string;
+  activeIndex: number;
+  customHex?: string;
+  onPick: (i: number) => void;
+  onOpenPicker: (rect: DOMRect) => void;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: 232 }}>
+      <SectionLabel>{label}</SectionLabel>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 9 }}>
+        {CLOTHING_COLORS.map((c, i) => (
+          <ClothingSwatch
+            key={c.label}
+            color={c.hex}
+            label={c.label}
+            active={!customHex && i === activeIndex}
+            onClick={() => onPick(i)}
+          />
+        ))}
+        <CustomSwatch customHex={customHex} onOpen={onOpenPicker} />
+      </div>
+    </div>
+  );
+}
+
+// Trailing "custom color" chip: a rainbow conic-gradient at rest (opens the
+// picker), or the chosen color (with the active ring) once a custom hex is set.
+function CustomSwatch({
+  customHex, onOpen,
+}: { customHex?: string; onOpen: (rect: DOMRect) => void }) {
+  const active = !!customHex;
+  return (
+    <motion.button
+      type="button"
+      title={active ? `Custom ${customHex}` : 'Custom color…'}
+      aria-label="Custom color"
+      whileHover={{ scale: 1.14 }}
+      whileTap={{ scale: 0.9 }}
+      onClick={(e) => onOpen(e.currentTarget.getBoundingClientRect())}
+      style={{
+        pointerEvents: 'auto',
+        width: 19,
+        height: 19,
+        padding: 0,
+        border: 'none',
+        borderRadius: 7,
+        cursor: 'pointer',
+        // Always the rainbow — it's the "open the picker" affordance, not a
+        // color readout. The active ring still signals a custom color is set.
+        background: 'conic-gradient(from 0deg, #ff5b5b, #ffd25b, #6bff8e, #5bd0ff, #9b7bff, #ff6bd6, #ff5b5b)',
+        boxShadow: active
+          ? '0 0 0 2px rgba(0,0,0,0.55), 0 0 0 3.5px rgba(255,255,255,0.85), 0 2px 6px rgba(0,0,0,0.5)'
+          : '0 0 0 1px rgba(255,255,255,0.2), 0 1px 3px rgba(0,0,0,0.45)',
+        transition: 'box-shadow 200ms var(--ease-out-quart)',
+      }}
+    />
+  );
+}
+
+function ClothingSwatch({
+  color, label, active, onClick,
+}: { color: string; label: string; active: boolean; onClick: () => void }) {
+  return (
+    <motion.button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      aria-label={label}
+      title={label}
+      whileHover={{ scale: 1.14 }}
+      whileTap={{ scale: 0.9 }}
+      onClick={onClick}
+      style={{
+        pointerEvents: 'auto',
+        width: 19,
+        height: 19,
+        padding: 0,
+        border: 'none',
+        borderRadius: 7,
+        background: color,
+        cursor: 'pointer',
+        // dark gap + white ring when active; subtle hairline otherwise.
+        boxShadow: active
+          ? '0 0 0 2px rgba(0,0,0,0.55), 0 0 0 3.5px rgba(255,255,255,0.85), 0 2px 6px rgba(0,0,0,0.5)'
+          : '0 0 0 1px rgba(255,255,255,0.14), 0 1px 3px rgba(0,0,0,0.45)',
+        transition: 'box-shadow 200ms var(--ease-out-quart)',
+      }}
+    />
+  );
+}
+
 // ============ section label ============================================
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
@@ -664,4 +1059,16 @@ function clampAngle(value: number): number {
 function clampAccent(value: number | undefined): number {
   if (value == null || !Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(ACCENT_COLORS.length - 1, Math.floor(value)));
+}
+
+function clampColorIndex(value: number | undefined): number {
+  if (value == null || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(CLOTHING_COLORS.length - 1, Math.floor(value)));
+}
+
+function clampColor(c: ClothingColor | undefined): ClothingColor {
+  return {
+    c1: clampColorIndex(c?.c1), c2: clampColorIndex(c?.c2),
+    c1Hex: c?.c1Hex, c2Hex: c?.c2Hex,
+  };
 }

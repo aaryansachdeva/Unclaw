@@ -62,6 +62,19 @@ export interface UserSettings {
 /** Wardrobe is a sub-object so all related state lives under one key
  *  and partial updates (changing only lighting, say) are a single
  *  `patchSettings({ wardrobe: {...prev, lightingAngle: x} })` call. */
+/** Per-garment two-tone color, stored as indices into the curated
+ *  CLOTHING_COLORS palette (see CustomizationOverlay). c1 = primary
+ *  (diffuse_color_1), c2 = secondary (diffuse_color_2). */
+export interface ClothingColor {
+  c1: number;
+  c2: number;
+  /** Optional freeform hex overrides ('#rrggbb') chosen via the color picker.
+   *  When set, the hex wins over the palette index for that slot; unset = the
+   *  palette preset at c1/c2. Additive so existing index-only data still works. */
+  c1Hex?: string;
+  c2Hex?: string;
+}
+
 export interface WardrobeSettings {
   topIndex?: number;
   bottomIndex?: number;
@@ -71,6 +84,12 @@ export interface WardrobeSettings {
   /** Index into the curated accent-lighting palette (see ACCENT_COLORS
    *  in components/Wardrobe). 0 = neutral default. */
   accentColorIndex?: number;
+  /** Optional freeform hex override for the accent/lighting color, set via the
+   *  color picker. When present it wins over accentColorIndex. */
+  accentColorHex?: string;
+  /** Per-category garment colors. Only the colorable categories
+   *  (top/bottom/shoes) appear; absent = palette default. */
+  clothingColors?: Partial<Record<'top' | 'bottom' | 'shoes', ClothingColor>>;
 }
 
 // ---- Soul (local) ---------------------------------------------------

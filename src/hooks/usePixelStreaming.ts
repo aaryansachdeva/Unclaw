@@ -122,10 +122,43 @@ export function usePixelStreaming({
     // layout-settle window. Mirrors the proven PC reference pattern in
     // ProjectGraceTests/PS_Next_Claude. Drop the manual fires once the
     // auto-trigger proves reliable across Mac/Electron paint timing.
+    // Render at PHYSICAL device pixels, not CSS pixels. The SDK's
+    // updateVideoStreamSize() feeds the video element's *logical* size
+    // (clientWidth/clientHeight) into onMatchViewportResolutionCallback, so on
+    // a Retina display UE renders at half the pane's real pixel count and the
+    // browser upscales 2x — a soft avatar. Override the callback to scale by
+    // devicePixelRatio (capped + rounded to even dims for H264 4:2:0) before
+    // emitting the Resolution command. Wire format is identical to the SDK's
+    // own path: emitCommand() -> streamMessageController 'Command' handler,
+    // same as onMatchViewportResolutionCallback's default body.
+    const MAX_RENDER_DIM = 1920; // cap longest side so the HW encoder + bitrate cap stay sane
+    const installDprResolutionOverride = (
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vp: any,
+    ) => {
+      if (!vp || vp.__unclawDprOverride) return;
+      vp.onMatchViewportResolutionCallback = (cssW: number, cssH: number) => {
+        const dpr = window.devicePixelRatio || 1;
+        let w = Math.round(cssW * dpr);
+        let h = Math.round(cssH * dpr);
+        const longest = Math.max(w, h);
+        if (longest > MAX_RENDER_DIM) {
+          const s = MAX_RENDER_DIM / longest;
+          w = Math.round(w * s);
+          h = Math.round(h * s);
+        }
+        w -= w % 2; // even dims: H264 4:2:0 chroma subsampling needs them
+        h -= h % 2;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (ps as any).emitCommand({ 'Resolution.Width': w, 'Resolution.Height': h });
+      };
+      vp.__unclawDprOverride = true;
+    };
     const forceViewportResolutionUpdate = () => {
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const controller = (ps as any)._webRtcController;
+        installDprResolutionOverride(controller?.videoPlayer);
         controller?.videoPlayer?.updateVideoStreamSize?.();
       } catch (err) {
         // eslint-disable-next-line no-console

@@ -12,7 +12,8 @@ import { RemindersPanel } from './components/Reminders';
 import { StocksPanel } from './components/Stocks';
 import { NewsPanel } from './components/News';
 import { WeatherPanel } from './components/Weather';
-import { CustomizationOverlay, ACCENT_COLORS } from './components/CustomizationOverlay';
+import { CustomizationOverlay, ACCENT_COLORS, CLOTHING_COLORS } from './components/CustomizationOverlay';
+import { hexToRgb01 } from './components/ColorPickerPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SoulBootScreen } from './components/SoulBootScreen';
 import { SetupWizard } from './components/SetupWizard';
@@ -37,7 +38,6 @@ import { expressFace } from './services/express';
 import { getStocks } from './services/stocks';
 import {
   deleteSettings,
-  patchSettings,
   saveSettingsEverywhere,
   syncSettings,
   type UserSettings,
@@ -55,7 +55,13 @@ import { fetchApiKeys, modelSupportsVision } from './services/apiKeys';
 import { SignInScreen } from './components/Auth/SignInScreen';
 import { Wizard } from './components/Onboarding/Wizard';
 import { personalityFor } from './personalities';
-import { AGENTS } from './types';
+import { AGENTS, type Agent } from './types';
+import { useAgentStack, BASE_AGENT, BASE_INSTANCE_ID } from './hooks/useAgentStack';
+import { AddCharacterPicker } from './components/AddCharacterPicker';
+
+/** Carousel sentinel: cycling onto this opens the Add picker over a blank
+ *  stage (UE cleared via agentSwitch with an unknown id). */
+const ADD_SLOT = '__add__';
 
 /** localStorage flag set when the user clicked "Continue without an
  *  account" on the sign-in screen. Persists across launches so guests
@@ -292,7 +298,20 @@ function AppMain() {
     });
   }, [pixelStreaming]);
 
-  const [currentAgentIndex, setCurrentAgentIndex] = useState(0);
+  // The user's roster (persisted, starts as just Grace) + which slot of the
+  // switcher carousel is selected. The carousel is [...stack, ADD_SLOT]; the
+  // ADD_SLOT opens the picker over a blank stage. `selectedInstanceId` holds a
+  // real roster instance id or ADD_SLOT.
+  const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe } = useAgentStack();
+  // Selected carousel slot: a roster instance id, or ADD_SLOT for the picker.
+  const [selectedInstanceId, setSelectedInstanceId] = useState<string>(BASE_INSTANCE_ID);
+  const [addPickerOpen, setAddPickerOpen] = useState(false);
+  // Which instance the switcher returns to when the Add picker is cancelled.
+  const addReturnRef = useRef<string>(BASE_INSTANCE_ID);
+  // Characters UE reports as actually loaded (mount-aware), via the
+  // `installedCharacters` response. null = not reported yet -> fall back to the
+  // full catalog (keeps dev + older UE builds working).
+  const [installedCharacterIds, setInstalledCharacterIds] = useState<string[] | null>(null);
   const [isSending, setIsSending] = useState(false);
   // Bumped after every chat round so the Reminders panel re-fetches.
   const [refreshKey, setRefreshKey] = useState(0);
@@ -542,21 +561,146 @@ function AppMain() {
   // in-prompt voice the LLM hears, so every surface that says "Grace"
   // (greeting, AgentSwitcher, Whisper prompt, system extension) picks
   // up the new name automatically.
-  const persona = personalityFor(
-    AGENTS[currentAgentIndex].name,
-    currentAgentIndex === 0 ? profile?.agent_name ?? null : null,
+  // Catalog lookup + the characters still addable (available, not yet in the
+  // roster). "Available" = the whole catalog for now; the UE
+  // `installedCharacters` reply will narrow this to downloaded characters.
+  const agentById = useMemo(
+    () => Object.fromEntries(AGENTS.map((a) => [a.agentId, a] as const)) as Record<string, Agent>,
+    [],
   );
-  const memory = useChatMemory(persona.id);
+  // Addable = the catalog narrowed to what UE reports as loaded (duplicates
+  // allowed, so the whole loaded set is always offered). Until UE reports,
+  // fall back to the full catalog so dev + older builds still work.
+  const addableAgents = useMemo(
+    () => (installedCharacterIds === null
+      ? AGENTS
+      : AGENTS.filter((a) => installedCharacterIds.includes(a.agentId))),
+    [installedCharacterIds],
+  );
 
-  const handleAgentSwitch = useCallback((newIndex: number) => {
-    setCurrentAgentIndex(newIndex);
-    pixelStreaming?.emitUIInteraction({
-      EventType: 'agentSwitched',
-      AgentId: newIndex,
-      Agent: AGENTS[newIndex],
-      Timestamp: new Date().toISOString(),
-    });
+  const onAddSlot = selectedInstanceId === ADD_SLOT;
+  const currentInstance = onAddSlot
+    ? null
+    : agentStack.find((i) => i.id === selectedInstanceId) ?? agentStack[0];
+  const activeAgentId = currentInstance?.agentId ?? null;
+  const activeInstanceName = currentInstance?.name?.trim() || null;
+
+  // persona = AI voice + chat memory. Falls back to Grace for characters with
+  // no defined personality and while the Add picker is open. A renamed
+  // instance carries its name into the voice; base Grace also honors the
+  // onboarding custom name.
+  const personaBaseName = (activeAgentId && agentById[activeAgentId]?.name) || 'Grace';
+  const personaCustomName =
+    activeInstanceName
+    ?? (selectedInstanceId === BASE_INSTANCE_ID ? profile?.agent_name ?? null : null);
+  const persona = personalityFor(personaBaseName, personaCustomName);
+  // Chat history is keyed by the ROSTER INSTANCE, not the persona — so two
+  // Marks, a renamed Ava, and base Grace each remember independently (persona
+  // collapses every non-Grace/Mark character onto Grace, which would otherwise
+  // share one history). On the Add slot there's no live chat; park on base.
+  const memoryKey = currentInstance?.id ?? BASE_INSTANCE_ID;
+  const memory = useChatMemory(memoryKey);
+
+  // On-screen label: the instance's name, else the character's catalog name
+  // ("Add" on the picker slot). Decoupled from persona so Ava/Goblin/etc. show
+  // their own name even though the AI voice currently falls back to Grace.
+  const characterName = onAddSlot
+    ? 'Add'
+    : activeInstanceName
+      ?? (selectedInstanceId === BASE_INSTANCE_ID
+        ? profile?.agent_name ?? AGENTS[0].name
+        : (activeAgentId ? agentById[activeAgentId]?.name : null) ?? 'Grace');
+
+  // Ordered switcher carousel: every roster instance, then the Add slot.
+  const agentCarousel = useMemo(
+    () => [...agentStack.map((i) => i.id), ADD_SLOT],
+    [agentStack],
+  );
+
+  const emitAgentSwitch = useCallback((agentId: string, dir: number) => {
+    pixelStreaming?.emitUIInteraction({ EventType: 'agentSwitch', agentId, slideDir: dir });
   }, [pixelStreaming]);
+
+  // Select a carousel target by INSTANCE id (or ADD_SLOT). ADD_SLOT clears the
+  // stage (an unknown id makes UE blank the scene) and opens the picker; a real
+  // instance switches UE to that instance's underlying character.
+  const selectInstance = useCallback((targetId: string, dir: number) => {
+    if (targetId === ADD_SLOT) {
+      addReturnRef.current = onAddSlot
+        ? agentStack[agentStack.length - 1]?.id ?? BASE_INSTANCE_ID
+        : selectedInstanceId;
+      setSelectedInstanceId(ADD_SLOT);
+      setAddPickerOpen(true);
+      emitAgentSwitch('blank', dir); // "blank" card (empty class) -> UE clears the stage. NOT "none" (reserved FName == NAME_None, hits SwapToCharacter's IsNone guard)
+    } else {
+      const inst = agentStack.find((i) => i.id === targetId);
+      setSelectedInstanceId(targetId);
+      setAddPickerOpen(false);
+      if (inst) emitAgentSwitch(inst.agentId, dir);
+    }
+  }, [onAddSlot, agentStack, selectedInstanceId, emitAgentSwitch]);
+
+  const stepAgent = useCallback((delta: 1 | -1) => {
+    if (agentCarousel.length === 0) return;
+    const idx = agentCarousel.indexOf(selectedInstanceId);
+    const base = idx < 0 ? 0 : idx;
+    const next = (base + delta + agentCarousel.length) % agentCarousel.length;
+    selectInstance(agentCarousel[next], delta);
+  }, [agentCarousel, selectedInstanceId, selectInstance]);
+
+  const handlePickAgent = useCallback((agentId: string) => {
+    const id = addInstance(agentId);
+    setSelectedInstanceId(id);
+    setAddPickerOpen(false);
+    emitAgentSwitch(agentId, 1);
+  }, [addInstance, emitAgentSwitch]);
+
+  const handleCancelAdd = useCallback(() => {
+    const back = addReturnRef.current || BASE_INSTANCE_ID;
+    const inst = agentStack.find((i) => i.id === back) ?? agentStack[0];
+    setSelectedInstanceId(inst?.id ?? BASE_INSTANCE_ID);
+    setAddPickerOpen(false);
+    if (inst) emitAgentSwitch(inst.agentId, -1);
+  }, [agentStack, emitAgentSwitch]);
+
+  const handleRemoveInstance = useCallback((instanceId: string) => {
+    if (instanceId === BASE_INSTANCE_ID) return;
+    removeInstance(instanceId); // also drops this instance's saved wardrobe (lives on the instance)
+    // Wipe this instance's chat history too, so a freed slot doesn't leave an
+    // orphaned `unclaw.chat.<id>` blob lingering in localStorage.
+    try { localStorage.removeItem(`unclaw.chat.${instanceId}`); } catch { /* ignore */ }
+    if (selectedInstanceId === instanceId) {
+      setSelectedInstanceId(BASE_INSTANCE_ID);
+      emitAgentSwitch(BASE_AGENT, -1);
+    }
+  }, [removeInstance, selectedInstanceId, emitAgentSwitch]);
+
+  // Listen for UE's `installedCharacters` report (sent on connect, on request,
+  // and after each pak mount) and narrow the addable set to it. Shares the PS
+  // response channel with the wardrobe acks; we filter by EventType.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const onResponse = (raw: string) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { return; }
+      if (!parsed || typeof parsed !== 'object') return;
+      const msg = parsed as { EventType?: unknown; ids?: unknown };
+      if (msg.EventType !== 'installedCharacters' || !Array.isArray(msg.ids)) return;
+      const ids = (msg.ids as unknown[]).filter((x): x is string => typeof x === 'string');
+      setInstalledCharacterIds(ids);
+      console.log('[installedCharacters] ←', ids);
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ps = pixelStreaming as any;
+    ps.addResponseEventListener?.('unclaw-installed-router', onResponse);
+    return () => ps.removeResponseEventListener?.('unclaw-installed-router');
+  }, [pixelStreaming]);
+
+  // On connect, prompt UE for the current installed/loaded set.
+  useEffect(() => {
+    if (connectionState !== 'connected' || !pixelStreaming) return;
+    pixelStreaming.emitUIInteraction({ EventType: 'getInstalledCharacters' });
+  }, [connectionState, pixelStreaming]);
 
   // Track whether the AI is currently producing audible output. Voice
   // mode uses this to gate VAD and to detect barge-in.
@@ -1466,7 +1610,7 @@ function AppMain() {
   //
   // No-op when the stream isn't connected or the profile hasn't loaded
   // a wardrobe yet.
-  // sendAndAwaitAck wrapped with retry, used by applySavedWardrobe so
+  // sendAndAwaitAck wrapped with retry, used by applyInstanceWardrobe so
   // the stream-connect init handshake survives the "UE technically
   // connected but not yet ready to process descriptors" race window.
   // Sends → waits up to 1500ms for `{EventType, status: "received"}`
@@ -1490,9 +1634,12 @@ function AppMain() {
     return false;
   }, [sendAndAwaitAck]);
 
-  const applySavedWardrobe = useCallback(async () => {
+  // Apply ONE instance's saved outfit to whatever character is currently live
+  // in UE. Called after a `characterReady` signal (post-swap) and on session
+  // reset. No-op when the instance has no saved wardrobe -> the freshly-spawned
+  // character keeps its authored UE defaults.
+  const applyInstanceWardrobe = useCallback(async (w: WardrobeSettings | null | undefined) => {
     if (!pixelStreaming) return;
-    const w = profile?.wardrobe as WardrobeSettings | null | undefined;
     if (!w) return;
     // Sequential await, UE applies descriptors in order; if one is
     // racing with the prior one we'd see weird intermediate states.
@@ -1509,15 +1656,41 @@ function AppMain() {
       EventType: 'changeLightAngle',
       lightAngle: String(w.lightingAngle ?? 0),
     });
-    const c = ACCENT_COLORS[w.accentColorIndex ?? 0] ?? ACCENT_COLORS[0];
+    // Accent/lighting color: freeform hex override wins over the palette index.
+    const c = w.accentColorHex
+      ? hexToRgb01(w.accentColorHex)
+      : (ACCENT_COLORS[w.accentColorIndex ?? 0] ?? ACCENT_COLORS[0]);
     await sendWithRetry({
       EventType: 'changeLightColor',
       'lightColor.r': c.r.toFixed(3),
       'lightColor.g': c.g.toFixed(3),
       'lightColor.b': c.b.toFixed(3),
     });
-    console.log('[wardrobe] init handshake complete');
-  }, [pixelStreaming, profile?.wardrobe, sendWithRetry]);
+    // Per-category garment colors. Sent AFTER initializeClothing so the
+    // garments exist; UE's changeClothingColor takes both tones + the
+    // category. Each slot's effective color = its custom hex if set, else the
+    // palette preset. Best-effort — skipped categories keep the default.
+    const clothingColors = w.clothingColors;
+    if (clothingColors) {
+      for (const cat of ['top', 'bottom', 'shoes'] as const) {
+        const pair = clothingColors[cat];
+        if (!pair) continue;
+        const c1 = pair.c1Hex ? hexToRgb01(pair.c1Hex) : (CLOTHING_COLORS[pair.c1] ?? CLOTHING_COLORS[0]);
+        const c2 = pair.c2Hex ? hexToRgb01(pair.c2Hex) : (CLOTHING_COLORS[pair.c2] ?? CLOTHING_COLORS[0]);
+        await sendWithRetry({
+          EventType: 'changeClothingColor',
+          wardrobeCategory: cat,
+          'color1.r': c1.r.toFixed(3),
+          'color1.g': c1.g.toFixed(3),
+          'color1.b': c1.b.toFixed(3),
+          'color2.r': c2.r.toFixed(3),
+          'color2.g': c2.g.toFixed(3),
+          'color2.b': c2.b.toFixed(3),
+        });
+      }
+    }
+    console.log('[wardrobe] instance handshake complete');
+  }, [pixelStreaming, sendWithRetry]);
 
   // Mood-accent bleed. The wardrobe lighting color the user picks for
   // the character also seeps into the UI via two CSS vars (`--mood-accent`
@@ -1528,9 +1701,10 @@ function AppMain() {
   // Fires on profile load and every wardrobe save; falls back to the
   // ember-red default if no wardrobe is configured.
   useEffect(() => {
-    const w = profile?.wardrobe as WardrobeSettings | null | undefined;
-    const idx = w?.accentColorIndex ?? 0;
-    const c = ACCENT_COLORS[idx] ?? ACCENT_COLORS[0];
+    const w = currentInstance?.wardrobe;
+    const c = w?.accentColorHex
+      ? { hex: w.accentColorHex, ...hexToRgb01(w.accentColorHex) }
+      : (ACCENT_COLORS[w?.accentColorIndex ?? 0] ?? ACCENT_COLORS[0]);
     const r = Math.round(c.r * 255);
     const g = Math.round(c.g * 255);
     const b = Math.round(c.b * 255);
@@ -1546,25 +1720,123 @@ function AppMain() {
       `rgba(${r}, ${g}, ${b}, 0.22)`);
     root.setProperty('--mood-tint-soft',
       `rgba(${r}, ${g}, ${b}, 0.14)`);
-  }, [profile?.wardrobe]);
+  }, [currentInstance?.wardrobe]);
 
-  // Track whether we've sent initializeClothing for the current
-  // stream connection. Resets on disconnect so a reconnect re-fires.
-  // Without this gate, every profile update (e.g. after save) would
-  // re-send the descriptors, UE just received finalizeClothing, no
-  // need to clobber it with another init.
-  const wardrobeInitSentRef = useRef(false);
+  // Live mirrors so the characterReady listener (subscribed once per stream)
+  // reads the current roster + the instance we're switching INTO without
+  // re-subscribing on every change. `wardrobeTargetRef` follows the selected
+  // real instance; it's already settled by the time UE's post-swap signal
+  // lands (the swap round-trip is far slower than React's commit).
+  const agentStackRef = useRef(agentStack);
+  agentStackRef.current = agentStack;
+  const wardrobeTargetRef = useRef<string>(BASE_INSTANCE_ID);
+  useEffect(() => {
+    if (selectedInstanceId !== ADD_SLOT) wardrobeTargetRef.current = selectedInstanceId;
+  }, [selectedInstanceId]);
+
+  // SWAPS: UE emits `{EventType:"characterReady", agentId}` the instant a
+  // swapped-in character finishes spawning (OnCharacterChanged). That's our cue
+  // to dress it — apply the target instance's saved outfit so it arrives already
+  // wearing the right clothes + colors. No-op when the instance was never
+  // customized (keeps the character's authored defaults).
+  // Flips once the connection is resolved — either UE answered our connect-time
+  // fetchCurrentAgent query, or a swap's characterReady arrived. Gates the
+  // connect retry below; re-armed on disconnect.
+  const initialResolvedRef = useRef(false);
+
+  // SWAPS: UE emits characterReady when a swapped-in character spawns; dress it
+  // with the target instance's saved outfit. No-op when never customized.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const onResponse = (raw: string) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { return; }
+      if (!parsed || typeof parsed !== 'object') return;
+      const msg = parsed as { EventType?: unknown; agentId?: unknown };
+      if (msg.EventType !== 'characterReady') return;
+      initialResolvedRef.current = true;
+      const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current);
+      // Stale/racing-signal guard: only dress when the character UE actually
+      // spawned (msg.agentId) matches the instance we're targeting.
+      if (inst && typeof msg.agentId === 'string' && msg.agentId && inst.agentId !== msg.agentId) {
+        return;
+      }
+      void applyInstanceWardrobe(inst?.wardrobe);
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ps = pixelStreaming as any;
+    ps.addResponseEventListener?.('unclaw-character-ready', onResponse);
+    return () => ps.removeResponseEventListener?.('unclaw-character-ready');
+  }, [pixelStreaming, applyInstanceWardrobe]);
+
+  // RECONCILE on connect: UE answers our fetchCurrentAgent query with the
+  // character it's currently showing (same shape as characterReady). Decide:
+  //   - blank / a DIFFERENT character -> agentSwitch(target); its characterReady
+  //       dresses it (first-load + cross-character reloads ride this path).
+  //   - ALREADY the target character  -> do NOT switch (this is the fix: a
+  //       frontend reload while UE is already on that character would otherwise
+  //       loop switching to itself). Instead re-init this instance's clothes +
+  //       colors directly, since UE may be wearing another Grace instance's
+  //       outfit / engine defaults.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const onResponse = (raw: string) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { return; }
+      if (!parsed || typeof parsed !== 'object') return;
+      const msg = parsed as { EventType?: unknown; agentId?: unknown };
+      if (msg.EventType !== 'fetchCurrentAgent') return;
+      if (initialResolvedRef.current) return; // only the connect-time query acts
+      initialResolvedRef.current = true;
+      const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current)
+        ?? agentStackRef.current[0];
+      if (!inst) return;
+      // UE sends an FName ToString; normalize casing on both sides so the
+      // already-on-target check can't miss on a casing drift.
+      const ueAgent = (typeof msg.agentId === 'string' ? msg.agentId : '').toLowerCase();
+      const onBlank = !ueAgent || ueAgent === 'none' || ueAgent === 'blank';
+      if (!onBlank && ueAgent === inst.agentId.toLowerCase()) {
+        // UE is already showing this character — don't re-switch (would loop on
+        // reload). Just re-apply THIS instance's outfit, since UE may be wearing
+        // another instance's look or the engine defaults.
+        void applyInstanceWardrobe(inst.wardrobe);
+      } else {
+        // Blank or a different character — switch; its characterReady dresses it.
+        emitAgentSwitch(inst.agentId, 1);
+      }
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ps = pixelStreaming as any;
+    ps.addResponseEventListener?.('unclaw-fetch-current-agent', onResponse);
+    return () => ps.removeResponseEventListener?.('unclaw-fetch-current-agent');
+  }, [pixelStreaming, applyInstanceWardrobe, emitAgentSwitch]);
+
+  // Connect-time driver: ask UE which character it's on, and KEEP asking until
+  // it answers. On a cold launch the stream connects several seconds before UE's
+  // character subsystem is ready to answer descriptors, so the early queries go
+  // unanswered — we must poll through the whole boot, not give up after a few
+  // tries (that left the user stranded on the blank stage until a manual switch).
+  // The reconcile listener above flips initialResolvedRef + acts on the reply.
+  // Re-armed on disconnect so a reconnect re-reconciles.
   useEffect(() => {
     if (connectionState !== 'connected') {
-      wardrobeInitSentRef.current = false;
+      initialResolvedRef.current = false;
       return;
     }
-    if (wardrobeInitSentRef.current) return;
-    if (!pixelStreaming || !profile?.wardrobe) return;
-    wardrobeInitSentRef.current = true;
-    console.log('[wardrobe-init] starting handshake with', profile.wardrobe);
-    void applySavedWardrobe();
-  }, [connectionState, pixelStreaming, profile?.wardrobe, applySavedWardrobe]);
+    let attempts = 0;
+    const ask = () => {
+      if (initialResolvedRef.current) return;
+      attempts += 1;
+      pixelStreaming?.emitUIInteraction({ EventType: 'fetchCurrentAgent' });
+    };
+    ask(); // fire immediately on connect
+    const MAX = 90; // poll ~90s — well past UE's cold-boot window — before bailing
+    const id = setInterval(() => {
+      if (initialResolvedRef.current || attempts >= MAX) { clearInterval(id); return; }
+      ask();
+    }, 1000);
+    return () => clearInterval(id);
+  }, [connectionState, pixelStreaming]);
 
   // Soft session reset, tells Unreal to drop back to neutral pose +
   // clear any in-progress speech, then immediately re-applies the
@@ -1578,9 +1850,14 @@ function AppMain() {
       Timestamp: new Date().toISOString(),
     });
     // Re-apply on the next tick so UE has a moment to process the
-    // reset before we tell it which outfit to wear.
-    setTimeout(() => { void applySavedWardrobe(); }, 50);
-  }, [pixelStreaming, applySavedWardrobe]);
+    // reset before we tell it which outfit to wear. Dresses the live
+    // instance from its own saved wardrobe (read off a ref so this stays
+    // stale-free without re-creating the callback every roster change).
+    setTimeout(() => {
+      const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current);
+      void applyInstanceWardrobe(inst?.wardrobe);
+    }, 50);
+  }, [pixelStreaming, applyInstanceWardrobe]);
 
   // Fetch the user profile, but only once the stream is connected.
   // Null -> open the onboarding wizard in firstRun mode. Any non-null
@@ -1930,31 +2207,19 @@ function AppMain() {
   // customization sees the new values as `initial`, then exits the
   // mode (which separately fires wardrobeModeOff via the lifecycle
   // effect).
-  const handleSaveWardrobe = useCallback(async (settings: WardrobeSettings) => {
+  const handleSaveWardrobe = useCallback((settings: WardrobeSettings) => {
     emitWardrobeDescriptor({ EventType: 'finalizeClothing' });
-    try {
-      const updated = await patchSettings({ wardrobe: settings });
-      setProfile(updated);
-    } catch (err) {
-      console.warn('[wardrobe] save to soul failed', err);
-    }
+    // Persist to the INSTANCE being customized (the live one), not a global
+    // profile. wardrobeTargetRef tracks the selected real instance, so this
+    // is stale-free and lands on the right roster slot.
+    setInstanceWardrobe(wardrobeTargetRef.current, settings);
     setCustomizationActive(false);
-  }, [emitWardrobeDescriptor]);
+  }, [emitWardrobeDescriptor, setInstanceWardrobe]);
 
-  // wardrobeModeOn / wardrobeModeOff, fire on entry / exit of the
-  // full-screen customization overlay. Saving sets customizationActive
-  // to false (handler above), which naturally triggers wardrobeModeOff
-  // through this effect's cleanup.
-  useEffect(() => {
-    if (!pixelStreaming) return;
-    if (customizationActive) {
-      emitWardrobeDescriptor({ EventType: 'wardrobeModeOn' });
-      return () => {
-        emitWardrobeDescriptor({ EventType: 'wardrobeModeOff' });
-      };
-    }
-    return undefined;
-  }, [customizationActive, pixelStreaming, emitWardrobeDescriptor]);
+  // wardrobeModeOn / wardrobeModeOff are now owned entirely by
+  // CustomizationOverlay, which toggles them per active view (off in the hair
+  // detail, on elsewhere) and drops to off on unmount/close. App no longer
+  // fires them, so the two don't race across AnimatePresence's delayed unmount.
 
   // Active sheet content. App owns the routing so the SheetPanel
   // doesn't need to know about the data layer.
@@ -1984,14 +2249,10 @@ function AppMain() {
     }
   }, [activeWidget, refreshKey]);
 
-  // Cycle through personas, chevron-prev / chevron-next versions for
-  // the AgentSwitcher row above the input bar.
-  const handlePrevPersona = useCallback(() => {
-    handleAgentSwitch((currentAgentIndex - 1 + AGENTS.length) % AGENTS.length);
-  }, [currentAgentIndex, handleAgentSwitch]);
-  const handleNextPersona = useCallback(() => {
-    handleAgentSwitch((currentAgentIndex + 1) % AGENTS.length);
-  }, [currentAgentIndex, handleAgentSwitch]);
+  // Chevron-prev / chevron-next for the AgentSwitcher row above the input bar.
+  // Steps through the roster carousel ([...roster, Add slot]).
+  const handlePrevPersona = useCallback(() => stepAgent(-1), [stepAgent]);
+  const handleNextPersona = useCallback(() => stepAgent(1), [stepAgent]);
 
   return (
     <div className="relative flex-1 min-h-0 overflow-hidden">
@@ -2026,10 +2287,28 @@ function AppMain() {
         {customizationActive && (
           <CustomizationOverlay
             key="customization"
-            initial={profile?.wardrobe as WardrobeSettings | null | undefined}
+            initial={currentInstance?.wardrobe ?? null}
             onEmit={emitWardrobeDescriptor}
             onSave={handleSaveWardrobe}
             onCancel={handleExitCustomization}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Add-a-character picker, shown over the blank stage when the switcher
+          cycles onto the Add slot (UE cleared to an empty scene). */}
+      <AnimatePresence>
+        {addPickerOpen && isConnected && (
+          <AddCharacterPicker
+            key="add-picker"
+            addable={addableAgents}
+            roster={agentStack}
+            agentById={agentById}
+            baseInstanceId={BASE_INSTANCE_ID}
+            onPick={handlePickAgent}
+            onRename={renameInstance}
+            onRemove={handleRemoveInstance}
+            onCancel={handleCancelAdd}
           />
         )}
       </AnimatePresence>
@@ -2048,7 +2327,7 @@ function AppMain() {
           stream AND some kind of session (signed-in OR guest mode).
           When customization mode is on, hide all of it so Grace
           stands alone in the fitting room. */}
-      {isConnected && hasSession && !customizationActive && (
+      {isConnected && hasSession && !customizationActive && !addPickerOpen && (
         <>
       <Greeting
         userName={
@@ -2131,7 +2410,7 @@ function AppMain() {
           states, so typing/voice/textarea-focus state survives toggles.
           Z-index 38 sits above the chat pane (35) so the bar reads
           on top of the gray pane surface, and below the titlebar (50). */}
-      {isConnected && hasSession && !customizationActive && (
+      {isConnected && hasSession && !customizationActive && !addPickerOpen && (
         <div
           style={{
             position: 'absolute',
@@ -2261,7 +2540,7 @@ function AppMain() {
               <div style={{ pointerEvents: 'auto' }}>
                 <InputBar
                   ref={inputBarRef}
-                  personaName={persona.displayName}
+                  personaName={characterName}
                   isSending={isSending}
                   disabled={!isConnected}
                   hasAttachments={attachedImages.length > 0}
@@ -2308,8 +2587,6 @@ function AppMain() {
                   canAttachImages={canAttachImages}
                   chatPaneOpen={chatPaneOpen}
                   onToggleChatPane={() => setChatPaneOpen((o) => !o)}
-                  comingSoon={persona.id === 'mark'}
-                  comingSoonMessage="Mark is coming soon"
                 />
               </div>
             </motion.div>
@@ -2370,11 +2647,11 @@ function AppMain() {
           a session exists (authed or guest); conversation history
           comes from the per-persona localStorage memory. Hidden
           while customization mode is active. */}
-      {isConnected && hasSession && !customizationActive && (
+      {isConnected && hasSession && !customizationActive && !addPickerOpen && (
         <ChatPane
           open={chatPaneOpen}
           turns={memory.turns}
-          personaName={persona.displayName}
+          personaName={characterName}
           width={chatPaneWidth}
           toolEvents={toolEvents}
           escalating={escalating}
@@ -2390,7 +2667,7 @@ function AppMain() {
           drag region overlay. The wrapper's `right: 140` leaves
           room for the existing titlebar window controls (AS / pin /
           minimize / close-window). */}
-      {isConnected && hasSession && chatPaneOpen && !customizationActive && (
+      {isConnected && hasSession && chatPaneOpen && !customizationActive && !addPickerOpen && (
         <div
           style={{
             position: 'absolute',
@@ -2406,7 +2683,7 @@ function AppMain() {
           } as React.CSSProperties}
         >
           <ChatPaneHeader
-            personaName={persona.displayName}
+            personaName={characterName}
             onClose={() => setChatPaneOpen(false)}
           />
         </div>
