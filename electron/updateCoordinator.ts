@@ -458,10 +458,21 @@ export async function runUpdateCheck(window: BrowserWindow | null): Promise<Upda
     ledger.app = app.getVersion();
 
     const work: Array<{ id: UpdateCategoryId; entry: CategoryEntry }> = [];
-    const cats = Object.entries(manifest.categories) as Array<[UpdateCategoryId, CategoryEntry]>;
+    // The app shell is owned EXCLUSIVELY by electron-updater (Squirrel). Its
+    // snapshot row is driven by the app-shell state bridge, NOT the manifest.
+    // Drop any `app` entry here so a stale/older `app` version in the remote
+    // manifest can never be marked "pending" — that mismatch (installed app
+    // newer than the manifest advertised) caused a permanent
+    // "updates ready / restart required" loop.
+    const cats = (Object.entries(manifest.categories) as Array<[UpdateCategoryId, CategoryEntry]>)
+      .filter(([id]) => id !== 'app');
     for (const [id, entry] of cats) {
       const installed = ledger[id];
-      const upToDate = installed === entry.version;
+      // Up to date when we already hold this exact version. Defensive: also
+      // treat it as up-to-date when the installed tag sorts at or after the
+      // manifest's (date-style tags compare lexicographically), so a stale
+      // manifest can never force a perpetual re-download/restart.
+      const upToDate = installed != null && installed >= entry.version;
       snapshot.categories.push({
         id,
         state: upToDate ? 'up-to-date' : 'pending',
