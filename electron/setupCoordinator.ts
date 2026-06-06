@@ -762,6 +762,7 @@ function downloadOnce(
   destPath: string,
   expectedSize: number,
   onProgress: (downloaded: number, total: number) => void,
+  redirectsLeft = 5,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const partialPath = `${destPath}.partial`;
@@ -776,10 +777,16 @@ function downloadOnce(
     if (resumeFrom > 0) headers['Range'] = `bytes=${resumeFrom}-`;
 
     const req = https.get(url, { headers }, (res) => {
-      // Follow redirects manually (R2 + Cloudflare may issue them).
+      // Follow redirects manually (R2 + Cloudflare may issue them). Cap the
+      // depth so a misconfigured redirect loop rejects instead of recursing
+      // until the stack overflows.
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        downloadOnce(window, res.headers.location, destPath, expectedSize, onProgress)
+        if (redirectsLeft <= 0) {
+          reject(new Error(`too many redirects fetching ${path.basename(destPath)}`));
+          return;
+        }
+        downloadOnce(window, res.headers.location, destPath, expectedSize, onProgress, redirectsLeft - 1)
           .then(resolve, reject);
         return;
       }
@@ -846,6 +853,132 @@ export function sha256File(filePath: string): Promise<string> {
     stream.on('end', () => resolve(hash.digest('hex')));
     stream.on('error', reject);
   });
+}
+
+// ----------------------------------------------------------------------
+// Character pak download. Used by the store: a purchased + entitlement-
+// checked character pak is fetched on demand from the store Worker's
+// short-lived presigned URL, verified by SHA-256, and extracted into the
+// runtime so UE can mount it and soul can find its voices.
+//
+// `asset.url` is the live (presigned) URL handed back by the store Worker,
+// NOT the manifest reference URL. sha256/sizeBytes come from the client
+// manifest (setupManifest.characterPaks[id]) so we verify the exact bytes.
+//
+// Layout (so UE pak mounting + soul voice lookup both have a stable home):
+//   runtime/characters/<id>/        <- extracted pak contents
+// The UE-side mount path + soul voice symlink/copy is finished by the pak
+// pipeline (the pak format is still being finalized); this function owns
+// the download + verify + extract half.
+// ----------------------------------------------------------------------
+function assertSafeCharacterId(characterId: string): void {
+  // Hard guard: characterId is renderer-supplied and gets joined into paths we
+  // later rm -rf + extract into. Reject anything that isn't a plain id so a
+  // value like `../../foo` can never escape the runtime dir.
+  if (!/^[a-z0-9_-]+$/i.test(characterId)) {
+    throw new Error(`invalid characterId: ${characterId}`);
+  }
+}
+
+export function characterPakDir(characterId: string): string {
+  assertSafeCharacterId(characterId);
+  return path.join(getRuntimeDir(), 'characters', characterId);
+}
+
+/** Flat dir of owned `*.pak` files. Passed to run_soul.sh as
+ *  UNCLAW_CHARACTERS_SRC; on every launch run_soul stages these into the UE
+ *  sandbox container's Saved/Paks so UE boot-mounts them before BeginPlay. This
+ *  is the canonical, survives-everything home for purchased paks. */
+export function characterPaksStageDir(): string {
+  return path.join(getRuntimeDir(), 'character-paks');
+}
+
+/** The UE app's sandbox container Saved/Paks. UE (sandboxed) can only read paks
+ *  that physically live inside its own container, so for a MID-SESSION mount
+ *  (no relaunch) the pak must be copied here, then mounted via the
+ *  `mountCharacterPak` descriptor. Must match the path run_soul.sh stages into.
+ *  Electron itself is not sandboxed, so it can write here freely. */
+export function ueContainerPaksDir(): string {
+  return path.join(
+    app.getPath('home'),
+    'Library/Containers/com.YourCompany.AudioTestProject02/Data/Library',
+    'Application Support/Epic/AudioTestProject02/Saved/Paks',
+  );
+}
+
+export interface InstalledPak {
+  /** Where the pak was extracted (debug / cleanup). */
+  extractDir: string;
+  /** Canonical owned copy under runtime/character-paks/<id>.pak. */
+  stagedPak: string;
+  /** Copy inside the UE sandbox container, or null if the container wasn't
+   *  reachable (UE not launched yet). null => no mid-session mount; the pak
+   *  still boot-mounts on the next launch via UNCLAW_CHARACTERS_SRC. */
+  containerPak: string | null;
+}
+
+export async function downloadAndExtractCharacterPak(
+  window: BrowserWindow,
+  characterId: string,
+  asset: { url: string; sha256: string | null; sizeBytes: number },
+  onProgress: (downloaded: number, total: number) => void,
+): Promise<InstalledPak> {
+  assertSafeCharacterId(characterId);
+  const root = getRuntimeDir();
+  const destDir = characterPakDir(characterId);
+  const zipPath = path.join(root, `char-${characterId}-download.zip`);
+
+  // Reuse the resumable, SHA-verified downloader the base bundles use.
+  await downloadWithResumeAndVerify(window, asset, zipPath, onProgress);
+
+  // Fresh extract: nuke any partial/previous install first.
+  fs.rmSync(destDir, { recursive: true, force: true });
+  fs.mkdirSync(destDir, { recursive: true });
+  await runCommand(window, '/usr/bin/ditto', ['-x', '-k', zipPath, destDir], { stream: true });
+  try { fs.unlinkSync(zipPath); } catch { /* ignore */ }
+
+  // Strip quarantine on any extracted binaries/content, same as the base
+  // bundle, so Gatekeeper never blocks pak content on first mount.
+  await runCommand(
+    window,
+    '/usr/bin/xattr',
+    ['-dr', 'com.apple.quarantine', destDir],
+    { stream: true, ignoreNonZeroExit: true },
+  );
+
+  // The zip carries exactly one `.pak` (named <id>.pak at upload time). Find it
+  // defensively rather than assuming the name, so a re-cook with a different
+  // internal name still installs.
+  const pakName = fs.readdirSync(destDir).find((f) => f.toLowerCase().endsWith('.pak'));
+  if (!pakName) {
+    throw new Error(`no .pak found in extracted character bundle for ${characterId}`);
+  }
+  const srcPak = path.join(destDir, pakName);
+  // Normalize the staged filename to <id>.pak so run_soul + mount paths are
+  // deterministic regardless of the cook's chunk name.
+  const stagedName = `${characterId}.pak`;
+
+  // (1) Canonical owned copy → UNCLAW_CHARACTERS_SRC (boot-mount source).
+  const stageDir = characterPaksStageDir();
+  fs.mkdirSync(stageDir, { recursive: true });
+  const stagedPak = path.join(stageDir, stagedName);
+  fs.copyFileSync(srcPak, stagedPak);
+
+  // (2) Best-effort copy into the UE sandbox container for an immediate
+  // mid-session mount. Fails softly when the container doesn't exist yet (UE
+  // never launched) — the boot-mount path covers that case on next launch.
+  let containerPak: string | null = null;
+  try {
+    const containerDir = ueContainerPaksDir();
+    fs.mkdirSync(containerDir, { recursive: true });
+    containerPak = path.join(containerDir, stagedName);
+    fs.copyFileSync(srcPak, containerPak);
+  } catch (err) {
+    console.warn(`[pak] container stage skipped for ${characterId}: ${(err as Error).message}`);
+    containerPak = null;
+  }
+
+  return { extractDir: destDir, stagedPak, containerPak };
 }
 
 // ----------------------------------------------------------------------

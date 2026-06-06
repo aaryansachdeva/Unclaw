@@ -11,6 +11,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { X } from 'lucide-react';
 import type { Turn } from '../hooks/useChatMemory';
+import { PulseGrid } from './PulseGrid';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -619,32 +620,37 @@ function ToolEventRow({
     <motion.div
       layout
       initial={{ opacity: 0, y: 3 }}
-      animate={
-        live
-          ? { opacity: [0.55, 0.95, 0.55], y: 0 }
-          : { opacity: 0.62, y: 0 }
-      }
-      transition={
-        live
-          ? {
-              opacity: { duration: 1.6, repeat: Infinity, ease: 'easeInOut' },
-              y: { duration: 0.22, ease: [0.16, 1, 0.3, 1] },
-            }
-          : { duration: 0.22, ease: [0.16, 1, 0.3, 1] }
-      }
+      animate={{ opacity: live ? 1 : 0.62, y: 0 }}
+      transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
       style={{
         marginTop,
-        fontSize: 12,
-        fontStyle: 'italic',
-        color: 'var(--text-secondary)',
-        letterSpacing: '0.005em',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 7,
         // Tiny left inset so tool rows visually nest under the
         // assistant turns above them rather than competing for the
         // same starting edge.
         paddingLeft: 4,
       }}
     >
-      {label}
+      {/* Accent-tinted ripple loader on the row that's currently active. */}
+      {live && <PulseGrid size={14} style={{ marginBottom: 1 }} />}
+      <motion.span
+        animate={live ? { opacity: [0.6, 0.95, 0.6] } : { opacity: 1 }}
+        transition={
+          live
+            ? { duration: 1.6, repeat: Infinity, ease: 'easeInOut' }
+            : { duration: 0.2 }
+        }
+        style={{
+          fontSize: 12,
+          fontStyle: 'italic',
+          color: 'var(--text-secondary)',
+          letterSpacing: '0.005em',
+        }}
+      >
+        {label}
+      </motion.span>
     </motion.div>
   );
 }

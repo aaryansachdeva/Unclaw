@@ -19,7 +19,8 @@ import fs from 'fs';
 import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
 import { startSoul, stopSoul, getSoulSnapshot, getSoulPorts } from './soulSupervisor';
-import { getSetupSnapshot, runSetup } from './setupCoordinator';
+import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir } from './setupCoordinator';
+import { MANIFEST } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
 
@@ -1086,6 +1087,124 @@ ipcMain.handle('apiKeys:clear', () => {
 // IPC: renderer can also kick off a screenshot manually (e.g. a button).
 ipcMain.on('screenshot:trigger', () => {
   void triggerScreenshot();
+});
+
+// ----------------------------------------------------------------------
+// unclaw:// deep link. Used by the character store: after a Polar checkout
+// completes in the system browser, the success page bounces to
+// `unclaw://store/purchased` which re-focuses the app and tells the renderer
+// to refresh entitlements immediately (polling is the fallback). The link
+// carries no secrets — it is purely a "wake up and refresh" signal.
+// ----------------------------------------------------------------------
+const DEEP_LINK_PROTOCOL = 'unclaw';
+let pendingDeepLink: string | null = null;
+
+function handleDeepLink(url: string | undefined | null) {
+  if (!url || typeof url !== 'string') return;
+  if (!url.startsWith(`${DEEP_LINK_PROTOCOL}://`)) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('deep-link', url);
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  } else {
+    // Cold start: the renderer pulls this once it mounts.
+    pendingDeepLink = url;
+  }
+}
+
+// Single-instance: a second launch (e.g. the OS opening an unclaw:// link
+// while we're already running) hands its argv to the primary instance.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_evt, argv) => {
+    // Windows/Linux deliver the deep link as an argv entry.
+    const link = argv.find((a) => a.startsWith(`${DEEP_LINK_PROTOCOL}://`));
+    if (link) handleDeepLink(link);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
+// macOS delivers deep links through this event (must be registered before
+// whenReady to catch a cold-start launch).
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  handleDeepLink(url);
+});
+
+// Register as the default handler for unclaw:// .
+if (process.defaultApp && process.argv.length >= 2) {
+  app.setAsDefaultProtocolClient(DEEP_LINK_PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
+} else {
+  app.setAsDefaultProtocolClient(DEEP_LINK_PROTOCOL);
+}
+
+// Renderer pulls any link that arrived before it mounted.
+ipcMain.handle('deep-link:get-pending', () => {
+  const link = pendingDeepLink;
+  pendingDeepLink = null;
+  return link;
+});
+
+// IPC: download + extract a purchased character pak. The renderer fetches the
+// short-lived presigned URL from the store Worker (it holds the auth token)
+// and passes { characterId, url } here; main reads the pak's sha256 + sizeBytes
+// from its own manifest (the single client source of truth, same as the base
+// bundles) and runs the heavy download/verify/extract.
+ipcMain.handle(
+  'character-store:download-pak',
+  async (_event, args: { characterId: string; url: string }) => {
+    if (!mainWindow || !args?.characterId || !args?.url) {
+      return { ok: false, error: 'invalid_args' };
+    }
+    const meta = MANIFEST.characterPaks?.[args.characterId];
+    if (!meta) return { ok: false, error: 'pak_unavailable' };
+    try {
+      const installed = await downloadAndExtractCharacterPak(
+        mainWindow,
+        args.characterId,
+        { url: args.url, sha256: meta.sha256, sizeBytes: meta.sizeBytes },
+        (downloaded, total) => {
+          mainWindow?.webContents.send('character-store:pak-progress', {
+            characterId: args.characterId,
+            downloaded,
+            total,
+          });
+        },
+      );
+      // `mountPath` (the in-container copy) lets the renderer mount the pak
+      // mid-session via the `mountCharacterPak` descriptor — no relaunch. null
+      // when the UE container wasn't reachable; the pak still boot-mounts next
+      // launch from UNCLAW_CHARACTERS_SRC.
+      return { ok: true, dir: installed.extractDir, mountPath: installed.containerPak };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  },
+);
+
+// IPC: which character paks are installed locally (downloaded to the flat
+// character-paks staging dir). The renderer uses this as the source of truth
+// for paid-character "installed" state, instead of depending solely on UE's
+// installedCharacters report (which is null until UE answers, and a packaged
+// build that strips paid paks would otherwise look "all installed").
+ipcMain.handle('character-store:list-installed', async () => {
+  try {
+    const dir = characterPaksStageDir();
+    if (!fs.existsSync(dir)) return { ids: [] as string[] };
+    const ids = fs
+      .readdirSync(dir)
+      .filter((f) => f.toLowerCase().endsWith('.pak'))
+      .map((f) => f.replace(/\.pak$/i, ''));
+    return { ids };
+  } catch {
+    return { ids: [] as string[] };
+  }
 });
 
 app.whenReady().then(() => {

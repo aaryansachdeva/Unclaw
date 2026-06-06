@@ -19,6 +19,9 @@ interface Props {
   values: IdentityValues;
   onChange: (next: IdentityValues) => void;
   onAdvance: () => void;
+  /** Hide the name field — set when the name already came from sign-in, so we
+   *  don't ask for it twice. The value is still carried in `values.name`. */
+  hideName?: boolean;
 }
 
 const FIELD_BASE: React.CSSProperties = {
@@ -165,7 +168,7 @@ interface TzOption {
   label: string;
 }
 
-export function IdentityStep({ values, onChange, onAdvance }: Props) {
+export function IdentityStep({ values, onChange, onAdvance, hideName }: Props) {
   const tzOptions: TzOption[] = useMemo(() => {
     const opts: TzOption[] = TZ_CATALOG.map((entry) => ({
       tz: entry.id,
@@ -190,8 +193,8 @@ export function IdentityStep({ values, onChange, onAdvance }: Props) {
     <div style={{ display: 'flex', gap: 28, alignItems: 'flex-start' }}>
       <div style={{ width: 180, flexShrink: 0, paddingTop: 2 }}>
         <StepHeader
-          title="Let's start with you."
-          subtitle="A name, a city, and your local time."
+          title={hideName ? `Nice to meet you${values.name ? `, ${values.name}` : ''}.` : "Let's start with you."}
+          subtitle={hideName ? 'A city and your local time.' : 'A name, a city, and your local time.'}
         />
       </div>
 
@@ -204,19 +207,21 @@ export function IdentityStep({ values, onChange, onAdvance }: Props) {
           gap: 12,
         }}
       >
-        <FieldLabel text="What should I call you?">
-          <input
-            type="text"
-            autoFocus
-            value={values.name}
-            onChange={(e) => onChange({ ...values, name: e.target.value })}
-            onKeyDown={onNameKey}
-            placeholder="Your name"
-            style={FIELD_BASE}
-            onFocus={(e) => applyFocus(e.target)}
-            onBlur={(e) => applyBlur(e.target)}
-          />
-        </FieldLabel>
+        {!hideName && (
+          <FieldLabel text="What should I call you?">
+            <input
+              type="text"
+              autoFocus
+              value={values.name}
+              onChange={(e) => onChange({ ...values, name: e.target.value })}
+              onKeyDown={onNameKey}
+              placeholder="Your name"
+              style={FIELD_BASE}
+              onFocus={(e) => applyFocus(e.target)}
+              onBlur={(e) => applyBlur(e.target)}
+            />
+          </FieldLabel>
+        )}
 
         <div style={{ display: 'flex', gap: 12 }}>
           <FieldLabel text="City (optional)" style={{ flex: 1 }}>

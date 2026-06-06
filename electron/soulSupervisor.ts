@@ -309,6 +309,14 @@ function spawnSoul(window: BrowserWindow): boolean {
     // sensible default at boot (typically the host display dimensions in
     // -RenderOffScreen), then resizes on demand as the browser fires.
     UNCLAW_UE_RES_AUTO: process.env.UNCLAW_UE_RES_AUTO ?? '1',
+    // Flat dir of owned character paks. run_soul.sh stages any *.pak here into
+    // the UE sandbox container's Saved/Paks at launch so purchased characters
+    // boot-mount before BeginPlay. run_soul guards on the dir existing, so this
+    // is a harmless no-op until the first character is downloaded (and in dev,
+    // where paks are baked into the .app's Content/Paks). Must match
+    // setupCoordinator.characterPaksStageDir().
+    UNCLAW_CHARACTERS_SRC:
+      process.env.UNCLAW_CHARACTERS_SRC ?? path.join(getRuntimeDir(), 'character-paks'),
     PATH: [
       '/opt/homebrew/bin',
       '/usr/local/bin',

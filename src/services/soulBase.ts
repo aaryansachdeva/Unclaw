@@ -102,11 +102,3 @@ export function getSignallingPlayerUrl(): string {
   const p = cached ?? FALLBACK_PORTS;
   return `ws://127.0.0.1:${p.signallingPlayer}`;
 }
-
-/** Streamer-side signalling WebSocket URL (UE connects here). Mainly
- *  exposed for diagnostics, the renderer rarely needs this since UE's
- *  connection is owned by soul, not the renderer. */
-export function getSignallingStreamerUrl(): string {
-  const p = cached ?? FALLBACK_PORTS;
-  return `ws://127.0.0.1:${p.signallingStreamer}`;
-}

@@ -5,8 +5,7 @@
 // parallel (driven by /onboarding/welcome from soul); this surface is
 // just the visual anchor for that voice.
 
-import { motion } from 'framer-motion';
-import logoUrl from '../../assets/logo_lg.png';
+import { BrandLogo } from './BrandLogo';
 import { TypewriterTitle } from '../Auth/TypewriterTitle';
 
 export function WelcomeStep() {
@@ -16,59 +15,12 @@ export function WelcomeStep() {
         display: 'flex',
         alignItems: 'center',
         gap: 36,
-        padding: '14px 0 10px',
+        // Nudge the whole row (logo + title block) a little right so it
+        // sits more centered in the panel rather than hugging the edge.
+        padding: '14px 0 10px 52px',
       }}
     >
-      <div
-        style={{
-          position: 'relative',
-          width: 168,
-          height: 168,
-          flexShrink: 0,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
-      >
-        {/* Soft accent halo behind the logo — same recipe as the
-            sign-in screen's logo, dialed slightly smaller to fit the
-            wizard panel without crowding the typewriter title. */}
-        <span
-          aria-hidden
-          style={{
-            position: 'absolute',
-            inset: -18,
-            borderRadius: '50%',
-            background:
-              'radial-gradient(circle, rgba(196, 68, 68, 0.22) 0%, rgba(196, 68, 68, 0.06) 50%, transparent 75%)',
-            filter: 'blur(10px)',
-            pointerEvents: 'none',
-          }}
-        />
-        <motion.img
-          src={logoUrl}
-          alt="UnClaw"
-          animate={{
-            filter: [
-              'drop-shadow(0 0 16px rgba(196, 68, 68, 0.26))',
-              'drop-shadow(0 0 30px rgba(196, 68, 68, 0.46))',
-              'drop-shadow(0 0 16px rgba(196, 68, 68, 0.26))',
-            ],
-          }}
-          transition={{
-            duration: 3.2,
-            repeat: Infinity,
-            ease: 'easeInOut',
-          }}
-          style={{
-            width: 168,
-            height: 168,
-            objectFit: 'contain',
-            position: 'relative',
-            zIndex: 1,
-          }}
-        />
-      </div>
+      <BrandLogo size={168} />
 
       <div
         style={{

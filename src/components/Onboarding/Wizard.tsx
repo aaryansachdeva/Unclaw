@@ -20,7 +20,11 @@ import { IdentityStep, type IdentityValues } from './IdentityStep';
 import { VibeStep } from './VibeStep';
 import { InterestsStep, type InterestsValues } from './InterestsStep';
 import { WelcomeStep } from './WelcomeStep';
+import { BrandLogo } from './BrandLogo';
+import { ClawsStep } from './ClawsStep';
 import { ConnectionsStep } from './ConnectionsStep';
+import { AuthPanel } from '../Auth/AuthPanel';
+import type { AuthSession, AuthUser } from '../../services/auth';
 import type { VibeValues } from './VibeStep';
 import {
   DEFAULT_VIBE,
@@ -66,10 +70,24 @@ interface WizardProps {
    *  user types — they see their name take effect before they even
    *  hit Continue. Empty string while the field is blank. */
   onIdentityNameChange?: (name: string) => void;
+  /** Whether the user is signed in. Drives the auth step: while false on
+   *  first-run, the wizard shows the welcome + login steps; signing in
+   *  auto-advances past auth. */
+  hasSession?: boolean;
+  /** The signed-in user (once available). Its name pre-seeds Identity so we
+   *  don't ask for the name twice. */
+  authUser?: AuthUser | null;
+  /** Completes a sign-in from the auth step (App sets token + user). */
+  onSignedIn?: (session: AuthSession) => void;
 }
 
-type StepKey = 'welcome' | 'identity' | 'vibe' | 'interests' | 'llm' | 'voice';
-const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'identity', 'vibe', 'interests', 'llm', 'voice'];
+type StepKey = 'welcome' | 'auth' | 'claws' | 'identity' | 'vibe' | 'interests' | 'llm' | 'voice';
+// First-run for a NOT-yet-signed-in user: lead with the stream, welcome, fold
+// login in as a step, then introduce Claws (the in-app currency) before setup.
+const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'auth', 'claws', 'identity', 'vibe', 'interests', 'llm', 'voice'];
+// First-run when ALREADY signed in (e.g. fresh device, profile not synced):
+// skip welcome + auth, but still introduce Claws before profile setup.
+const FIRST_RUN_STEPS_AUTHED: StepKey[] = ['claws', 'identity', 'vibe', 'interests', 'llm', 'voice'];
 const EDIT_STEPS: StepKey[] = ['identity', 'vibe', 'interests', 'llm', 'voice'];
 
 /** localStorage key for the onboarding-mute preference. Persisted so a
@@ -99,18 +117,41 @@ export function Wizard({
   onChatResult,
   onCancel,
   onIdentityNameChange,
+  hasSession = false,
+  authUser,
+  onSignedIn,
 }: WizardProps) {
   const reduce = useReducedMotion() ?? false;
 
-  const stepOrder = firstRun ? FIRST_RUN_STEPS : EDIT_STEPS;
+  // Whether the user was already signed in when the wizard mounted. If so on
+  // first-run (e.g. a fresh device whose profile hasn't synced), skip the
+  // welcome + login steps and go straight to profile setup. Captured once.
+  const signedInAtMountRef = useRef(hasSession);
+  const stepOrder = firstRun
+    ? (signedInAtMountRef.current ? FIRST_RUN_STEPS_AUTHED : FIRST_RUN_STEPS)
+    : EDIT_STEPS;
   const [step, setStep] = useState<StepKey>(stepOrder[0]);
 
   const [identity, setIdentity] = useState<IdentityValues>(() => ({
-    name:     initial?.name ?? '',
+    // Seed the name from an existing profile, else from the signed-in user
+    // (Google/Discord profile or the email sign-up's name) so we never ask
+    // for it twice.
+    name:     initial?.name ?? authUser?.name ?? '',
     pronouns: initial?.pronouns ?? '',
     city:     initial?.city ?? '',
     timezone: initial?.timezone ?? detectTimezone(),
   }));
+  // True when the name came from auth (not typed) — IdentityStep hides the
+  // name field in that case so we don't ask again.
+  const nameFromAuth = !initial?.name && !!authUser?.name;
+  // When the user signs in DURING the wizard (auth step), the identity
+  // initializer has already run with an empty name — seed it now from the
+  // freshly-available account name (unless they've already typed one).
+  useEffect(() => {
+    const n = authUser?.name;
+    if (n) setIdentity((prev) => (prev.name.trim() ? prev : { ...prev, name: n }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser?.name]);
 
   const [vibe, setVibe] = useState<VibeValues>(() => ({
     formality:  initial?.vibe_formality  ?? DEFAULT_VIBE.vibe_formality,
@@ -274,11 +315,23 @@ export function Wizard({
   // where the verify panel lives.
   const canAdvance = step === 'welcome'
     ? true
+    : step === 'auth'
+    ? hasSession            // can't leave the login step until signed in
     : step === 'identity'
     ? hasName
     : step === 'voice'
     ? canFinish
     : true;
+
+  // Auto-advance off the auth step the moment the user signs in, so login
+  // feels like a seamless beat rather than "now press Continue".
+  useEffect(() => {
+    if (step === 'auth' && hasSession) {
+      const idx = stepOrder.indexOf('auth');
+      if (idx >= 0 && idx < stepOrder.length - 1) setStep(stepOrder[idx + 1]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, hasSession]);
 
   // Welcome line plays EXACTLY ONCE per wizard mount, on first-run.
   // Uses the pre-gen MP3 (Grace voice, baked at build time) instead of
@@ -322,8 +375,9 @@ export function Wizard({
   };
 
   const handleSkip = () => {
-    // On welcome there's nothing to skip — Continue is the action.
-    if (step === 'welcome') return;
+    // On welcome there's nothing to skip — Continue is the action. Auth can't
+    // be skipped — login is required.
+    if (step === 'welcome' || step === 'auth') return;
     if (step === 'identity') {
       // "Skip the rest" jumps straight to Finish — but the user still
       // can't actually finish without keys, so handleFinish will route
@@ -431,12 +485,42 @@ export function Wizard({
 
   const stepBody = useMemo(() => {
     if (step === 'welcome') return <WelcomeStep />;
+    if (step === 'claws') return <ClawsStep />;
+    if (step === 'auth') {
+      return (
+        // Two-column sign-in: brand mark on the left, the auth form on
+        // the right — same visual language as the welcome ("Get started")
+        // step so the two surfaces read as one continuous moment.
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 44,
+            padding: '14px 0 10px',
+          }}
+        >
+          <BrandLogo size={168} />
+          <div style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div>
+              <h2 style={{ fontSize: 17, fontWeight: 600, color: 'var(--text-primary)', margin: '0 0 4px' }}>
+                Create your account
+              </h2>
+              <p style={{ fontSize: 12.5, color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45 }}>
+                Sign in to save your setup and sync it across devices.
+              </p>
+            </div>
+            <AuthPanel onSignedIn={(s) => onSignedIn?.(s)} />
+          </div>
+        </div>
+      );
+    }
     if (step === 'identity') {
       return (
         <IdentityStep
           values={identity}
           onChange={setIdentity}
           onAdvance={handleAdvance}
+          hideName={nameFromAuth}
         />
       );
     }
@@ -535,6 +619,8 @@ export function Wizard({
     >
       <div
         style={{
+          position: 'relative',
+          zIndex: 1,
           flex: '1 1 auto',
           minHeight: 0,
           display: 'flex',

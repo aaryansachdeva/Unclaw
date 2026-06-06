@@ -759,7 +759,7 @@ function VoiceFacet({ draft, update }: PaneContext) {
     <Composition
       eyebrow="the voice that speaks replies"
       title={ttsHeadline(draft.tts_provider)}
-      tagline="ElevenLabs renders in the cloud with high realism. Supertonic, Kokoro and Qwen3 run on your machine, no key required."
+      tagline="ElevenLabs renders in the cloud with high realism. Supertonic and Kokoro run on your machine, no key required. Each agent speaks in its own voice unless you override it below."
       sigil={<Voiceprint />}
     >
       <Stack>
@@ -786,63 +786,85 @@ function VoiceFacet({ draft, update }: PaneContext) {
               />
             </FieldStack>
             <FieldStack
-              label="Voice ID"
-              aside={<InlineHint>defaults to the Grace clone</InlineHint>}
+              label="Override voice"
+              aside={<InlineHint>one voice for every agent</InlineHint>}
             >
-              <input
-                type="text"
-                placeholder="zmcVlqmyk3Jpn5AVYcAL"
-                value={draft.elevenlabs_voice ?? ''}
-                onChange={(e) => update('elevenlabs_voice', e.target.value || null)}
-                style={NATIVE_INPUT_STYLE}
+              <Lever
+                on={draft.elevenlabs_voice_override}
+                onChange={(v) => update('elevenlabs_voice_override', v)}
+                onLabel="On"
+                offLabel="Off"
               />
             </FieldStack>
+            {draft.elevenlabs_voice_override && (
+              <FieldStack label="Voice ID" aside={<InlineHint>applies to all agents</InlineHint>}>
+                <input
+                  type="text"
+                  placeholder="zmcVlqmyk3Jpn5AVYcAL"
+                  value={draft.elevenlabs_voice ?? ''}
+                  onChange={(e) => update('elevenlabs_voice', e.target.value || null)}
+                  style={NATIVE_INPUT_STYLE}
+                />
+              </FieldStack>
+            )}
           </>
         )}
 
         {draft.tts_provider === 'kokoro' && (
-          <FieldStack label="Voice file" aside={<InlineHint>shipped with the runtime</InlineHint>}>
-            <input
-              type="text"
-              placeholder="grace_kokoro"
-              value={draft.kokoro_voice ?? ''}
-              onChange={(e) => update('kokoro_voice', e.target.value || null)}
-              style={NATIVE_INPUT_STYLE}
-            />
-          </FieldStack>
-        )}
-
-        {draft.tts_provider === 'qwen3' && (
-          <FieldStack label="Voice file" aside={<InlineHint>shipped with the runtime</InlineHint>}>
-            <input
-              type="text"
-              placeholder="grace_qwen3"
-              value={draft.qwen3_voice ?? ''}
-              onChange={(e) => update('qwen3_voice', e.target.value || null)}
-              style={NATIVE_INPUT_STYLE}
-            />
-          </FieldStack>
+          <>
+            <FieldStack
+              label="Override voice"
+              aside={<InlineHint>one voice for every agent</InlineHint>}
+            >
+              <Lever
+                on={draft.kokoro_voice_override}
+                onChange={(v) => update('kokoro_voice_override', v)}
+                onLabel="On"
+                offLabel="Off"
+              />
+            </FieldStack>
+            {draft.kokoro_voice_override && (
+              <FieldStack label="Voice file" aside={<InlineHint>applies to all agents</InlineHint>}>
+                <input
+                  type="text"
+                  placeholder="grace_kokoro"
+                  value={draft.kokoro_voice ?? ''}
+                  onChange={(e) => update('kokoro_voice', e.target.value || null)}
+                  style={NATIVE_INPUT_STYLE}
+                />
+              </FieldStack>
+            )}
+          </>
         )}
 
         {draft.tts_provider === 'supertonic' && (
-          <FieldStack
-            label="Voice"
-            aside={
-              <InlineHint>
-                F1-F5 / M1-M5 built-in, or a Voice-Builder clone (e.g. grace)
-              </InlineHint>
-            }
-          >
-            <input
-              type="text"
-              placeholder="grace"
-              value={draft.supertonic_voice ?? ''}
-              onChange={(e) =>
-                update('supertonic_voice', e.target.value || null)
-              }
-              style={NATIVE_INPUT_STYLE}
-            />
-          </FieldStack>
+          <>
+            <FieldStack
+              label="Override voice"
+              aside={<InlineHint>one voice for every agent</InlineHint>}
+            >
+              <Lever
+                on={draft.supertonic_voice_override}
+                onChange={(v) => update('supertonic_voice_override', v)}
+                onLabel="On"
+                offLabel="Off"
+              />
+            </FieldStack>
+            {draft.supertonic_voice_override && (
+              <FieldStack
+                label="Voice"
+                aside={<InlineHint>F1-F5 / M1-M5 or a clone stem (e.g. grace)</InlineHint>}
+              >
+                <input
+                  type="text"
+                  placeholder="grace"
+                  value={draft.supertonic_voice ?? ''}
+                  onChange={(e) => update('supertonic_voice', e.target.value || null)}
+                  style={NATIVE_INPUT_STYLE}
+                />
+              </FieldStack>
+            )}
+          </>
         )}
       </Stack>
     </Composition>

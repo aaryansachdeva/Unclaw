@@ -163,15 +163,12 @@
   },
   "dependencies": {
     "@epicgames-ps/lib-pixelstreamingfrontend-ue5.6": "^0.2.5",
-    "@react-three/fiber": "^9.6.1",
-    "@types/three": "^0.184.0",
     "electron-updater": "^6.8.3",
     "framer-motion": "^12.38.0",
     "lucide-react": "^1.7.0",
     "onnxruntime-web": "^1.24.3",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4",
-    "three": "^0.184.0"
+    "react-dom": "^19.2.4"
   },
   "devDependencies": {
     "@electron/notarize": "^2.5.0",

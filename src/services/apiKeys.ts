@@ -502,6 +502,14 @@ export interface ApiKeysProfile {
    *  from Supertonic's Voice Builder web tool, e.g. `grace`). Only
    *  consulted when `tts_provider === 'supertonic'`. Defaults to `F1`. */
   supertonic_voice: string | null;
+  /** Per-provider "override voice" toggles. When false (the default), each
+   *  agent speaks in its OWN cloned voice (the character profile decides) and
+   *  the *_voice field above is ignored. When true, the *_voice field is used
+   *  as a single voice for ALL agents on that provider, overriding their
+   *  per-character voices. Lets a user force one voice across the roster. */
+  elevenlabs_voice_override: boolean;
+  kokoro_voice_override: boolean;
+  supertonic_voice_override: boolean;
   /** Agentic features toggle. When false (default), the 20b's
    *  `escalate` action is suppressed in the system prompt and the
    *  fast-escalation regex no-ops; soul never spins up the agentic
@@ -603,6 +611,9 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   // alongside Kokoro's grace_kokoro.pt). Picking a different built-in
   // (F2, M3, etc.) bypasses the CDN entirely.
   supertonic_voice:         'grace',
+  elevenlabs_voice_override: false,
+  kokoro_voice_override:    false,
+  supertonic_voice_override: false,
   agentic_enabled:          false,
   agentic_provider:         'openai',
   agentic_use_same_as_chat: false,

@@ -10,7 +10,32 @@
 // Soul accepts `llm_api_key` per-call, so cloud providers can run
 // against the user's own key without touching server-side env vars.
 
-import { fetchApiKeys } from './apiKeys';
+import { fetchApiKeys, type ApiKeysProfile } from './apiKeys';
+
+/** Resolve the voice_id to send for the active TTS provider. By default each
+ *  agent uses its own per-character voice (`voices[provider]`); the global
+ *  per-provider voice only applies when its "override voice" toggle is on, in
+ *  which case it wins across all agents. Returns null when nothing applies
+ *  (soul falls back to its env default). Shared by both the streaming and
+ *  non-streaming paths so the precedence lives in exactly one place. */
+function resolveVoiceId(
+  keys: ApiKeysProfile,
+  voices: { elevenlabs?: string; supertonic?: string; kokoro?: string; qwen3?: string } | undefined,
+): string | null {
+  const p = keys.tts_provider;
+  const perChar = voices?.[p as keyof NonNullable<typeof voices>] ?? null;
+  const globalVoice =
+    p === 'elevenlabs' ? keys.elevenlabs_voice
+    : p === 'kokoro' ? keys.kokoro_voice
+    : p === 'supertonic' ? keys.supertonic_voice
+    : null;
+  const overrideOn =
+    p === 'elevenlabs' ? keys.elevenlabs_voice_override
+    : p === 'kokoro' ? keys.kokoro_voice_override
+    : p === 'supertonic' ? keys.supertonic_voice_override
+    : false;
+  return overrideOn ? (globalVoice || perChar) : perChar;
+}
 
 import { getSoulBaseUrl } from './soulBase';
 
@@ -22,7 +47,11 @@ export interface SoulChatHistoryTurn {
 export interface SoulChatOptions {
   history?: SoulChatHistoryTurn[];
   voiceId?: string;
-  ttsProvider?: 'elevenlabs' | 'xai';
+  /** Per-character voice ids keyed by TTS provider. The active provider (from
+   *  the user's saved settings) picks one; it wins over the global per-provider
+   *  voice setting, so each agent speaks in its own voice. Falls back to the
+   *  global setting when a character has no voice for the active provider. */
+  voices?: { elevenlabs?: string; supertonic?: string; kokoro?: string; qwen3?: string };
   lipsyncModel?: 'v6' | 'v6mini' | 'v4';
   /** Persona text + any user-profile facts to PREPEND to soul's
    *  built-in SYSTEM_PROMPT. Replaces the LLM's default voice with
@@ -102,7 +131,6 @@ export async function chatViaSoul(
   const body: Record<string, unknown> = { message };
   if (opts.history) body.history = opts.history;
   if (opts.voiceId) body.voice_id = opts.voiceId;
-  if (opts.ttsProvider) body.tts_provider = opts.ttsProvider;
   if (opts.lipsyncModel) body.lipsync_model = opts.lipsyncModel;
   if (opts.systemExtension) body.system_extension = opts.systemExtension;
   if (opts.images && opts.images.length > 0) body.images = opts.images;
@@ -124,24 +152,18 @@ export async function chatViaSoul(
     // picked Kokoro we send the provider tag + (optionally) the
     // custom endpoint URL so soul forwards instead of running locally.
     body.tts_provider = keys.tts_provider;
-    if (keys.tts_provider === 'elevenlabs') {
-      if (keys.elevenlabs_api_key) body.elevenlabs_api_key = keys.elevenlabs_api_key;
-      // Forward the user's ElevenLabs voice id (defaults to Grace).
-      // Without this soul falls back to its env ELEVENLABS_VOICE which
-      // is Rachel — the wrong voice for our persona.
-      if (keys.elevenlabs_voice) body.voice_id = keys.elevenlabs_voice;
+    if (keys.tts_provider === 'elevenlabs' && keys.elevenlabs_api_key) {
+      body.elevenlabs_api_key = keys.elevenlabs_api_key;
     }
-    if (keys.tts_provider === 'kokoro') {
-      if (keys.kokoro_voice) body.voice_id = keys.kokoro_voice;
-      if (keys.kokoro_mode === 'custom' && keys.kokoro_endpoint) {
-        body.kokoro_endpoint = keys.kokoro_endpoint;
-      }
+    if (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'custom' && keys.kokoro_endpoint) {
+      body.kokoro_endpoint = keys.kokoro_endpoint;
     }
-    if (keys.tts_provider === 'qwen3' && keys.qwen3_voice) {
-      body.voice_id = keys.qwen3_voice;
-    }
-    if (keys.tts_provider === 'supertonic' && keys.supertonic_voice) {
-      body.voice_id = keys.supertonic_voice;
+    // Voice: explicit opts.voiceId wins; otherwise per-character voice (or the
+    // global override voice when that provider's toggle is on). See
+    // resolveVoiceId. Without any, soul falls back to its env default.
+    if (!opts.voiceId) {
+      const voice = resolveVoiceId(keys, opts.voices);
+      if (voice) body.voice_id = voice;
     }
     // Agentic / escalation BYOK. Soul reads these on /chat and routes
     // to either _run_escalation (cloud) or _run_escalation_local based
@@ -178,6 +200,10 @@ export async function chatViaSoul(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    // Generous ceiling: /chat runs the full LLM + TTS + lipsync pipeline. This
+    // only guards against a wedged soul never settling (which would freeze the
+    // send button forever), not normal slow turns.
+    signal: AbortSignal.timeout(120_000),
   });
   if (!res.ok) {
     const errText = await res.text().catch(() => res.statusText);
@@ -248,6 +274,7 @@ export async function fireIdle(opts: {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000),
     });
     if (!res.ok) {
       console.warn(`[idle] soul /idle ${res.status}`);
@@ -318,11 +345,11 @@ export async function* streamChatViaSoul(
     // caller restricts streaming to local providers before calling
     // us, so anything else here is a bug upstream.
     body.tts_provider = keys.tts_provider;
-    if (keys.tts_provider === 'kokoro' && keys.kokoro_voice) {
-      body.voice_id = keys.kokoro_voice;
-    }
-    if (keys.tts_provider === 'supertonic' && keys.supertonic_voice) {
-      body.voice_id = keys.supertonic_voice;
+    // Same voice resolution as the non-streaming path (per-character by
+    // default, global override when toggled). opts.voiceId already won above.
+    if (!opts.voiceId) {
+      const voice = resolveVoiceId(keys, opts.voices);
+      if (voice) body.voice_id = voice;
     }
     // Agentic BYOK threading — same logic as chatViaSoul. Soul reads
     // these on the streaming endpoint too so escalation kicked off

@@ -158,6 +158,31 @@ interface ElectronAPI {
      *  setup.onLog, mostly for surfacing errors in dev. */
     onLog: (cb: (line: string) => void) => () => void;
   };
+
+  // Character store. The renderer resolves the presigned pak URL from the
+  // store Worker (it holds the auth token) and hands it here for the heavy
+  // download/verify/extract into the runtime.
+  characterStore: {
+    /** Download + SHA-verify + extract a purchased pak. `url` is the
+     *  short-lived presigned URL from the store Worker; main reads sha256 +
+     *  sizeBytes from its own manifest. */
+    downloadPak: (args: {
+      characterId: string;
+      url: string;
+    }) => Promise<{ ok: boolean; dir?: string; mountPath?: string | null; error?: string }>;
+    /** Character ids whose pak is downloaded locally (in the staging dir). */
+    listInstalled: () => Promise<{ ids: string[] }>;
+    /** Subscribe to byte progress for a pak download. */
+    onPakProgress: (
+      cb: (data: { characterId: string; downloaded: number; total: number }) => void,
+    ) => () => void;
+  };
+
+  /** unclaw:// deep link arriving while the app is running (the Polar
+   *  checkout-complete page bounces through it). Returns unsubscribe. */
+  onDeepLink: (cb: (url: string) => void) => () => void;
+  /** Pull a deep link that arrived during cold start, or null. */
+  getPendingDeepLink: () => Promise<string | null>;
 }
 
 interface UpdateCategoryProgress {

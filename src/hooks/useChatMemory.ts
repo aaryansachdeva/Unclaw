@@ -102,7 +102,7 @@ export interface ChatMemoryAPI {
  * → mirrors back. Switching `personaId` swaps to that persona's history
  * (so Grace and Mark remember independently).
  */
-export function useChatMemory(personaId: string): ChatMemoryAPI {
+export function useChatMemory(personaId: string, reloadToken?: number): ChatMemoryAPI {
   const [turns, setTurns] = useState<Turn[]>(() => loadFromStorage(personaId));
 
   // Keep a ref so callbacks don't see stale state when fired in quick
@@ -110,12 +110,15 @@ export function useChatMemory(personaId: string): ChatMemoryAPI {
   const turnsRef = useRef<Turn[]>(turns);
   turnsRef.current = turns;
 
-  // Reload when persona changes.
+  // Reload when the persona changes OR when `reloadToken` bumps — the latter
+  // lets the app force a re-read after a cloud restore rewrites the localStorage
+  // chat keys for the signed-in account (so the visible conversation refreshes
+  // without an instance switch).
   useEffect(() => {
     const next = loadFromStorage(personaId);
     setTurns(next);
     turnsRef.current = next;
-  }, [personaId]);
+  }, [personaId, reloadToken]);
 
   const add = useCallback<ChatMemoryAPI['add']>((role, content, sources, images) => {
     const trimmed = content.trim();

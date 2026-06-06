@@ -9,16 +9,19 @@
 //   * Soul (127.0.0.1:8765) is the read path the LLM consults on every
 //     /chat call (auto-injected into the system prompt). Cloud is the
 //     cross-device source of truth.
-//   * The reconciler (`syncSettings`) runs at sign-in: cloud wins when
-//     present; soul migrates up when cloud is empty; wizard fires when
-//     both sides are empty. Cloud writes round-trip a `version` so a
-//     stale write fails loudly with a 409 instead of clobbering a
-//     sibling device's edit.
+//   * The reconciler (`reconcileForAccount`) runs at sign-in: it scopes the
+//     machine's local state to the signing-in account — cloud wins when
+//     present; the account's own local-only settings migrate up; a stale
+//     profile from a DIFFERENT account is wiped (not inherited); wizard fires
+//     when the account has nothing. Cloud writes round-trip a `version` so a
+//     stale write fails loudly with a 409 instead of clobbering a sibling
+//     device's edit.
 //
 // This module replaces the old `services/profile.ts`. Everything that
 // previously consumed `UserProfile` should switch to `UserSettings`.
 
 import type { SoulChatResult } from './soulChat';
+import type { AgentInstance } from '../hooks/useAgentStack';
 
 import { getSoulBaseUrl } from './soulBase';
 const CLOUD_URL = 'https://api.unclaw.io';
@@ -55,6 +58,14 @@ export interface UserSettings {
    *  the UE-side asset list (see WARDROBE_BOUNDS in components/Wardrobe).
    *  Lighting angle is 0-360 degrees. Null/missing = use UE defaults. */
   wardrobe?: WardrobeSettings | null;
+  /** The user's character roster — every added/renamed instance plus each
+   *  instance's saved outfit (AgentInstance.wardrobe). Historically machine-
+   *  local; now folded into the cloud blob so the whole setup (everything
+   *  except API keys, which stay device-local secrets) follows the account
+   *  across devices. Soul persists it via extra="allow" but NEVER injects it
+   *  into the LLM prompt — `_user_settings_summary` only renders the known
+   *  profile fields, so this stays prompt-invisible. */
+  roster?: AgentInstance[] | null;
   /** Allow any future top-level setting without a Pydantic edit. */
   [k: string]: unknown;
 }
@@ -288,7 +299,7 @@ export interface PushCloudResult {
  *  doesn't match the row's current version on the server, throws a
  *  ConflictError carrying the server's current record so the caller
  *  can prompt the user / merge / retry. Used by saveSettingsEverywhere
- *  on the wizard-save path AND by syncSettings on the soul→cloud
+ *  on the wizard-save path AND by reconcileForAccount on the soul→cloud
  *  migration when a returning user signs in for the first time. */
 export async function pushCloudSettings(
   token: string,
@@ -346,50 +357,67 @@ export class ConflictError extends Error {
 // Reconciliation — runs after sign-in to align cloud + soul.
 // =====================================================================
 
-/** Pull cloud + local settings in parallel, decide which (if either) is
- *  authoritative, mirror it to the other side, return the canonical
- *  settings (or null when both sides are empty — wizard fires).
+export interface ReconcileResult {
+  /** The signed-in account's canonical profile, or null → wizard fires. */
+  profile: UserSettings | null;
+  /** True when the machine's local state belonged to a DIFFERENT account (or
+   *  a pre-account "guest" session) than the one signing in now. The caller
+   *  must then clear the previous owner's machine-local secrets (API keys,
+   *  local chat history) since those are NOT account-scoped and must not leak
+   *  across accounts. */
+  ownerChanged: boolean;
+}
+
+/** Reconcile settings for the account signing in, scoping the machine's local
+ *  state to that account.
+ *
+ *  `localOwnerId` is the account id the machine's local profile/keys currently
+ *  belong to (null = never signed in here, i.e. a guest/fresh machine).
  *
  *  Rules:
- *    * Cloud has data: it wins. Mirror to soul if soul is missing OR
- *      out of date (different updated_at).
- *    * Cloud empty, soul has data: this is a returning pre-cloud user
- *      signing in for the first time. Push their existing local
- *      settings up to the cloud as a one-shot migration.
- *    * Both empty: return null. App will trigger the wizard. */
-export async function syncSettings(token: string): Promise<UserSettings | null> {
-  const [cloud, local] = await Promise.all([
-    fetchCloudSettings(token).catch((err) => {
-      console.warn('[settings] cloud fetch failed during sync', err);
-      return null;
-    }),
-    fetchSettings().catch((err) => {
-      console.warn('[settings] local fetch failed during sync', err);
-      return null;
-    }),
-  ]);
+ *    * Cloud has this account's profile → it wins; mirror to soul.
+ *    * Cloud empty, machine ALREADY owned by this account, local profile present
+ *      → genuine pre-cloud local-only settings; migrate them up.
+ *    * Cloud empty and the machine is NOT this account's (different account or
+ *      guest) → do NOT adopt the stale local profile. Wipe it from soul and
+ *      start fresh (wizard). This is the account-isolation fix: a new login no
+ *      longer inherits whatever profile happened to be on the machine. */
+export async function reconcileForAccount(
+  accountId: string,
+  token: string,
+  localOwnerId: string | null,
+): Promise<ReconcileResult> {
+  const sameOwner = localOwnerId === accountId;
+  const cloud = await fetchCloudSettings(token).catch((err) => {
+    console.warn('[settings] cloud fetch failed during reconcile', err);
+    return null;
+  });
 
   if (cloud) {
-    if (!local || local.updated_at !== cloud.settings.updated_at) {
-      try {
-        await saveSettings(cloud.settings);
-      } catch (err) {
-        console.warn('[settings] mirror cloud→soul failed', err);
-      }
-    }
-    return cloud.settings;
+    // Cloud is authoritative for this account; overwrite whatever soul holds
+    // (it may be a different account's stale profile).
+    try { await saveSettings(cloud.settings); }
+    catch (err) { console.warn('[settings] mirror cloud→soul failed', err); }
+    return { profile: cloud.settings, ownerChanged: !sameOwner };
   }
 
-  if (local) {
-    try {
-      await pushCloudSettings(token, local);
-    } catch (err) {
-      console.warn('[settings] migration soul→cloud failed', err);
+  // Cloud has nothing for this account.
+  if (sameOwner) {
+    const local = await fetchSettings().catch(() => null);
+    if (local) {
+      // This account's own local-only settings (e.g. wizard finished offline).
+      try { await pushCloudSettings(token, local); }
+      catch (err) { console.warn('[settings] migration soul→cloud failed', err); }
+      return { profile: local, ownerChanged: false };
     }
-    return local;
+    return { profile: null, ownerChanged: false };
   }
 
-  return null;
+  // Different account / guest machine + no cloud profile: do not inherit the
+  // stale local profile — wipe it and start clean for this account.
+  try { await deleteSettings(); }
+  catch (err) { console.warn('[settings] wipe stale local profile failed', err); }
+  return { profile: null, ownerChanged: true };
 }
 
 /** Save settings to soul (always) and push to cloud (best-effort when

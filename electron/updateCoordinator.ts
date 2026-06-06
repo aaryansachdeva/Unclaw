@@ -42,7 +42,6 @@ import {
   startAppShellUpdater,
   subscribeAppShell,
   getAppShellState,
-  quitAndInstallAppUpdate,
   AppShellState,
 } from './appShellUpdater';
 
@@ -517,12 +516,4 @@ export async function runUpdateCheck(window: BrowserWindow | null): Promise<Upda
   } finally {
     inFlight = false;
   }
-}
-
-/**
- * Did the update pass identify any work to do? Used by main.ts to decide
- * whether to show the UpdateOverlay or jump straight to the main app.
- */
-export function hasPendingWork(): boolean {
-  return snapshot.categories.some((c) => c.state !== 'up-to-date');
 }

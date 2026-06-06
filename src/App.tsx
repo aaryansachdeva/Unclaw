@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X } from 'lucide-react';
+import { X, Check } from 'lucide-react';
 import { Titlebar } from './components/Titlebar';
 import { StreamView } from './components/StreamView';
 import { Greeting } from './components/Greeting';
@@ -13,6 +13,7 @@ import { StocksPanel } from './components/Stocks';
 import { NewsPanel } from './components/News';
 import { WeatherPanel } from './components/Weather';
 import { CustomizationOverlay, ACCENT_COLORS, CLOTHING_COLORS } from './components/CustomizationOverlay';
+import { PulseGrid } from './components/PulseGrid';
 import { hexToRgb01 } from './components/ColorPickerPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SoulBootScreen } from './components/SoulBootScreen';
@@ -28,6 +29,7 @@ import {
 import { usePixelStreaming } from './hooks/usePixelStreaming';
 import { useVideoRectPublisher } from './hooks/useVideoRectPublisher';
 import { useChatMemory, type Turn } from './hooks/useChatMemory';
+import { fetchCloudChat, pushCloudChat, gatherLocalChat, restoreLocalChat, deleteCloudChat } from './services/chatSync';
 import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
@@ -39,7 +41,7 @@ import { getStocks } from './services/stocks';
 import {
   deleteSettings,
   saveSettingsEverywhere,
-  syncSettings,
+  reconcileForAccount,
   type UserSettings,
 } from './services/userSettings';
 import {
@@ -50,14 +52,24 @@ import {
   type AuthUser,
 } from './services/auth';
 import { resetEverything } from './services/accountReset';
-import { fetchSettings } from './services/userSettings';
 import { fetchApiKeys, modelSupportsVision } from './services/apiKeys';
-import { SignInScreen } from './components/Auth/SignInScreen';
 import { Wizard } from './components/Onboarding/Wizard';
-import { personalityFor } from './personalities';
+import { characterFor } from './characters';
 import { AGENTS, type Agent } from './types';
 import { useAgentStack, BASE_AGENT, BASE_INSTANCE_ID } from './hooks/useAgentStack';
-import { AddCharacterPicker } from './components/AddCharacterPicker';
+import { AddCharacterPicker, type StoreEntry } from './components/AddCharacterPicker';
+import { ClawsBalance } from './components/ClawsBalance';
+import { fetchClaws, earnClaws, spendOnCharacter, CHARACTER_CLAW_COST } from './services/claws';
+import {
+  fetchEntitlements,
+  createCheckout,
+  fetchDownloadUrl,
+  BASE_CHARACTER_IDS,
+  PAID_CHARACTER_IDS,
+  STORE_PRICING,
+  BUNDLE_SKU,
+  BUNDLE_PRICE_USD,
+} from './services/store';
 
 /** Carousel sentinel: cycling onto this opens the Add picker over a blank
  *  stage (UE cleared via agentSwitch with an unknown id). */
@@ -68,6 +80,24 @@ const ADD_SLOT = '__add__';
  *  don't see the sign-in screen on every relaunch. Cleared on real
  *  sign-in or on account reset. */
 const GUEST_MODE_KEY = 'unclaw.guestMode';
+/** Which account id the machine's local state (soul profile + API keys + local
+ *  chat history) currently belongs to. Used to scope local data to an account
+ *  so a different login can't inherit it. null/absent = guest/fresh machine. */
+const LOCAL_ACCOUNT_KEY = 'unclaw.localAccountId';
+
+/** Wipe every per-instance chat-history blob (`unclaw.chat.<id>`) from
+ *  localStorage. Called when the machine changes owning account so the prior
+ *  account's conversations don't show under the new one. */
+function clearLocalChatHistory(): void {
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('unclaw.chat.')) keys.push(k);
+    }
+    keys.forEach((k) => localStorage.removeItem(k));
+  } catch { /* ignore */ }
+}
 
 /** Base64-encode UTF-8 safely for transmission to UE. */
 function toBase64(text: string): string {
@@ -302,7 +332,7 @@ function AppMain() {
   // switcher carousel is selected. The carousel is [...stack, ADD_SLOT]; the
   // ADD_SLOT opens the picker over a blank stage. `selectedInstanceId` holds a
   // real roster instance id or ADD_SLOT.
-  const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe } = useAgentStack();
+  const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, resetStack, hydrateStack } = useAgentStack();
   // Selected carousel slot: a roster instance id, or ADD_SLOT for the picker.
   const [selectedInstanceId, setSelectedInstanceId] = useState<string>(BASE_INSTANCE_ID);
   const [addPickerOpen, setAddPickerOpen] = useState(false);
@@ -312,6 +342,24 @@ function AppMain() {
   // `installedCharacters` response. null = not reported yet -> fall back to the
   // full catalog (keeps dev + older UE builds working).
   const [installedCharacterIds, setInstalledCharacterIds] = useState<string[] | null>(null);
+  // Character ids whose pak is downloaded locally (the flat character-paks
+  // staging dir). This is the authoritative "do we have the pak" signal for
+  // paid characters — independent of UE's report, which is null until UE
+  // answers and would otherwise make an un-downloaded character look ready.
+  const [localInstalledIds, setLocalInstalledIds] = useState<string[]>([]);
+  // Character store: which paid characters this account owns (from the store
+  // Worker / Polar). null = not fetched yet. Base characters are always owned.
+  const [ownedCharacterIds, setOwnedCharacterIds] = useState<string[] | null>(null);
+  // Claws — the in-app currency (server-authoritative balance). null = not
+  // fetched yet. New accounts seed to STARTING_CLAWS on first /claws touch.
+  const [clawsBalance, setClawsBalance] = useState<number | null>(null);
+  const clawsBalanceRef = useRef<number | null>(null);
+  clawsBalanceRef.current = clawsBalance;
+  // Transient "not enough claws" message shown when a spend can't cover the cost.
+  const [clawsNotice, setClawsNotice] = useState<string | null>(null);
+  // Per-character pak download progress (0..1) while a fetch is in flight.
+  const [pakProgress, setPakProgress] = useState<Record<string, number>>({});
+  const checkoutPollRef = useRef<number | null>(null);
   const [isSending, setIsSending] = useState(false);
   // Bumped after every chat round so the Reminders panel re-fetches.
   const [refreshKey, setRefreshKey] = useState(0);
@@ -511,27 +559,54 @@ function AppMain() {
 
   // Auth session, fetched at app start from safeStorage.
   //   undefined: still resolving (don't render anything auth-dependent)
-  //   null:      no valid session, show SignInScreen (unless guestMode)
+  //   null:      no valid session, show SignInScreen
   //   object:    signed in
+  // A signed-in account is now required: there is no guest path, so the
+  // SignInScreen renders whenever `authToken` resolves to null.
   const [authToken, setAuthToken] = useState<string | null | undefined>(undefined);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
-  // True when the user picked "Continue without an account" on the
-  // sign-in screen. Persisted in localStorage so guests aren't asked
-  // to sign in again next launch. When `authToken` is null AND
-  // `guestMode` is false, the SignInScreen renders.
-  const [guestMode, setGuestMode] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(GUEST_MODE_KEY) === '1';
-    } catch {
-      return false;
-    }
-  });
 
   // User profile, fetched at app start. `null` means soul has no
   // profile yet, which triggers the onboarding wizard in firstRun mode.
   // `undefined` means the fetch hasn't resolved yet (we render nothing
   // profile-dependent until then to avoid a flash of "Aryan").
   const [profile, setProfile] = useState<UserSettings | null | undefined>(undefined);
+  // True after a sign-in that changed the machine's owning account: the prior
+  // owner's API keys were cleared (keys are local secrets, never synced), so we
+  // surface a one-time banner telling the user to re-enter them.
+  const [apiKeysNotice, setApiKeysNotice] = useState(false);
+  // Store toast: 'added' fires when a purchase lands (entitlement appears),
+  // 'ready' fires when a bought character finishes downloading + mounting.
+  // null = nothing to show.
+  const [storeToast, setStoreToast] = useState<{ kind: 'added' | 'ready'; ids: string[] } | null>(null);
+
+  // Cloud-sync the character roster (added/renamed instances + each one's
+  // wardrobe) by folding it into the UserSettings blob so the full setup —
+  // everything except the device-local API keys — follows the account across
+  // devices. Refs keep the sync effect's deps minimal (fire on roster change
+  // only) while still reading the latest profile/token.
+  const profileRef = useRef(profile);
+  profileRef.current = profile;
+  const authTokenRef = useRef(authToken);
+  authTokenRef.current = authToken;
+  const stackRef = useRef(agentStack);
+  stackRef.current = agentStack;
+  // Set just before a cloud→local roster restore so the resulting roster
+  // change doesn't immediately echo the same data back up to the cloud.
+  const suppressRosterPushRef = useRef(false);
+  // Skip the very first effect run (initial localStorage hydration) — only a
+  // genuine user-driven roster change should push.
+  const rosterPushPrimedRef = useRef(false);
+  useEffect(() => {
+    if (!rosterPushPrimedRef.current) { rosterPushPrimedRef.current = true; return; }
+    if (suppressRosterPushRef.current) { suppressRosterPushRef.current = false; return; }
+    const token = authTokenRef.current;
+    const prof = profileRef.current;
+    // Only sync for a signed-in, onboarded account. Pre-onboarding the roster
+    // is just base Grace, and there's no profile to attach it to yet.
+    if (!token || !prof) return;
+    void saveSettingsEverywhere({ ...prof, roster: agentStack }, token);
+  }, [agentStack]);
   // Wizard visibility + mode. 'first' = no profile yet, can't be cancelled.
   // 'edit' = user reopened to tweak; cancel returns to chat.
   // null = wizard closed.
@@ -568,14 +643,43 @@ function AppMain() {
     () => Object.fromEntries(AGENTS.map((a) => [a.agentId, a] as const)) as Record<string, Agent>,
     [],
   );
-  // Addable = the catalog narrowed to what UE reports as loaded (duplicates
-  // allowed, so the whole loaded set is always offered). Until UE reports,
-  // fall back to the full catalog so dev + older builds still work.
-  const addableAgents = useMemo(
-    () => (installedCharacterIds === null
-      ? AGENTS
-      : AGENTS.filter((a) => installedCharacterIds.includes(a.agentId))),
-    [installedCharacterIds],
+  // Store gating. A character is pickable only when OWNED (bought, or a free
+  // base character) AND INSTALLED (its pak is present so UE can render it).
+  //   owned + installed   -> pick (add an instance)
+  //   owned + !installed  -> download the pak
+  //   !owned              -> buy (opens a Polar checkout)
+  // Until UE reports installs, treat everything as installed so dev + older
+  // builds still work.
+  const isOwned = useCallback(
+    (id: string) => BASE_CHARACTER_IDS.includes(id) || (ownedCharacterIds?.includes(id) ?? false),
+    [ownedCharacterIds],
+  );
+  const isInstalled = useCallback(
+    (id: string) => {
+      // Base characters ship in the app — always present.
+      if (BASE_CHARACTER_IDS.includes(id)) return true;
+      // Paid characters: the pak on disk locally is the source of truth (we
+      // downloaded it). UE's mount report is a secondary signal (e.g. a dev
+      // build with paks baked into Content/Paks).
+      if (localInstalledIds.includes(id)) return true;
+      return installedCharacterIds === null ? false : installedCharacterIds.includes(id);
+    },
+    [localInstalledIds, installedCharacterIds],
+  );
+  const storeEntries: StoreEntry[] = useMemo(
+    () => AGENTS.map((a) => ({
+      agent: a,
+      owned: isOwned(a.agentId),
+      installed: isInstalled(a.agentId),
+      clawsCost: CHARACTER_CLAW_COST,
+      sku: a.agentId,
+      downloading: pakProgress[a.agentId] ?? null,
+    })),
+    [isOwned, isInstalled, pakProgress],
+  );
+  const storeBundle = useMemo(
+    () => ({ priceUsd: BUNDLE_PRICE_USD, sku: BUNDLE_SKU, owned: PAID_CHARACTER_IDS.every((id) => isOwned(id)) }),
+    [isOwned],
   );
 
   const onAddSlot = selectedInstanceId === ADD_SLOT;
@@ -589,17 +693,38 @@ function AppMain() {
   // no defined personality and while the Add picker is open. A renamed
   // instance carries its name into the voice; base Grace also honors the
   // onboarding custom name.
-  const personaBaseName = (activeAgentId && agentById[activeAgentId]?.name) || 'Grace';
   const personaCustomName =
     activeInstanceName
     ?? (selectedInstanceId === BASE_INSTANCE_ID ? profile?.agent_name ?? null : null);
-  const persona = personalityFor(personaBaseName, personaCustomName);
+  // Resolve by the stable agent TYPE id (grace/mark/ava/goblin/chris/joi), not
+  // the display name. A renamed instance keeps the type's persona + voice; only
+  // the name is swapped. Unknown id (Add slot) -> Grace.
+  const persona = characterFor(activeAgentId, personaCustomName);
   // Chat history is keyed by the ROSTER INSTANCE, not the persona — so two
   // Marks, a renamed Ava, and base Grace each remember independently (persona
   // collapses every non-Grace/Mark character onto Grace, which would otherwise
   // share one history). On the Add slot there's no live chat; park on base.
   const memoryKey = currentInstance?.id ?? BASE_INSTANCE_ID;
-  const memory = useChatMemory(memoryKey);
+  // Bumped after a cloud chat restore so useChatMemory re-reads localStorage and
+  // the visible conversation refreshes without an instance switch.
+  const [chatReloadNonce, setChatReloadNonce] = useState(0);
+  const memory = useChatMemory(memoryKey, chatReloadNonce);
+
+  // Cloud-sync chat history (everything but API keys follows the account). The
+  // active instance is the only one whose turns change, but we push the whole
+  // gathered map so switching instances or clearing also syncs. Debounced so a
+  // burst of turns collapses to one write. Skips the initial mount and the
+  // restore-triggered change (suppress flag) so we never echo cloud data back.
+  const chatSyncPrimedRef = useRef(false);
+  const suppressChatPushRef = useRef(false);
+  useEffect(() => {
+    if (!chatSyncPrimedRef.current) { chatSyncPrimedRef.current = true; return; }
+    if (suppressChatPushRef.current) { suppressChatPushRef.current = false; return; }
+    const token = authTokenRef.current;
+    if (!token || !profileRef.current) return; // signed-in + onboarded only
+    const t = setTimeout(() => { void pushCloudChat(token, gatherLocalChat()); }, 4000);
+    return () => clearTimeout(t);
+  }, [memory.turns]);
 
   // On-screen label: the instance's name, else the character's catalog name
   // ("Add" on the picker slot). Decoupled from persona so Ava/Goblin/etc. show
@@ -701,6 +826,200 @@ function AppMain() {
     if (connectionState !== 'connected' || !pixelStreaming) return;
     pixelStreaming.emitUIInteraction({ EventType: 'getInstalledCharacters' });
   }, [connectionState, pixelStreaming]);
+
+  // ----------------------------------------------------------------------
+  // Character store: entitlements + checkout + pak download.
+  // ----------------------------------------------------------------------
+  // Re-read which paks are on disk locally (after a download, or on launch).
+  const refreshLocalInstalled = useCallback(async () => {
+    try {
+      const res = await window.electronAPI?.characterStore?.listInstalled?.();
+      if (res?.ids) setLocalInstalledIds(res.ids);
+    } catch (err) {
+      console.warn('[store] local installed list failed', err);
+    }
+  }, []);
+  useEffect(() => { void refreshLocalInstalled(); }, [refreshLocalInstalled]);
+
+  // Claws balance: fetch on sign-in (seeds the 250 starting balance for a new
+  // account), clear on sign-out.
+  const refreshClaws = useCallback(async () => {
+    if (!authToken) { setClawsBalance(null); return; }
+    const b = await fetchClaws(authToken);
+    if (b != null) setClawsBalance(b);
+  }, [authToken]);
+  useEffect(() => { void refreshClaws(); }, [refreshClaws]);
+  // Auto-dismiss the "not enough claws" notice.
+  useEffect(() => {
+    if (!clawsNotice) return;
+    const t = window.setTimeout(() => setClawsNotice(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [clawsNotice]);
+
+  const refreshEntitlements = useCallback(async () => {
+    if (!authToken) return;
+    try {
+      const next = await fetchEntitlements(authToken);
+      // Diff against the prior owned set to detect a fresh purchase (a paid id
+      // we didn't own before). Skip the very first load (prev === null) so we
+      // don't toast on sign-in. The functional update gives us the prior set
+      // without threading it through deps.
+      setOwnedCharacterIds((prev) => {
+        if (prev) {
+          const added = next.filter(
+            (id) => !prev.includes(id) && PAID_CHARACTER_IDS.includes(id),
+          );
+          if (added.length) setStoreToast({ kind: 'added', ids: added });
+        }
+        return next;
+      });
+    } catch (err) {
+      console.warn('[store] entitlements fetch failed', err);
+    }
+  }, [authToken]);
+
+  // Auto-dismiss the store toast. 'ready' lingers a touch longer than 'added'.
+  useEffect(() => {
+    if (!storeToast) return;
+    const t = window.setTimeout(() => setStoreToast(null), storeToast.kind === 'ready' ? 6000 : 8000);
+    return () => window.clearTimeout(t);
+  }, [storeToast]);
+
+  // Fetch the owned set on sign-in; clear it on sign-out.
+  useEffect(() => {
+    if (!authToken) { setOwnedCharacterIds(null); return; }
+    void refreshEntitlements();
+  }, [authToken, refreshEntitlements]);
+
+  // Pak download byte-progress from the main process.
+  useEffect(() => {
+    const api = window.electronAPI?.characterStore;
+    if (!api?.onPakProgress) return;
+    return api.onPakProgress(({ characterId, downloaded, total }) => {
+      setPakProgress((p) => ({ ...p, [characterId]: total > 0 ? downloaded / total : 0 }));
+    });
+  }, []);
+
+  // unclaw:// deep link from the Polar checkout-complete page -> refresh
+  // entitlements immediately (polling is the fallback while the browser tab
+  // is open). Also drains any link that arrived during cold start.
+  useEffect(() => {
+    const onLink = (url: string) => {
+      if (/store|purchased|checkout/.test(url)) void refreshEntitlements();
+    };
+    const off = window.electronAPI?.onDeepLink?.(onLink);
+    void window.electronAPI?.getPendingDeepLink?.().then((u) => { if (u) onLink(u); });
+    return () => { off?.(); };
+  }, [refreshEntitlements]);
+
+  // Poll entitlements for a couple of minutes after a checkout opens, so the
+  // purchase lands even if the deep link is missed.
+  const startCheckoutPoll = useCallback(() => {
+    if (checkoutPollRef.current != null) return;
+    let ticks = 0;
+    const id = window.setInterval(() => {
+      ticks += 1;
+      void refreshEntitlements();
+      if (ticks >= 40) { // ~2 min at 3s
+        window.clearInterval(id);
+        checkoutPollRef.current = null;
+      }
+    }, 3000);
+    checkoutPollRef.current = id;
+  }, [refreshEntitlements]);
+
+  useEffect(() => () => {
+    if (checkoutPollRef.current != null) window.clearInterval(checkoutPollRef.current);
+  }, []);
+
+  // The all-access bundle stays on Polar (real money); individual characters
+  // are unlocked by spending claws. The picker calls onBuy(sku) for both — sku
+  // is the bundle SKU for the bundle, else a character id.
+  const handleBuy = useCallback(async (sku: string) => {
+    if (!authToken) return;
+    if (sku === BUNDLE_SKU) {
+      try {
+        const { url } = await createCheckout(authToken, sku);
+        await window.electronAPI?.authOpenExternal?.(url);
+        startCheckoutPoll();
+      } catch (err) {
+        console.warn('[store] checkout failed', err);
+      }
+      return;
+    }
+    // Individual character → spend claws. The worker deducts + grants the
+    // entitlement; we then refresh owned (which triggers the auto-download).
+    const res = await spendOnCharacter(authToken, sku);
+    if (res.balance != null) setClawsBalance(res.balance);
+    if (res.ok) {
+      const name = agentById[sku]?.name ?? sku;
+      setStoreToast({ kind: 'added', ids: [sku] });
+      void refreshEntitlements();
+      console.log(`[claws] unlocked ${name}, balance ${res.balance}`);
+    } else if (res.reason === 'insufficient') {
+      setClawsNotice(`Not enough claws — ${agentById[sku]?.name ?? 'this character'} costs ${CHARACTER_CLAW_COST}. Earn more by chatting.`);
+    } else if (res.reason === 'already_owned') {
+      void refreshEntitlements();
+    }
+  }, [authToken, startCheckoutPoll, refreshEntitlements, agentById]);
+
+  const handleDownloadPak = useCallback(async (agentId: string) => {
+    if (!authToken) return;
+    const api = window.electronAPI?.characterStore;
+    if (!api?.downloadPak) return;
+    try {
+      setPakProgress((p) => ({ ...p, [agentId]: 0 }));
+      const url = await fetchDownloadUrl(authToken, agentId);
+      const res = await api.downloadPak({ characterId: agentId, url });
+      if (res?.ok) {
+        // Mid-session mount: when the pak was staged into the UE sandbox
+        // container, ask UE to mount it now so the character is usable without
+        // a relaunch. (On the next launch run_soul boot-mounts it regardless,
+        // so this is best-effort.) Then re-scan so installedCharacters
+        // refreshes and the card flips from "download" to pickable.
+        if (res.mountPath) {
+          pixelStreaming?.emitUIInteraction({ EventType: 'mountCharacterPak', pakPath: res.mountPath });
+        }
+        pixelStreaming?.emitUIInteraction({ EventType: 'getInstalledCharacters' });
+        // Optimistically mark it installed so the card flips to "ready" right
+        // away (UE's installedCharacters reply confirms it a beat later), and
+        // fire the "ready" toast.
+        setInstalledCharacterIds((prev) => (prev && !prev.includes(agentId) ? [...prev, agentId] : prev));
+        void refreshLocalInstalled(); // pak is now on disk
+        setStoreToast({ kind: 'ready', ids: [agentId] });
+      } else {
+        // Leave the card on "download" so the user can retry by clicking it,
+        // and drop the auto-download guard so a later entitlement refresh can
+        // re-attempt a transient failure.
+        console.warn('[store] pak download failed', res?.error);
+        autoDownloadedRef.current.delete(agentId);
+      }
+    } catch (err) {
+      console.warn('[store] pak download error', err);
+      autoDownloadedRef.current.delete(agentId);
+    } finally {
+      setPakProgress((p) => { const n = { ...p }; delete n[agentId]; return n; });
+    }
+  }, [authToken, pixelStreaming]);
+
+  // Auto-download owned-but-not-installed paid characters. Fires after a
+  // purchase (entitlement lands -> owned grows) and on sign-in (a character
+  // owned on another device but not yet present here). Waits until UE has
+  // reported its installed set (installedCharacterIds !== null) so we don't
+  // re-download something already baked in. A per-id guard prevents repeat
+  // kicks while a download is in flight or after it finished.
+  const autoDownloadedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!authToken || !ownedCharacterIds) return;
+    for (const id of ownedCharacterIds) {
+      if (!PAID_CHARACTER_IDS.includes(id)) continue;
+      if (localInstalledIds.includes(id)) continue;      // pak already on disk
+      if (autoDownloadedRef.current.has(id)) continue;   // already kicked off
+      if (pakProgress[id] != null) continue;             // already downloading
+      autoDownloadedRef.current.add(id);
+      void handleDownloadPak(id);
+    }
+  }, [authToken, ownedCharacterIds, localInstalledIds, pakProgress, handleDownloadPak]);
 
   // Track whether the AI is currently producing audible output. Voice
   // mode uses this to gate VAD and to detect barge-in.
@@ -1170,6 +1489,18 @@ function AppMain() {
     const pendingImages = attachedImages;
     if (!trimmed && pendingImages.length === 0) return;
 
+    // Earn 1 claw per message — interacting with Unclaw is how you earn the
+    // in-app currency. Optimistically bump the local balance for instant
+    // feedback, then reconcile with the server's authoritative value.
+    // Best-effort + fire-and-forget so it never delays the send.
+    {
+      const tok = authTokenRef.current;
+      if (tok) {
+        setClawsBalance((b) => (b == null ? b : b + 1));
+        void earnClaws(tok, 1).then((nb) => { if (nb != null) setClawsBalance(nb); });
+      }
+    }
+
     // Interrupt any in-flight escalation BEFORE sending the new
     // message. Stops the polling loop and clears the status pill.
     // The actual audio cutoff happens on the UE side: as soon as
@@ -1241,21 +1572,14 @@ function AppMain() {
     // audio duration so playback is gapless even when chunks arrive
     // in bursts (and well before the full reply has been synthesized).
     let useStreaming = false;
-    let streamingProvider: 'kokoro' | 'qwen3' | null = null;
     try {
       const keys = await fetchApiKeys();
-      // Stream when the user picked a provider that has a local
-      // chunk-by-chunk synthesis path:
-      //   * kokoro recommended (in-process kokoro-onnx)
-      //   * qwen3 (subprocess service)
-      // Custom Kokoro endpoint, ElevenLabs, and image-bearing turns
+      // Stream when the user picked a provider with a local chunk-by-chunk
+      // synthesis path: kokoro recommended (in-process kokoro-onnx). Custom
+      // Kokoro endpoint, ElevenLabs, Supertonic, and image-bearing turns
       // (which auto-route through escalation) all stay on /chat.
       if (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'recommended') {
         useStreaming = pendingImages.length === 0;
-        streamingProvider = 'kokoro';
-      } else if (keys.tts_provider === 'qwen3') {
-        useStreaming = pendingImages.length === 0;
-        streamingProvider = 'qwen3';
       }
     } catch { /* fall through to non-streaming */ }
 
@@ -1270,6 +1594,7 @@ function AppMain() {
       try {
         for await (const chunk of streamChatViaSoul(trimmed, {
           systemExtension: systemExt,
+          voices: persona.voices,
           history,
           signal: ac.signal,
         })) {
@@ -1299,18 +1624,11 @@ function AppMain() {
           // Schedule. Negative deltas (chunk arrived after its play
           // time) dispatch immediately, happens when synth is slower
           // than the audio it produced, i.e. the buffer is empty.
-          // INTER_CHUNK_GAP_MS adds a small breath between chunks so
-          // sentence boundaries get natural prosodic spacing instead
-          // of butting up against each other; ~150 ms matches the
-          // pause length the LLM-formatted text usually implies via
-          // sentence-final punctuation.
-          // Provider-specific gap. Both providers now chunk on
-          // sentence boundaries (Kokoro splits TEXT directly, Qwen3
-          // pre-splits in soul/qwen3_runtime), so gaps land on
-          // natural pauses either way. Qwen3's voice-clone prosody
-          // already includes more natural conversational pacing , 
-          // a smaller gap reads as a breath instead of a held pause.
-          const INTER_CHUNK_GAP_MS = streamingProvider === 'qwen3' ? 300 : 800;
+          // A small breath between chunks so sentence boundaries get natural
+          // prosodic spacing instead of butting up against each other. Kokoro
+          // (the only streamed engine) splits on sentence boundaries, so the
+          // gap lands on a natural pause.
+          const INTER_CHUNK_GAP_MS = 800;
           const playAt = firstChunkArrivedAt
             + ((chunk.start_offset_s ?? 0) * 1000)
             + (chunk.chunk_idx * INTER_CHUNK_GAP_MS);
@@ -1327,6 +1645,7 @@ function AppMain() {
         if (escalationFallback) {
           const fallback = await chatViaSoul(trimmed, {
             systemExtension: systemExt,
+            voices: persona.voices,
             history,
             images: pendingImages.map((img) => img.base64),
           });
@@ -1346,7 +1665,7 @@ function AppMain() {
           // natural pauses either way. Qwen3's voice-clone prosody
           // already includes more natural conversational pacing , 
           // a smaller gap reads as a breath instead of a held pause.
-          const INTER_CHUNK_GAP_MS = streamingProvider === 'qwen3' ? 300 : 800;
+          const INTER_CHUNK_GAP_MS = 800;
           const gapsMs = Math.max(0, totalChunks - 1) * INTER_CHUNK_GAP_MS;
           const speakMs = (totalDuration > 0 ? totalDuration * 1000 : 4000) + gapsMs;
           const timerId = window.setTimeout(() => {
@@ -1371,6 +1690,7 @@ function AppMain() {
     try {
       const result = await chatViaSoul(trimmed, {
         systemExtension: systemExt,
+        voices: persona.voices,
         history,
         images: pendingImages.map((img) => img.base64),
       });
@@ -1518,6 +1838,10 @@ function AppMain() {
   // the SignInScreen renders over the loading screen anyway, so the
   // user can authenticate while the UnClaw Engine is still warming up.
   useEffect(() => {
+    // A signed-in account is now required. Drop any stale guest-mode
+    // flag from an older build so prior "Continue without an account"
+    // sessions land on the SignInScreen instead of silently bypassing it.
+    try { localStorage.removeItem(GUEST_MODE_KEY); } catch { /* ignore */ }
     let cancelled = false;
     void (async () => {
       try {
@@ -1550,29 +1874,23 @@ function AppMain() {
   const handleSignedIn = useCallback((session: AuthSession) => {
     setAuthToken(session.token);
     setAuthUser(session.user);
-    // Real sign-in supersedes any prior guest-mode session.
-    setGuestMode(false);
-    try { localStorage.removeItem(GUEST_MODE_KEY); } catch { /* ignore */ }
-  }, []);
-
-  const handleSkipLogin = useCallback(() => {
-    setGuestMode(true);
-    try { localStorage.setItem(GUEST_MODE_KEY, '1'); } catch { /* ignore */ }
   }, []);
 
   const handleSignOut = useCallback(async () => {
+    // Wipe UE's applied config (outfit / colors / lighting) on the way out so
+    // the next user's stream starts clean — the stream stays connected under
+    // the SignInScreen, so this lands before anyone signs back in.
+    try {
+      pixelStreaming?.emitUIInteraction({ EventType: 'reset', Timestamp: new Date().toISOString() });
+    } catch { /* ignore */ }
     await signOut(authToken ?? null);
     setAuthToken(null);
     setAuthUser(null);
     setProfile(undefined);
     setWizardMode(null);
-    // Sign-out is an explicit "I want the SignInScreen back" gesture,
-    // so drop guest mode too.
-    setGuestMode(false);
-    try { localStorage.removeItem(GUEST_MODE_KEY); } catch { /* ignore */ }
     // Allow a fresh sync if the user signs back in this session.
     profileSyncedRef.current = false;
-  }, [authToken]);
+  }, [authToken, pixelStreaming]);
 
   // Account reset, wipes every local + cloud surface and drops the
   // app back to the SignInScreen (or first-run wizard for guests).
@@ -1582,19 +1900,30 @@ function AppMain() {
   const handleResetAccount = useCallback(async () => {
     try {
       await resetEverything(authToken ?? null);
+      // Drop the account's cloud chat too (chat lives in its own store, so
+      // resetEverything — which clears the settings blob — doesn't cover it).
+      if (authToken) await deleteCloudChat(authToken);
     } catch (err) {
       console.warn('[reset] some steps failed', err);
     }
+    // Unclaim the machine so the next sign-in starts from a clean owner.
+    try { localStorage.removeItem(LOCAL_ACCOUNT_KEY); } catch { /* ignore */ }
+    clearLocalChatHistory();
+    resetStack();
+    setSelectedInstanceId(BASE_INSTANCE_ID);
+    // Wipe UE's applied config so the reset is reflected in the live stream.
+    try {
+      pixelStreaming?.emitUIInteraction({ EventType: 'reset', Timestamp: new Date().toISOString() });
+    } catch { /* ignore */ }
     // Drop everything in-memory so the next render starts from a
-    // first-run shape: SignInScreen up (no token, no guest), profile
-    // unresolved (will fall through to the wizard once auth is back).
+    // first-run shape: SignInScreen up (no token), profile unresolved
+    // (will fall through to the wizard once auth is back).
     setAuthToken(null);
     setAuthUser(null);
-    setGuestMode(false);
     setProfile(undefined);
     setWizardMode(null);
     profileSyncedRef.current = false;
-  }, [authToken]);
+  }, [authToken, resetStack, pixelStreaming]);
 
   // Re-apply the user's saved wardrobe + lighting to UE. Fired on:
   //   * stream connect (so a fresh UE session loads the user's outfit
@@ -1867,42 +2196,123 @@ function AppMain() {
   // don't have to thread profile values into the systemExtension here.
   const profileSyncedRef = useRef(false);
   useEffect(() => {
-    // Profile sync runs once we have BOTH a connected stream AND a
-    // session (either signed-in OR guest mode). Signed-in: reconcile
-    // cloud (Worker) and local (soul), cloud wins when present, soul
-    // migrates up when cloud is empty. Guest mode: skip cloud entirely
-    // and read whatever soul has locally. Wizard fires when there's
-    // no profile on the side(s) we consulted.
+    // Profile sync runs once we have BOTH a connected stream AND a signed-in
+    // account. Reconcile the ACCOUNT'S cloud profile against the machine's
+    // local state, scoping local data to the account so a new login can't
+    // inherit a previous account's (or guest's) profile/keys.
     if (connectionState !== 'connected') return;
-    if (!authToken && !guestMode) return;
+    if (!authToken || !authUser) return;
     if (profileSyncedRef.current) return;
     profileSyncedRef.current = true;
 
+    const accountId = authUser.id;
     let cancelled = false;
     void (async () => {
       try {
-        const p = authToken
-          ? await syncSettings(authToken)
-          : await fetchSettings();
+        const localOwner = (() => {
+          try { return localStorage.getItem(LOCAL_ACCOUNT_KEY); } catch { return null; }
+        })();
+        const { profile: p, ownerChanged } = await reconcileForAccount(accountId, authToken, localOwner);
         if (cancelled) return;
+
+        if (ownerChanged) {
+          // The machine is changing hands to this account (different prior
+          // account, a guest session, or a fresh device). The previous owner's
+          // API keys + local chat history are machine-local secrets that must
+          // not leak — clear them. API keys are never synced, so this account
+          // has no keys on this machine yet; nudge the user to enter them
+          // UNLESS the wizard is about to open (p === null), which collects
+          // keys itself. (UE's live config is wiped on the way OUT — sign-out /
+          // reset — not here, so a fresh login doesn't flash a reset.)
+          let hadKeys = false;
+          try { hadKeys = !!(await window.electronAPI?.apiKeysGet?.()); } catch { /* ignore */ }
+          try { await window.electronAPI?.apiKeysClear?.(); } catch { /* ignore */ }
+          clearLocalChatHistory();
+          setSelectedInstanceId(BASE_INSTANCE_ID);
+          if (hadKeys || p !== null) setApiKeysNotice(true);
+        }
+
+        // Restore the roster to match the signed-in account. The roster now
+        // lives in the cloud blob (everything but API keys follows the
+        // account), so cloud wins: hydrate it when present. Otherwise, if the
+        // machine just changed hands, wipe the prior owner's roster back to
+        // base Grace. Either way, suppress the resulting change from echoing
+        // straight back up — we just read it from the cloud.
+        if (p?.roster && Array.isArray(p.roster) && p.roster.length > 0) {
+          suppressRosterPushRef.current = true;
+          hydrateStack(p.roster);
+        } else if (ownerChanged) {
+          suppressRosterPushRef.current = true;
+          resetStack();
+        }
+
+        try { localStorage.setItem(LOCAL_ACCOUNT_KEY, accountId); } catch { /* ignore */ }
+
+        // Seed the cloud with this account's local roster when the cloud
+        // profile predates roster-sync (an account onboarded before the roster
+        // was folded into the blob). Best-effort, version-less; cheap no-op
+        // for fresh accounts (just base Grace).
+        if (p && !p.roster && authToken) {
+          void saveSettingsEverywhere({ ...p, roster: stackRef.current }, authToken);
+        }
+
+        // Restore chat history for the signed-in account (cloud wins, like the
+        // roster). On owner change the prior owner's local chat was already
+        // wiped above; either way bump the reload nonce so the mounted
+        // conversation re-reads localStorage, and suppress the resulting change
+        // from echoing back up to the cloud.
+        const cloudChat = await fetchCloudChat(authToken);
+        if (cancelled) return;
+        if (cloudChat && Object.keys(cloudChat).length > 0) {
+          suppressChatPushRef.current = true;
+          restoreLocalChat(cloudChat);
+          setChatReloadNonce((n) => n + 1);
+        } else if (ownerChanged) {
+          suppressChatPushRef.current = true;
+          setChatReloadNonce((n) => n + 1);
+        }
+
+        // Just record the resolved profile; the onboarding-visibility effect
+        // below decides whether to open/close the wizard.
         setProfile(p);
-        if (!p) setWizardMode('first');
       } catch (err) {
         if (cancelled) return;
-        console.warn('[profile] sync failed', err);
-        // Fail-soft: treat as "no profile" so the wizard opens. The
-        // user can re-enter their info; next sync will mirror it.
-        setProfile(null);
-        setWizardMode('first');
+        console.warn('[profile] reconcile failed', err);
+        setProfile(null); // fail-soft → onboarding effect opens the wizard
       }
     })();
     return () => { cancelled = true; };
-  }, [connectionState, authToken, guestMode]);
+  }, [connectionState, authToken, authUser, resetStack, hydrateStack]);
 
-  // Either kind of session unlocks the post-login UI. Used as the gate
-  // for the chat dock, the wizard, the chat pane, and most other
-  // workspace surfaces. The SignInScreen mounts when there's neither.
-  const hasSession = !!authToken || guestMode;
+  // Onboarding visibility. Login now lives INSIDE the wizard, so the wizard
+  // opens whenever the user isn't fully set up — not signed in OR signed in
+  // without a profile — and closes once they are. Manual 'edit' opens (pencil
+  // / /onboard) are left untouched. This replaces the old SignInScreen gate.
+  useEffect(() => {
+    if (authToken === undefined) return;            // auth still resolving
+    if (!authToken) {
+      // Not signed in → first-run wizard (welcome + login steps).
+      setWizardMode((m) => (m === null ? 'first' : m));
+      return;
+    }
+    if (profile === undefined) return;              // reconcile still resolving
+    if (profile === null) {
+      setWizardMode((m) => (m === null ? 'first' : m));
+    } else {
+      // Fully set up → close the first-run wizard (don't disturb 'edit').
+      setWizardMode((m) => (m === 'first' ? null : m));
+    }
+  }, [authToken, profile]);
+
+  // A signed-in session unlocks the post-login UI (chat dock, chat pane,
+  // widgets). Onboarding (incl. login) runs over the stream before this.
+  const hasSession = !!authToken;
+  // Onboarding is "done" once a profile is saved (and we're not sitting in the
+  // blocking first-run wizard). The ambient widgets stay disabled until then —
+  // they're useless without the user's profile (timezone, city, interests) and
+  // shouldn't distract during first-run setup. Reopening onboarding to edit
+  // keeps them enabled (profile already exists).
+  const onboardingComplete = !!profile && wizardMode !== 'first';
 
   useEffect(() => {
     if (connectionState !== 'connected') return;
@@ -1931,6 +2341,9 @@ function AppMain() {
   // mode on, which hides the rest of the UI. Every other key uses
   // the normal sheet flow.
   const handleToggleWidget = useCallback((key: SheetKey) => {
+    // Widgets (ambient panels + wardrobe) are locked until onboarding is done,
+    // so slash commands / keyboard / the rail can't open them early.
+    if (!onboardingComplete) return;
     if (key === 'wardrobe') {
       // Force the chat pane closed so the customization overlay
       // spans the whole workspace, not the pre-shrunk window.
@@ -1940,7 +2353,7 @@ function AppMain() {
       return;
     }
     setActiveWidget(prev => (prev === key ? null : key));
-  }, []);
+  }, [onboardingComplete]);
 
   const handleCloseSheet = useCallback(() => setActiveWidget(null), []);
   const handleExitCustomization = useCallback(() => setCustomizationActive(false), []);
@@ -2301,11 +2714,14 @@ function AppMain() {
         {addPickerOpen && isConnected && (
           <AddCharacterPicker
             key="add-picker"
-            addable={addableAgents}
+            entries={storeEntries}
+            bundle={storeBundle}
             roster={agentStack}
             agentById={agentById}
             baseInstanceId={BASE_INSTANCE_ID}
             onPick={handlePickAgent}
+            onBuy={(sku) => { void handleBuy(sku); }}
+            onDownload={(id) => { void handleDownloadPak(id); }}
             onRename={renameInstance}
             onRemove={handleRemoveInstance}
             onCancel={handleCancelAdd}
@@ -2322,12 +2738,14 @@ function AppMain() {
         onClose={() => setSettingsOpen(false)}
       />
 
-      {/* Everything below this point, greeting, widgets, sheet, status,
-          screenshots, input bar, wizard, is gated on a connected
-          stream AND some kind of session (signed-in OR guest mode).
-          When customization mode is on, hide all of it so Grace
+      {/* Greeting + ambient widgets. Gated only on a connected stream
+          (NOT on a session) so the time + welcome + cycling quote greet
+          the user even before they sign in / finish onboarding. The
+          ambient widgets nested inside stay gated on `onboardingComplete`
+          since they need the profile (timezone / city / interests).
+          When customization mode is on, hide all of it so the character
           stands alone in the fitting room. */}
-      {isConnected && hasSession && !customizationActive && !addPickerOpen && (
+      {isConnected && !customizationActive && !addPickerOpen && (
         <>
       <Greeting
         userName={
@@ -2342,21 +2760,28 @@ function AppMain() {
         }
       />
 
-      <WidgetRail
-        activeWidget={activeWidget}
-        onToggle={handleToggleWidget}
-        remindersCount={remindersCount}
-        stocksDayPct={stocksDayPct}
-        triggerRefs={triggerRefs}
-      />
+      {/* Ambient widgets are disabled until onboarding completes — they need
+          the user's profile (timezone/city/interests) and shouldn't clutter
+          first-run setup. */}
+      {onboardingComplete && (
+        <>
+          <WidgetRail
+            activeWidget={activeWidget}
+            onToggle={handleToggleWidget}
+            remindersCount={remindersCount}
+            stocksDayPct={stocksDayPct}
+            triggerRefs={triggerRefs}
+          />
 
-      <SheetPanel
-        activeKey={activeWidget}
-        onClose={handleCloseSheet}
-        triggerRefs={triggerRefs}
-      >
-        {sheetContent}
-      </SheetPanel>
+          <SheetPanel
+            activeKey={activeWidget}
+            onClose={handleCloseSheet}
+            triggerRefs={triggerRefs}
+          >
+            {sheetContent}
+          </SheetPanel>
+        </>
+      )}
 
       {/* Status pills, attached screenshots, and the InputBar all
           moved out of this conditional, they now live in the
@@ -2365,20 +2790,29 @@ function AppMain() {
           unit (so the user can keep typing while reading history,
           without losing textarea focus or in-flight voice state). */}
 
-      {/* Onboarding wizard. Mounted on first launch (no profile) and
-          on demand via the pencil icon / /onboard slash command. The
-          welcome line plays automatically on first-run mount; the
-          aha-moment greeting plays after a successful save. Both flow
-          through dispatchChatResult so UE plays them via the same
-          path as a regular reply. */}
+        </>
+      )}
+      </div>{/* /workspace wrapper */}
+
+      {/* Onboarding wizard. Lives OUTSIDE the hasSession-gated workspace
+          fragment so it can mount pre-auth: first run boots straight into
+          the stream + this wizard (Welcome -> Get started -> the login/
+          signup step lives inside the wizard itself via AuthPanel). Also
+          opened on demand via the pencil icon / /onboard slash command.
+          The welcome line plays on first-run mount; the aha-moment
+          greeting plays after a successful save. Both flow through
+          dispatchChatResult so UE plays them via the same reply path. */}
       <AnimatePresence>
-        {wizardMode && (
+        {isConnected && !customizationActive && !addPickerOpen && wizardMode && (
           <Wizard
             key="onboarding-wizard"
             firstRun={wizardMode === 'first'}
             initial={profile}
+            hasSession={hasSession}
+            authUser={authUser}
+            onSignedIn={handleSignedIn}
             personaPrompt={persona.prompt}
-            onSave={(p) => saveSettingsEverywhere(p, authToken ?? null)}
+            onSave={(p) => saveSettingsEverywhere({ ...p, roster: agentStack }, authToken ?? null)}
             onChatResult={dispatchChatResult}
             onComplete={(saved) => {
               setProfile(saved);
@@ -2396,9 +2830,6 @@ function AppMain() {
           />
         )}
       </AnimatePresence>
-        </>
-      )}
-      </div>{/* /workspace wrapper */}
 
       {/* Dock layer, single sliding container for the InputBar, the
           escalation status pills, and the attached-screenshot strip.
@@ -2448,7 +2879,7 @@ function AppMain() {
               {!chatPaneOpen && escalating && statusHistory.map((s, i) => {
                 const isNewest = i === statusHistory.length - 1;
                 return (
-                  <motion.span
+                  <motion.div
                     key={s.id}
                     layout
                     initial={{ opacity: 0, y: 10, filter: 'blur(3px)' }}
@@ -2460,17 +2891,27 @@ function AppMain() {
                     exit={{ opacity: 0, y: -10, filter: 'blur(3px)' }}
                     transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
                     style={{
-                      fontSize: 14,
-                      fontWeight: 500,
-                      fontStyle: 'italic',
-                      letterSpacing: '0.01em',
-                      color: 'var(--text-secondary)',
-                      textShadow: '0 1px 3px rgba(0, 0, 0, 0.6)',
-                      whiteSpace: 'nowrap',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
                     }}
                   >
-                    {s.text}
-                  </motion.span>
+                    {/* Accent-tinted ripple loader leads the live activity label. */}
+                    {isNewest && <PulseGrid size={16} style={{ marginBottom: 1 }} />}
+                    <span
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 500,
+                        fontStyle: 'italic',
+                        letterSpacing: '0.01em',
+                        color: 'var(--text-secondary)',
+                        textShadow: '0 1px 3px rgba(0, 0, 0, 0.6)',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {s.text}
+                    </span>
+                  </motion.div>
                 );
               })}
             </AnimatePresence>
@@ -2581,6 +3022,7 @@ function AppMain() {
                   voiceTentative={streaming.display.trim().replace(/^\s+/u, '')}
                   onPrevPersona={handlePrevPersona}
                   onNextPersona={handleNextPersona}
+                  onPersonaNameClick={() => selectInstance(ADD_SLOT, 1)}
                   personaDisabled={!isConnected}
                   onPasteImage={handlePasteImage}
                   onAttachImages={handleAttachImages}
@@ -2610,36 +3052,200 @@ function AppMain() {
         // its profile cluster and shows the platform window controls.
         showReconnecting={showReconnecting}
         user={authUser}
-        guestMode={guestMode}
         onSignOut={() => { void handleSignOut(); }}
-        onSignIn={() => {
-          // Drop guest mode so the SignInScreen mounts. Profile +
-          // keys saved as guest stay on disk; if the user signs in
-          // and creates a real account, syncSettings will migrate
-          // them up to the cloud automatically on first sync.
-          setGuestMode(false);
-          // Re-arm the profile sync so the next post-sign-in mount
-          // actually runs syncSettings (which mirrors the guest's
-          // local soul settings up to the cloud the first time).
-          profileSyncedRef.current = false;
-          try { localStorage.removeItem(GUEST_MODE_KEY); } catch { /* ignore */ }
-        }}
         onResetAccount={() => { void handleResetAccount(); }}
         onResetSession={handleResetSession}
         onOpenSettings={() => setSettingsOpen(true)}
+        clawsBalance={hasSession ? clawsBalance : undefined}
       />
 
-      {/* Sign-in screen. Mounted whenever auth has resolved to "no
-          session" AND the user hasn't opted into guest mode, sits
-          over the loading screen so the user can authenticate while
-          the UnClaw Engine is still warming up. Renders on top of
-          everything else (zIndex 60). */}
-      {authToken === null && !guestMode && (
-        <SignInScreen
-          onSignedIn={handleSignedIn}
-          onSkipLogin={handleSkipLogin}
-        />
+      {/* New-account notice: this machine's previous API keys were cleared
+          (keys are local secrets, never synced to an account). Nudge the user
+          to re-enter them in Settings. Dismissible. */}
+      {apiKeysNotice && hasSession && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 46,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 58,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            maxWidth: 440,
+            padding: '9px 12px 9px 14px',
+            borderRadius: 12,
+            background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.66))',
+            border: '1px solid rgba(255,255,255,0.12)',
+            backdropFilter: 'var(--glass-blur)',
+            WebkitBackdropFilter: 'var(--glass-blur)',
+            boxShadow: '0 10px 28px -12px rgba(0,0,0,0.6)',
+            color: 'var(--text-primary)',
+            fontSize: 12.5,
+            lineHeight: 1.35,
+          }}
+        >
+          <span style={{ flex: 1 }}>
+            Signed in to a different account on this device. Your saved API keys were
+            cleared, re-enter them in Settings.
+          </span>
+          <button
+            type="button"
+            onClick={() => { setApiKeysNotice(false); setSettingsOpen(true); }}
+            style={{
+              flex: '0 0 auto',
+              padding: '5px 10px',
+              borderRadius: 8,
+              border: '1px solid rgba(255,255,255,0.16)',
+              background: 'rgba(255,255,255,0.08)',
+              color: 'var(--text-primary)',
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            Settings
+          </button>
+          <button
+            type="button"
+            onClick={() => setApiKeysNotice(false)}
+            aria-label="Dismiss"
+            style={{
+              flex: '0 0 auto',
+              width: 22,
+              height: 22,
+              padding: 0,
+              borderRadius: '50%',
+              border: 'none',
+              background: 'transparent',
+              color: 'var(--text-ghost)',
+              cursor: 'pointer',
+            }}
+          >
+            <X size={13} strokeWidth={2} />
+          </button>
+        </div>
       )}
+
+      {/* Store toast. 'added' fires when a purchase lands (entitlement appears
+          via the checkout deep link or the post-checkout poll) — the download
+          then auto-starts. 'ready' fires when the bought character finishes
+          downloading + mounting. Warm accent edge + check mark, auto-dismisses. */}
+      <AnimatePresence>
+        {storeToast && hasSession && (
+          <motion.div
+            key="store-toast"
+            initial={{ opacity: 0, y: -12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12 }}
+            transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+            style={{
+              position: 'absolute',
+              top: 46,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              zIndex: 59,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 11,
+              maxWidth: 460,
+              padding: '10px 14px 10px 13px',
+              borderRadius: 12,
+              background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.72))',
+              border: '1px solid rgba(255,255,255,0.12)',
+              borderLeft: '3px solid var(--accent, #c44444)',
+              backdropFilter: 'var(--glass-blur)',
+              WebkitBackdropFilter: 'var(--glass-blur)',
+              boxShadow: '0 12px 30px -12px rgba(0,0,0,0.62)',
+              color: 'var(--text-primary)',
+              fontSize: 12.5,
+              lineHeight: 1.35,
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                flex: '0 0 auto',
+                width: 22,
+                height: 22,
+                borderRadius: '50%',
+                display: 'grid',
+                placeItems: 'center',
+                background: 'rgba(196, 68, 68, 0.18)',
+                color: 'var(--accent, #c44444)',
+              }}
+            >
+              <Check size={13} strokeWidth={2.5} />
+            </span>
+            <span style={{ flex: 1 }}>
+              {(() => {
+                const names = storeToast.ids.map((id) => agentById[id]?.name ?? id);
+                if (storeToast.kind === 'ready') {
+                  return <><b>{names[0]}</b> is ready, pick it from the + menu to start chatting.</>;
+                }
+                if (names.length === 1) {
+                  return <><b>{names[0]}</b> was added to your account, downloading now…</>;
+                }
+                return <><b>{names.length} characters</b> were added to your account, downloading now…</>;
+              })()}
+            </span>
+            <button
+              type="button"
+              onClick={() => setStoreToast(null)}
+              aria-label="Dismiss"
+              style={{
+                flex: '0 0 auto',
+                width: 22,
+                height: 22,
+                padding: 0,
+                borderRadius: '50%',
+                border: 'none',
+                background: 'transparent',
+                color: 'var(--text-ghost)',
+                cursor: 'pointer',
+              }}
+            >
+              <X size={13} strokeWidth={2} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* "Not enough claws" notice — shown when a character spend can't be
+          covered by the current balance. Auto-dismisses. */}
+      <AnimatePresence>
+        {clawsNotice && hasSession && (
+          <motion.div
+            key="claws-notice"
+            initial={{ opacity: 0, y: -12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12 }}
+            transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+            style={{
+              position: 'absolute',
+              top: 46,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              zIndex: 59,
+              maxWidth: 440,
+              padding: '10px 14px',
+              borderRadius: 12,
+              background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.72))',
+              border: '1px solid rgba(255,255,255,0.12)',
+              borderLeft: '3px solid var(--accent, #c44444)',
+              backdropFilter: 'var(--glass-blur)',
+              WebkitBackdropFilter: 'var(--glass-blur)',
+              boxShadow: '0 12px 30px -12px rgba(0,0,0,0.62)',
+              color: 'var(--text-primary)',
+              fontSize: 12.5,
+              lineHeight: 1.4,
+            }}
+          >
+            {clawsNotice}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Chat history side pane, slides in from the right; the
           workspace wrapper above shrinks in unison so the stream is

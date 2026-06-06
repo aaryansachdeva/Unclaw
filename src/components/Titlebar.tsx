@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { Pin, PinOff, LogOut, Settings, Trash2, LogIn, UserCircle2, RotateCcw } from 'lucide-react';
 import { getSoulBaseUrl } from '../services/soulBase';
+import { ClawsIcon } from './ClawsBalance';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -84,6 +85,9 @@ interface TitlebarProps {
    *  the SettingsPanel modal where users can reconfigure LLM, TTS,
    *  agentic, and graphics settings post-onboarding. */
   onOpenSettings?: () => void;
+  /** Claws balance shown as a pill just inboard of the profile cluster.
+   *  undefined = hide it (signed out / minimal mode). */
+  clawsBalance?: number | null;
 }
 
 function userInitials(user: TitlebarUser): string {
@@ -107,6 +111,7 @@ export function Titlebar({
   onResetAccount,
   onResetSession,
   onOpenSettings,
+  clawsBalance,
   minimalMode = false,
   leftSlot,
 }: TitlebarProps) {
@@ -225,58 +230,93 @@ export function Titlebar({
               ref={profileWrapRef}
               style={{
                 position: 'relative',
-                // Flex so the macOS-only pin button can sit visually
-                // next to the avatar inside the same wrapper (keeps the
-                // popover's position:absolute anchor on the avatar's
-                // wrapper without affecting positioning).
+                // One unified glass capsule holding the whole right cluster
+                // (claws balance + pin + avatar). Height 36 with radius 18 ⇒
+                // the rounded ends share the avatar circle's curvature, so the
+                // avatar reads as the capsule's right cap.
                 display: 'flex',
                 alignItems: 'center',
-                gap: 6,
+                gap: 8,
+                // A touch taller than the 36px avatar so the circle floats
+                // inside the capsule rather than capping it flush.
+                height: 44,
+                paddingLeft: clawsBalance !== undefined ? 14 : 8,
+                paddingRight: 4,
+                borderRadius: 22,
+                background: 'var(--glass-bg, rgba(40, 48, 65, 0.5))',
+                border: '1px solid rgba(255, 255, 255, 0.12)',
+                backdropFilter: 'var(--glass-blur)',
+                WebkitBackdropFilter: 'var(--glass-blur)',
                 WebkitAppRegion: 'no-drag',
               } as React.CSSProperties}
             >
+              {/* Claws balance — the in-app currency, rendered inline as the
+                  capsule's left content. Hidden when undefined (signed out). */}
+              {clawsBalance !== undefined && (
+                <span
+                  title={clawsBalance == null ? 'Claws' : `${clawsBalance} claws`}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 7,
+                    fontSize: 13.5,
+                    fontWeight: 700,
+                    letterSpacing: '0.01em',
+                    color: 'var(--text-primary)',
+                    userSelect: 'none',
+                  }}
+                >
+                  <ClawsIcon size={18} animated />
+                  {clawsBalance == null ? '—' : clawsBalance.toLocaleString()}
+                </span>
+              )}
+
               {/* macOS-only: pin button rides INSIDE the profile cluster
                   so it lives on the right edge of the chrome (next to
                   the avatar) instead of getting orphaned on the left
                   next to the traffic lights. On Windows/Linux the pin
                   stays in the right-cluster buttons array below. */}
               {isMacPlatform && (
-                <motion.button
-                  type="button"
-                  whileTap={reduce ? undefined : { scale: 0.88 }}
-                  onClick={handlePin}
-                  aria-label={pinned ? 'Unpin from top' : 'Pin to top'}
-                  title={pinned ? 'Unpin from top' : 'Pin to top'}
-                  className="glass-btn"
-                  style={{
-                    width: 26,
-                    height: 26,
-                    borderRadius: 8,
-                    background: pinned
-                      ? 'rgba(255, 255, 255, 0.18)'
-                      : 'rgba(255, 255, 255, 0.06)',
-                    transition: 'background 180ms var(--ease-out-quart)',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    padding: 0,
-                    border: 'none',
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = pinned
-                      ? 'rgba(255, 255, 255, 0.26)'
-                      : 'rgba(255, 255, 255, 0.12)';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = pinned
-                      ? 'rgba(255, 255, 255, 0.18)'
-                      : 'rgba(255, 255, 255, 0.06)';
-                  }}
-                >
-                  {pinned
-                    ? <Pin size={14} color="#ffffff" strokeWidth={2.2} />
-                    : <PinOff size={14} color="var(--text-secondary)" strokeWidth={2} />}
-                </motion.button>
+                <>
+                  {/* Hairline divider between the claws balance and the pin. */}
+                  {clawsBalance !== undefined && (
+                    <span
+                      aria-hidden
+                      style={{
+                        width: 1,
+                        height: 18,
+                        background: 'rgba(255, 255, 255, 0.16)',
+                        flex: '0 0 auto',
+                      }}
+                    />
+                  )}
+                  <motion.button
+                    type="button"
+                    whileTap={reduce ? undefined : { scale: 0.88 }}
+                    onClick={handlePin}
+                    aria-label={pinned ? 'Unpin from top' : 'Pin to top'}
+                    title={pinned ? 'Unpin from top' : 'Pin to top'}
+                    style={{
+                      // Bare icon, no chip/circle. Brightness conveys state:
+                      // bright when pinned, dim when not.
+                      width: 22,
+                      height: 22,
+                      background: 'transparent',
+                      border: 'none',
+                      padding: 0,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      opacity: pinned ? 1 : 0.4,
+                      transition: 'opacity 180ms var(--ease-out-quart)',
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.opacity = pinned ? '1' : '0.7'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.opacity = pinned ? '1' : '0.4'; }}
+                  >
+                    <Pin size={15} color="#ffffff" strokeWidth={2} />
+                  </motion.button>
+                </>
               )}
               <motion.button
                 type="button"
@@ -287,13 +327,17 @@ export function Titlebar({
                 title={user ? userDisplayName(user) : 'Guest'}
                 className="glass-btn"
                 style={{
+                  // Caps the right end of the unified capsule. 36px circle vs
+                  // the capsule's 18px radius ⇒ flush, framed by the capsule
+                  // border (no own border needed).
                   width: 36,
                   height: 36,
+                  flex: '0 0 auto',
                   borderRadius: '50%',
                   background: profileOpen
-                    ? 'rgba(255, 255, 255, 0.14)'
-                    : 'rgba(255, 255, 255, 0.06)',
-                  border: '1px solid rgba(255, 255, 255, 0.10)',
+                    ? 'rgba(255, 255, 255, 0.16)'
+                    : 'rgba(255, 255, 255, 0.07)',
+                  border: 'none',
                   color: 'var(--text-primary)',
                   overflow: 'hidden',
                   transition: 'background 180ms var(--ease-out-quart)',

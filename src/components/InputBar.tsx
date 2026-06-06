@@ -104,6 +104,8 @@ interface InputBarProps {
   /** Persona switcher — chevron-prev / chevron-next, inline in row 2. */
   onPrevPersona: () => void;
   onNextPersona: () => void;
+  /** Clicking the persona name opens the "add new agent" picker. */
+  onPersonaNameClick?: () => void;
   /** Disable the persona switcher when stream isn't connected. */
   personaDisabled?: boolean;
   /** Called when the user pastes an image into the textarea. Each
@@ -169,6 +171,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   voiceTentative = '',
   onPrevPersona,
   onNextPersona,
+  onPersonaNameClick,
   personaDisabled = false,
   onPasteImage,
   onAttachImages,
@@ -842,7 +845,11 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               onClick={onPrevPersona}
               disabled={personaDisabled}
             />
-            <div
+            <button
+              type="button"
+              onClick={onPersonaNameClick}
+              disabled={personaDisabled || !onPersonaNameClick}
+              title={onPersonaNameClick ? 'Add a new agent' : undefined}
               style={{
                 minWidth: 64,
                 textAlign: 'center',
@@ -850,7 +857,15 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
                 fontWeight: 600,
                 letterSpacing: '0.01em',
                 color: 'var(--text-primary)',
+                background: 'transparent',
+                border: 'none',
+                padding: '2px 4px',
+                borderRadius: 6,
+                cursor: (personaDisabled || !onPersonaNameClick) ? 'default' : 'pointer',
+                transition: 'opacity 150ms var(--ease-out-quart, ease)',
               }}
+              onMouseEnter={(e) => { if (onPersonaNameClick && !personaDisabled) e.currentTarget.style.opacity = '0.62'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}
             >
               <AnimatePresence mode="wait">
                 <motion.span
@@ -864,7 +879,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
                   {personaName}
                 </motion.span>
               </AnimatePresence>
-            </div>
+            </button>
             <InlineChevron
               direction="next"
               onClick={onNextPersona}

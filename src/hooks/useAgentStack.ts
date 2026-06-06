@@ -45,20 +45,26 @@ function isInstance(x: unknown): x is AgentInstance {
     && typeof (x as AgentInstance).agentId === 'string';
 }
 
+/** Validate + canonicalize an arbitrary roster array: drop malformed
+ *  instances and guarantee the permanent base instance is present + first.
+ *  Returns the default stack when nothing valid survives. Shared by `load`
+ *  (localStorage) and `hydrateStack` (cloud restore) so both apply the same
+ *  invariants. */
+function normalize(arr: unknown): AgentInstance[] {
+  if (Array.isArray(arr) && arr.every(isInstance) && arr.length > 0) {
+    const list = arr as AgentInstance[];
+    const base = list.find((i) => i.id === BASE_INSTANCE_ID)
+      ?? { id: BASE_INSTANCE_ID, agentId: BASE_AGENT };
+    const rest = list.filter((i) => i.id !== BASE_INSTANCE_ID);
+    return [base, ...rest];
+  }
+  return defaultStack();
+}
+
 function load(): AgentInstance[] {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) {
-      const arr = JSON.parse(raw) as unknown;
-      if (Array.isArray(arr) && arr.every(isInstance) && arr.length > 0) {
-        const list = arr as AgentInstance[];
-        // Guarantee the permanent base instance is present + first.
-        const base = list.find((i) => i.id === BASE_INSTANCE_ID)
-          ?? { id: BASE_INSTANCE_ID, agentId: BASE_AGENT };
-        const rest = list.filter((i) => i.id !== BASE_INSTANCE_ID);
-        return [base, ...rest];
-      }
-    }
+    if (raw) return normalize(JSON.parse(raw) as unknown);
   } catch {
     /* corrupt payload -> default */
   }
@@ -118,5 +124,25 @@ export function useAgentStack() {
     });
   }, []);
 
-  return { stack, addInstance, removeInstance, renameInstance, setInstanceWardrobe };
+  /** Wipe the roster back to just the base Grace instance. Called when the
+   *  machine changes owning account / on account reset so one account's added
+   *  + renamed + re-dressed characters don't bleed into another's before the
+   *  signing-in account's own roster is restored from the cloud. */
+  const resetStack = useCallback(() => {
+    const next = defaultStack();
+    save(next);
+    setStack(next);
+  }, []);
+
+  /** Replace the whole roster with one pulled from the cloud blob (sign-in
+   *  reconcile). Normalizes + mirrors to localStorage so it survives reload.
+   *  Distinct from the mutation callbacks so the caller can restore without
+   *  the change immediately echoing back up to the cloud. */
+  const hydrateStack = useCallback((incoming: unknown) => {
+    const next = normalize(incoming);
+    save(next);
+    setStack(next);
+  }, []);
+
+  return { stack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, resetStack, hydrateStack };
 }

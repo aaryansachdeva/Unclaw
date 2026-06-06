@@ -233,6 +233,41 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeListener('update:log', handler);
     },
   },
+
+  // ----------------------------------------------------------------------
+  // Character store. Renderer fetches the presigned pak URL from the store
+  // Worker (it holds the auth token) and hands it here for the heavy
+  // download/verify/extract. Plus the unclaw:// deep link that the Polar
+  // checkout-complete page bounces through to wake the app.
+  characterStore: {
+    downloadPak: (args: {
+      characterId: string;
+      url: string;
+    }): Promise<{ ok: boolean; dir?: string; mountPath?: string | null; error?: string }> =>
+      ipcRenderer.invoke('character-store:download-pak', args),
+    listInstalled: (): Promise<{ ids: string[] }> =>
+      ipcRenderer.invoke('character-store:list-installed'),
+    onPakProgress: (
+      cb: (data: { characterId: string; downloaded: number; total: number }) => void,
+    ): (() => void) => {
+      const handler = (
+        _evt: IpcRendererEvent,
+        data: { characterId: string; downloaded: number; total: number },
+      ) => cb(data);
+      ipcRenderer.on('character-store:pak-progress', handler);
+      return () => ipcRenderer.removeListener('character-store:pak-progress', handler);
+    },
+  },
+
+  // Deep link (unclaw://...). onDeepLink fires for links that arrive while
+  // running; getPendingDeepLink pulls one that arrived during cold start.
+  onDeepLink: (cb: (url: string) => void): (() => void) => {
+    const handler = (_evt: IpcRendererEvent, url: string) => cb(url);
+    ipcRenderer.on('deep-link', handler);
+    return () => ipcRenderer.removeListener('deep-link', handler);
+  },
+  getPendingDeepLink: (): Promise<string | null> =>
+    ipcRenderer.invoke('deep-link:get-pending'),
 });
 
 // Shape mirror of updateCoordinator.UpdateSnapshot, kept inline rather than

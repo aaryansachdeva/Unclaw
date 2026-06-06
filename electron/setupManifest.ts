@@ -54,6 +54,21 @@ export interface SetupManifest {
    *  LipSyncModelv6_small,soul-models}/. Extracted to
    *  runtime/assets/. */
   runtimeAssets: RemoteAsset;
+
+  /** Paid character paks, keyed by stable character id (ava/goblin/chris/joi).
+   *  These are NOT downloaded at setup time; they are fetched on demand after
+   *  purchase (entitlement checked by the store Worker, which hands back a
+   *  short-lived presigned URL to a PRIVATE R2 bucket). The `url` here is only
+   *  a fallback / reference; the live download URL comes from the store Worker.
+   *  `sha256` + `sizeBytes` are used by the coordinator to verify the bytes
+   *  exactly as for the base bundles. `version` is passed to the Worker as ?v=
+   *  so a re-published pak invalidates cleanly. */
+  characterPaks?: Record<string, CharacterPakAsset>;
+}
+
+export interface CharacterPakAsset extends RemoteAsset {
+  characterId: string;
+  version: string;
 }
 
 export const MANIFEST: SetupManifest = {
@@ -81,5 +96,44 @@ export const MANIFEST: SetupManifest = {
     url: 'https://files.fotonlabs.com/mac/assets/runtime-2026.0523.01-mac.zip',
     sha256: 'c143b8feadd8d15bc603dbffcbc6812f43b63e7ab26239c12f6d1a9b26bb8524',
     sizeBytes: 1_204_449_785,
+  },
+
+  // Paid character paks. Cooked from AudioTestProject02 build 2026.0604.01 as
+  // per-character chunks (chunk1=ava .. chunk4=joi), each zipped (<id>.pak
+  // inside) and uploaded to the PRIVATE R2 bucket unclaw-paks-private at
+  // characters/<id>/current.zip. `url` is documentation only — the real,
+  // short-lived presigned download URL is handed back by the store Worker after
+  // it verifies the account's entitlement; sha256 + sizeBytes here verify the
+  // exact bytes (same discipline as the base bundles). grace + mark are free and
+  // ship in the base app (chunk0/chunk5), so they have no entry here.
+  characterPaks: {
+    ava: {
+      characterId: 'ava',
+      version: '2026.0605.01',
+      url: 'https://store.unclaw.io/store/characters/ava/download',
+      sha256: '695113270e37c364568eec20123b9ba630bd9fbf87c2e8b214be9e8c692994dc',
+      sizeBytes: 176_562_508,
+    },
+    goblin: {
+      characterId: 'goblin',
+      version: '2026.0605.01',
+      url: 'https://store.unclaw.io/store/characters/goblin/download',
+      sha256: '6c194de44fb3216347b628ee0962f1355b0cc5393885cf26865ccb90d760bfb3',
+      sizeBytes: 88_141_685,
+    },
+    chris: {
+      characterId: 'chris',
+      version: '2026.0605.01',
+      url: 'https://store.unclaw.io/store/characters/chris/download',
+      sha256: '870dc7645d63e1809813b02de0513ce78858e76d114b25d60d77681fffe5c484',
+      sizeBytes: 129_965_497,
+    },
+    joi: {
+      characterId: 'joi',
+      version: '2026.0605.01',
+      url: 'https://store.unclaw.io/store/characters/joi/download',
+      sha256: 'd6bb50361f6c051ed454852a37688a8939f9d4eefa38cedc617f49d75e3e5a19',
+      sizeBytes: 136_502_842,
+    },
   },
 };
