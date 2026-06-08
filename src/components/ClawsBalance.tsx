@@ -150,7 +150,7 @@ export function ClawsBalance({ balance }: { balance: number | null }) {
       }}
     >
       <ClawsIcon size={18} animated />
-      <span>{balance == null ? '—' : balance.toLocaleString()}</span>
+      <span>{balance == null ? '·' : balance.toLocaleString()}</span>
     </div>
   );
 }

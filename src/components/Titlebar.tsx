@@ -127,6 +127,9 @@ export function Titlebar({
   // untouched. Separate state so arming one doesn't affect the other.
   const [sessionResetArmed, setSessionResetArmed] = useState(false);
   const profileWrapRef = useRef<HTMLDivElement | null>(null);
+  // Click-the-balance explainer: claws can't be bought, only earned.
+  const [clawsInfoOpen, setClawsInfoOpen] = useState(false);
+  const clawsWrapRef = useRef<HTMLDivElement | null>(null);
 
   const handlePin = () => {
     const next = !pinned;
@@ -155,6 +158,27 @@ export function Titlebar({
       document.removeEventListener('keydown', onKey);
     };
   }, [profileOpen]);
+
+  // Click-outside / Escape handler for the claws explainer popover.
+  useEffect(() => {
+    if (!clawsInfoOpen) return undefined;
+    const onPointer = (e: MouseEvent) => {
+      const target = e.target instanceof Node ? e.target : null;
+      if (!target) return;
+      if (clawsWrapRef.current && !clawsWrapRef.current.contains(target)) {
+        setClawsInfoOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setClawsInfoOpen(false);
+    };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [clawsInfoOpen]);
 
   // Disarm the reset confirms when the popover closes — otherwise the
   // user could open it again and a stray click would skip the confirm.
@@ -251,24 +275,101 @@ export function Titlebar({
               } as React.CSSProperties}
             >
               {/* Claws balance — the in-app currency, rendered inline as the
-                  capsule's left content. Hidden when undefined (signed out). */}
+                  capsule's left content. Hidden when undefined (signed out).
+                  Clickable: opens a tiny explainer that claws can't be bought,
+                  only earned by interacting with agents. */}
               {clawsBalance !== undefined && (
-                <span
-                  title={clawsBalance == null ? 'Claws' : `${clawsBalance} claws`}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 7,
-                    fontSize: 13.5,
-                    fontWeight: 700,
-                    letterSpacing: '0.01em',
-                    color: 'var(--text-primary)',
-                    userSelect: 'none',
-                  }}
-                >
-                  <ClawsIcon size={18} animated />
-                  {clawsBalance == null ? '—' : clawsBalance.toLocaleString()}
-                </span>
+                <div ref={clawsWrapRef} style={{ position: 'relative', display: 'inline-flex' }}>
+                  <button
+                    type="button"
+                    onClick={() => setClawsInfoOpen((o) => !o)}
+                    aria-label="About claws"
+                    aria-expanded={clawsInfoOpen}
+                    title={clawsBalance == null ? 'Claws' : `${clawsBalance} claws`}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 7,
+                      background: 'transparent',
+                      border: 'none',
+                      padding: 0,
+                      margin: 0,
+                      fontSize: 13.5,
+                      fontWeight: 700,
+                      fontFamily: 'inherit',
+                      letterSpacing: '0.01em',
+                      color: 'var(--text-primary)',
+                      cursor: 'pointer',
+                      userSelect: 'none',
+                      WebkitAppRegion: 'no-drag',
+                    } as React.CSSProperties}
+                  >
+                    <ClawsIcon size={18} animated />
+                    {clawsBalance == null ? '—' : clawsBalance.toLocaleString()}
+                  </button>
+
+                  <AnimatePresence>
+                    {clawsInfoOpen && (
+                      <motion.div
+                        key="claws-info"
+                        role="dialog"
+                        initial={reduce ? { opacity: 1, y: 0 } : { opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
+                        transition={{ duration: 0.18, ease: EASE_OUT_EXPO }}
+                        style={{
+                          position: 'absolute',
+                          top: 'calc(100% + 12px)',
+                          // Centered under the claws pill. marginLeft = -width/2
+                          // (not translateX) so it doesn't fight framer-motion's
+                          // animated transform on the y axis.
+                          left: '50%',
+                          marginLeft: -122,
+                          width: 244,
+                          padding: '13px 15px',
+                          borderRadius: 14,
+                          background: 'var(--glass-bg-panel)',
+                          backdropFilter: 'var(--glass-blur)',
+                          WebkitBackdropFilter: 'var(--glass-blur)',
+                          border: '1px solid var(--glass-border)',
+                          boxShadow: [
+                            'var(--shadow-panel-ground)',
+                            '0 12px 28px -12px rgba(196, 68, 68, 0.18)',
+                          ].join(', '),
+                          zIndex: 70,
+                          overflow: 'hidden',
+                        }}
+                      >
+                        <span
+                          aria-hidden
+                          style={{
+                            position: 'absolute',
+                            top: 0,
+                            left: 12,
+                            right: 12,
+                            height: 1,
+                            pointerEvents: 'none',
+                            background: 'linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.16), transparent)',
+                          }}
+                        />
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 7 }}>
+                          <ClawsIcon size={16} animated={false} />
+                          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+                            Claws can't be bought
+                          </span>
+                        </div>
+                        <p style={{
+                          margin: 0,
+                          fontSize: 12,
+                          lineHeight: 1.5,
+                          color: 'var(--text-secondary)',
+                        }}>
+                          You earn a claw every time you interact with your agents, then spend them to unlock new ones.
+                        </p>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
               )}
 
               {/* macOS-only: pin button rides INSIDE the profile cluster

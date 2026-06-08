@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Check } from 'lucide-react';
+import { X, Check, AlertTriangle } from 'lucide-react';
 import { Titlebar } from './components/Titlebar';
 import { StreamView } from './components/StreamView';
 import { Greeting } from './components/Greeting';
@@ -42,6 +42,7 @@ import {
   deleteSettings,
   saveSettingsEverywhere,
   reconcileForAccount,
+  firstName,
   type UserSettings,
 } from './services/userSettings';
 import {
@@ -74,6 +75,40 @@ import {
 /** Carousel sentinel: cycling onto this opens the Add picker over a blank
  *  stage (UE cleared via agentSwitch with an unknown id). */
 const ADD_SLOT = '__add__';
+
+/** Turn a raw chat/voice pipeline error into one short, on-brand line the
+ *  end user can act on. The thrown message looks like
+ *  `soul /chat 400: {"detail":"..."}`; we pull soul's detail out and map the
+ *  common failures to a next move. End users never see devtools, so this is
+ *  the only place they learn the request failed. */
+function friendlyPipelineError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err ?? '');
+  let detail = raw;
+  const brace = raw.match(/\{[\s\S]*\}/);
+  if (brace) {
+    try {
+      const j = JSON.parse(brace[0]);
+      if (j && typeof j.detail === 'string') detail = j.detail;
+    } catch { /* keep raw */ }
+  }
+  const low = detail.toLowerCase();
+  if (low.includes('llm_model is required') || low.includes('complete onboarding')) {
+    return "No chat model is set. Open Settings and pick your chat model to start talking.";
+  }
+  if (/(401|403|unauthor|invalid.*key|authentication|api[ _-]?key)/.test(low)) {
+    return "Couldn't reach the model. Check your API key in Settings.";
+  }
+  if (/(quota|insufficient_quota|429|rate.?limit|billing)/.test(low)) {
+    return "The model provider rejected the request (quota or rate limit). Check your plan, then try again.";
+  }
+  if (/(timeout|timed out|502|503|504|econn|network|fetch failed|failed to fetch)/.test(low)) {
+    return "Couldn't reach the model. Check your connection and try again.";
+  }
+  if (/(tts|voice|elevenlabs|kokoro|supertonic|11labs)/.test(low)) {
+    return "Voice generation failed. Check your voice settings or key.";
+  }
+  return detail.length > 160 ? `${detail.slice(0, 157)}...` : detail;
+}
 
 /** localStorage flag set when the user clicked "Continue without an
  *  account" on the sign-in screen. Persists across launches so guests
@@ -357,6 +392,10 @@ function AppMain() {
   clawsBalanceRef.current = clawsBalance;
   // Transient "not enough claws" message shown when a spend can't cover the cost.
   const [clawsNotice, setClawsNotice] = useState<string | null>(null);
+  // User-facing error from the chat / voice pipeline (bad key, missing model,
+  // provider down). The raw error only ever hit devtools before, which end
+  // users can't see; this surfaces it as a dismissible toast.
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
   // Per-character pak download progress (0..1) while a fetch is in flight.
   const [pakProgress, setPakProgress] = useState<Record<string, number>>({});
   const checkoutPollRef = useRef<number | null>(null);
@@ -571,6 +610,12 @@ function AppMain() {
   // `undefined` means the fetch hasn't resolved yet (we render nothing
   // profile-dependent until then to avoid a flash of "Aryan").
   const [profile, setProfile] = useState<UserSettings | null | undefined>(undefined);
+  // Bumped to force a full UE character re-init without a stream disconnect.
+  // A "reset session" / "reset account" tells UE to drop back to the blank
+  // stage; bumping this re-runs the connect-time reconcile driver so the
+  // frontend re-drives + re-dresses the character on the fresh UE session
+  // (otherwise the stale initialResolvedRef leaves the stage blank).
+  const [ueSessionEpoch, setUeSessionEpoch] = useState(0);
   // True after a sign-in that changed the machine's owning account: the prior
   // owner's API keys were cleared (keys are local secrets, never synced), so we
   // surface a one-time banner telling the user to re-enter them.
@@ -783,10 +828,16 @@ function AppMain() {
   const handleCancelAdd = useCallback(() => {
     const back = addReturnRef.current || BASE_INSTANCE_ID;
     const inst = agentStack.find((i) => i.id === back) ?? agentStack[0];
+    // Setting the selected instance updates wardrobeTargetRef (via its effect),
+    // which is what the reconcile driver reads as its target.
     setSelectedInstanceId(inst?.id ?? BASE_INSTANCE_ID);
     setAddPickerOpen(false);
-    if (inst) emitAgentSwitch(inst.agentId, -1);
-  }, [agentStack, emitAgentSwitch]);
+    // Don't blind-switch back. Re-run the reconcile driver (the same path as
+    // connect / reset): it asks UE which character it's on and only switches
+    // when UE isn't already showing this instance's agent, otherwise it just
+    // re-dresses. Avoids a redundant reload when returning to the same agent.
+    setUeSessionEpoch((e) => e + 1);
+  }, [agentStack]);
 
   const handleRemoveInstance = useCallback((instanceId: string) => {
     if (instanceId === BASE_INSTANCE_ID) return;
@@ -855,6 +906,24 @@ function AppMain() {
     const t = window.setTimeout(() => setClawsNotice(null), 6000);
     return () => window.clearTimeout(t);
   }, [clawsNotice]);
+  // Auto-dismiss the pipeline error notice (a touch longer so the user can read it).
+  useEffect(() => {
+    if (!pipelineError) return;
+    const t = window.setTimeout(() => setPipelineError(null), 9000);
+    return () => window.clearTimeout(t);
+  }, [pipelineError]);
+
+  // Award 1 claw for a SUCCESSFUL interaction only. Called from the chat
+  // success paths (real assistant reply received), never at send time, so a
+  // failed turn (bad key, missing model, provider down) earns nothing. The
+  // server (/claws/earn) is authoritative; we bump optimistically then
+  // reconcile. Best-effort + fire-and-forget.
+  const awardClawForInteraction = useCallback(() => {
+    const tok = authTokenRef.current;
+    if (!tok) return;
+    setClawsBalance((b) => (b == null ? b : b + 1));
+    void earnClaws(tok, 1).then((nb) => { if (nb != null) setClawsBalance(nb); });
+  }, []);
 
   const refreshEntitlements = useCallback(async () => {
     if (!authToken) return;
@@ -1489,17 +1558,10 @@ function AppMain() {
     const pendingImages = attachedImages;
     if (!trimmed && pendingImages.length === 0) return;
 
-    // Earn 1 claw per message — interacting with Unclaw is how you earn the
-    // in-app currency. Optimistically bump the local balance for instant
-    // feedback, then reconcile with the server's authoritative value.
-    // Best-effort + fire-and-forget so it never delays the send.
-    {
-      const tok = authTokenRef.current;
-      if (tok) {
-        setClawsBalance((b) => (b == null ? b : b + 1));
-        void earnClaws(tok, 1).then((nb) => { if (nb != null) setClawsBalance(nb); });
-      }
-    }
+    // NOTE: the per-message claw is awarded on SUCCESS only, down in the chat
+    // result handlers (awardClawForInteraction). Awarding here at send time
+    // credited a claw even when the turn failed (bad key, missing model), which
+    // let a user farm claws with an invalid key. See the success paths below.
 
     // Interrupt any in-flight escalation BEFORE sending the new
     // message. Stops the polling loop and clears the status pill.
@@ -1572,14 +1634,24 @@ function AppMain() {
     // audio duration so playback is gapless even when chunks arrive
     // in bursts (and well before the full reply has been synthesized).
     let useStreaming = false;
+    // Silence inserted between streamed sentence chunks. The UE face plugin now
+    // holds the speaking pose across chunks (start/endUtterance + IsSpeaking), so
+    // supertonic dispatches nearly back-to-back for continuous playback; Kokoro
+    // keeps its longer sentence breath.
+    let interChunkGapMs = 800;
     try {
       const keys = await fetchApiKeys();
-      // Stream when the user picked a provider with a local chunk-by-chunk
-      // synthesis path: kokoro recommended (in-process kokoro-onnx). Custom
-      // Kokoro endpoint, ElevenLabs, Supertonic, and image-bearing turns
-      // (which auto-route through escalation) all stay on /chat.
-      if (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'recommended') {
+      // Stream (per-sentence chunked TTS) for in-process kokoro-onnx (recommended
+      // mode) and supertonic. Both ride soul's /chat_stream_audio and the UE
+      // utterance latch, so the avatar starts speaking on the first sentence
+      // instead of waiting for the whole reply. Custom Kokoro endpoints,
+      // ElevenLabs, and image-bearing turns (escalation) stay on /chat.
+      const localStreamingTts =
+        (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'recommended') ||
+        keys.tts_provider === 'supertonic';
+      if (localStreamingTts) {
         useStreaming = pendingImages.length === 0;
+        interChunkGapMs = keys.tts_provider === 'supertonic' ? 60 : 800;
       }
     } catch { /* fall through to non-streaming */ }
 
@@ -1591,6 +1663,11 @@ function AppMain() {
       let totalDuration = 0;
       let totalChunks = 0;
       let escalationFallback: SoulChatChunk | null = null;
+      // Tells the UE face plugin "chunks are coming — stay in the speaking pose
+      // and don't blank between them" until we send the matching endUtterance.
+      // Only emitted once a real chunk actually arrives (an escalation-only
+      // turn never opens an utterance). One-shot providers never enter this.
+      let utteranceBegun = false;
       try {
         for await (const chunk of streamChatViaSoul(trimmed, {
           systemExtension: systemExt,
@@ -1615,6 +1692,12 @@ function AppMain() {
           const now = performance.now();
           if (firstChunkArrivedAt === 0) {
             firstChunkArrivedAt = now;
+            // Open the utterance the moment the first chunk lands, before it
+            // dispatches, so the plugin is already holding when chunk 0 plays.
+            if (!utteranceBegun) {
+              pixelStreaming?.emitUIInteraction({ EventType: 'startUtterance' });
+              utteranceBegun = true;
+            }
           }
           if (!memoryAdded && chunk.response) {
             memory.add('assistant', chunk.response);
@@ -1625,13 +1708,12 @@ function AppMain() {
           // time) dispatch immediately, happens when synth is slower
           // than the audio it produced, i.e. the buffer is empty.
           // A small breath between chunks so sentence boundaries get natural
-          // prosodic spacing instead of butting up against each other. Kokoro
-          // (the only streamed engine) splits on sentence boundaries, so the
-          // gap lands on a natural pause.
-          const INTER_CHUNK_GAP_MS = 800;
+          // prosodic spacing instead of butting up against each other. Both
+          // streamed engines split on sentence boundaries, so the gap lands on
+          // a natural pause; supertonic uses a much shorter seam (see above).
           const playAt = firstChunkArrivedAt
             + ((chunk.start_offset_s ?? 0) * 1000)
-            + (chunk.chunk_idx * INTER_CHUNK_GAP_MS);
+            + (chunk.chunk_idx * interChunkGapMs);
           const delay = Math.max(0, playAt - now);
           const tid = window.setTimeout(() => {
             pendingChunkTimeoutsRef.current.delete(tid);
@@ -1656,28 +1738,37 @@ function AppMain() {
         } else {
           // Set the AI-speaking timer using the cumulative duration
           // reported on the final chunk PLUS the inter-chunk gaps the
-          // scheduler inserted (n_chunks - 1 gaps × 150 ms each). Once
-          // that's elapsed the notify hook fires and the voice agent
-          // can resume.
-          // Provider-specific gap. Both providers now chunk on
-          // sentence boundaries (Kokoro splits TEXT directly, Qwen3
-          // pre-splits in soul/qwen3_runtime), so gaps land on
-          // natural pauses either way. Qwen3's voice-clone prosody
-          // already includes more natural conversational pacing , 
-          // a smaller gap reads as a breath instead of a held pause.
-          const INTER_CHUNK_GAP_MS = 800;
-          const gapsMs = Math.max(0, totalChunks - 1) * INTER_CHUNK_GAP_MS;
+          // scheduler inserted (n_chunks - 1 gaps). Must use the SAME
+          // interChunkGapMs the scheduler used above, or the speaking
+          // timer drifts from actual playback. Once it elapses the notify
+          // hook fires and the voice agent can resume.
+          const gapsMs = Math.max(0, totalChunks - 1) * interChunkGapMs;
           const speakMs = (totalDuration > 0 ? totalDuration * 1000 : 4000) + gapsMs;
           const timerId = window.setTimeout(() => {
             pendingChunkTimeoutsRef.current.delete(timerId);
+            // Last chunk's audio has finished — close the utterance so the
+            // plugin does its single, clean wind-down back to idle.
+            if (utteranceBegun) {
+              pixelStreaming?.emitUIInteraction({ EventType: 'endUtterance' });
+            }
             isAISpeakingRef.current = false;
             notifyAIFinishedRef.current();
           }, Math.round(speakMs));
           pendingChunkTimeoutsRef.current.add(timerId);
         }
+        // Successful interaction: a real reply streamed in (memoryAdded), or the
+        // escalation fallback produced one. Inside the try so a throw above
+        // (bad key / provider error) skips the award.
+        if (memoryAdded || escalationFallback) awardClawForInteraction();
       } catch (err) {
         if ((err as { name?: string })?.name !== 'AbortError') {
           console.error('[chat] soul /chat_stream_audio failed:', err);
+          setPipelineError(friendlyPipelineError(err));
+        }
+        // Balance any open utterance so the plugin doesn't hold the speaking
+        // pose (the plugin also self-heals after MaxHoldSeconds, but be tidy).
+        if (utteranceBegun) {
+          pixelStreaming?.emitUIInteraction({ EventType: 'endUtterance' });
         }
         isAISpeakingRef.current = false;
       } finally {
@@ -1696,6 +1787,10 @@ function AppMain() {
       });
 
       dispatchChatResult(result);
+      // Successful turn: credit the claw. chatViaSoul throws on a non-2xx
+      // (bad key, missing model, provider error), so a failed turn never
+      // reaches here and earns nothing.
+      awardClawForInteraction();
 
       // 20b chose to escalate (or soul auto-routed to escalation
       // because we attached image(s)). The transition reply has
@@ -1706,11 +1801,14 @@ function AppMain() {
       }
     } catch (err) {
       console.error('[chat] soul /chat failed:', err);
+      if ((err as { name?: string })?.name !== 'AbortError') {
+        setPipelineError(friendlyPipelineError(err));
+      }
       isAISpeakingRef.current = false;
     } finally {
       setIsSending(false);
     }
-  }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream]);
+  }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream, awardClawForInteraction]);
 
   // Slash-command animation dispatcher, hands a ready-to-go UE
   // descriptor to the dock so it can fire `/dance`, `/kiss`, `/hello`
@@ -1879,10 +1977,14 @@ function AppMain() {
   const handleSignOut = useCallback(async () => {
     // Wipe UE's applied config (outfit / colors / lighting) on the way out so
     // the next user's stream starts clean — the stream stays connected under
-    // the SignInScreen, so this lands before anyone signs back in.
+    // the SignInScreen, so this lands before anyone signs back in. Then re-run
+    // the reconcile driver (same as reset session / reset account) so the
+    // blanked stage gets the base character re-driven for the next sign-in,
+    // rather than leaving a stale resolved flag on a now-empty stage.
     try {
       pixelStreaming?.emitUIInteraction({ EventType: 'reset', Timestamp: new Date().toISOString() });
     } catch { /* ignore */ }
+    setTimeout(() => setUeSessionEpoch((e) => e + 1), 150);
     await signOut(authToken ?? null);
     setAuthToken(null);
     setAuthUser(null);
@@ -1911,10 +2013,13 @@ function AppMain() {
     clearLocalChatHistory();
     resetStack();
     setSelectedInstanceId(BASE_INSTANCE_ID);
-    // Wipe UE's applied config so the reset is reflected in the live stream.
+    // Wipe UE's applied config so the reset is reflected in the live stream,
+    // then re-run the reconcile driver so the blanked stage gets the base
+    // character (Grace) re-driven in for the next sign-in / first run.
     try {
       pixelStreaming?.emitUIInteraction({ EventType: 'reset', Timestamp: new Date().toISOString() });
     } catch { /* ignore */ }
+    setTimeout(() => setUeSessionEpoch((e) => e + 1), 150);
     // Drop everything in-memory so the next render starts from a
     // first-run shape: SignInScreen up (no token), profile unresolved
     // (will fall through to the wizard once auth is back).
@@ -2073,6 +2178,15 @@ function AppMain() {
   // connect retry below; re-armed on disconnect.
   const initialResolvedRef = useRef(false);
 
+  // The character UE currently has on-screen (agentId, lowercased), as confirmed
+  // by `characterReady` or the connect-time reconcile. null until UE answers.
+  // The onboarding wizard waits until this is the base agent (Grace) before
+  // firing its first pre-recorded line, so the welcome audio never plays into the
+  // black/transitioning stage before Grace exists — and because we re-resolve on
+  // every (re)connect, a refresh mid-onboarding replays the line. Reset on
+  // disconnect so a reconnect re-gates.
+  const [ueActiveAgentId, setUeActiveAgentId] = useState<string | null>(null);
+
   // SWAPS: UE emits characterReady when a swapped-in character spawns; dress it
   // with the target instance's saved outfit. No-op when never customized.
   useEffect(() => {
@@ -2085,6 +2199,13 @@ function AppMain() {
       if (msg.EventType !== 'characterReady') return;
       initialResolvedRef.current = true;
       const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current);
+      // Record which character UE actually spawned. Fall back to the instance we
+      // switched into when the signal omits agentId.
+      setUeActiveAgentId(
+        (typeof msg.agentId === 'string' && msg.agentId)
+          ? msg.agentId.toLowerCase()
+          : (inst?.agentId?.toLowerCase() ?? null),
+      );
       // Stale/racing-signal guard: only dress when the character UE actually
       // spawned (msg.agentId) matches the instance we're targeting.
       if (inst && typeof msg.agentId === 'string' && msg.agentId && inst.agentId !== msg.agentId) {
@@ -2128,6 +2249,7 @@ function AppMain() {
         // UE is already showing this character — don't re-switch (would loop on
         // reload). Just re-apply THIS instance's outfit, since UE may be wearing
         // another instance's look or the engine defaults.
+        setUeActiveAgentId(ueAgent || inst.agentId.toLowerCase());  // already on-screen; no characterReady will fire
         void applyInstanceWardrobe(inst.wardrobe);
       } else {
         // Blank or a different character — switch; its characterReady dresses it.
@@ -2150,22 +2272,29 @@ function AppMain() {
   useEffect(() => {
     if (connectionState !== 'connected') {
       initialResolvedRef.current = false;
+      setUeActiveAgentId(null);
       return;
     }
+    // Re-arm on every (re)connect AND every ueSessionEpoch bump (reset
+    // session / reset account). A reset drops UE back to the blank stage
+    // without dropping the stream, so we must clear the resolved flag and
+    // re-drive from scratch, exactly like a fresh connect.
+    initialResolvedRef.current = false;
+    setUeActiveAgentId(null);
     let attempts = 0;
     const ask = () => {
       if (initialResolvedRef.current) return;
       attempts += 1;
       pixelStreaming?.emitUIInteraction({ EventType: 'fetchCurrentAgent' });
     };
-    ask(); // fire immediately on connect
+    ask(); // fire immediately on connect / reset
     const MAX = 90; // poll ~90s — well past UE's cold-boot window — before bailing
     const id = setInterval(() => {
       if (initialResolvedRef.current || attempts >= MAX) { clearInterval(id); return; }
       ask();
     }, 1000);
     return () => clearInterval(id);
-  }, [connectionState, pixelStreaming]);
+  }, [connectionState, pixelStreaming, ueSessionEpoch]);
 
   // Soft session reset, tells Unreal to drop back to neutral pose +
   // clear any in-progress speech, then immediately re-applies the
@@ -2178,15 +2307,14 @@ function AppMain() {
       EventType: 'reset',
       Timestamp: new Date().toISOString(),
     });
-    // Re-apply on the next tick so UE has a moment to process the
-    // reset before we tell it which outfit to wear. Dresses the live
-    // instance from its own saved wardrobe (read off a ref so this stays
-    // stale-free without re-creating the callback every roster change).
-    setTimeout(() => {
-      const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current);
-      void applyInstanceWardrobe(inst?.wardrobe);
-    }, 50);
-  }, [pixelStreaming, applyInstanceWardrobe]);
+    // UE drops back to the blank stage on reset. Re-run the connect-time
+    // reconcile driver so the frontend re-drives the character onto the
+    // fresh session and dresses it from its saved wardrobe, just like a
+    // cold connect. Bump on a short delay so UE has processed the reset
+    // before we query its current character (avoids reconciling against
+    // the pre-reset state).
+    setTimeout(() => setUeSessionEpoch((e) => e + 1), 150);
+  }, [pixelStreaming]);
 
   // Fetch the user profile, but only once the stream is connected.
   // Null -> open the onboarding wizard in firstRun mode. Any non-null
@@ -2273,8 +2401,11 @@ function AppMain() {
         }
 
         // Just record the resolved profile; the onboarding-visibility effect
-        // below decides whether to open/close the wizard.
-        setProfile(p);
+        // below decides whether to open/close the wizard. Normalize the
+        // user's name to first name only (Gmail sign-in hands us the full
+        // name) so the greeting + Grace's voice (via synced profile) address
+        // them by first name everywhere.
+        setProfile(p && p.name ? { ...p, name: firstName(p.name) } : p);
       } catch (err) {
         if (cancelled) return;
         console.warn('[profile] reconcile failed', err);
@@ -2807,6 +2938,7 @@ function AppMain() {
           <Wizard
             key="onboarding-wizard"
             firstRun={wizardMode === 'first'}
+            characterReady={ueActiveAgentId === BASE_AGENT}
             initial={profile}
             hasSession={hasSession}
             authUser={authUser}
@@ -3031,6 +3163,55 @@ function AppMain() {
                   onToggleChatPane={() => setChatPaneOpen((o) => !o)}
                 />
               </div>
+
+              {/* Pipeline error: the chat / voice request failed (bad key, no
+                  model picked, provider down). Anchored to the input-bar
+                  wrapper so it sits right above the bar and left-aligned with
+                  it, at any bar height. End users can't see devtools, so this
+                  is the only place they learn the turn failed. On-brand error
+                  vocabulary: soft-cinder tint + full border + icon. */}
+              <AnimatePresence>
+                {pipelineError && (
+                  <motion.div
+                    key="pipeline-error"
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 8 }}
+                    transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                    role="alert"
+                    onClick={() => setPipelineError(null)}
+                    style={{
+                      position: 'absolute',
+                      bottom: 'calc(100% + 10px)',
+                      left: 0,
+                      zIndex: 60,
+                      maxWidth: 460,
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 9,
+                      padding: '11px 14px',
+                      borderRadius: 12,
+                      background: 'rgba(200, 122, 122, 0.14)',
+                      border: '1px solid rgba(200, 122, 122, 0.40)',
+                      backdropFilter: 'var(--glass-blur)',
+                      WebkitBackdropFilter: 'var(--glass-blur)',
+                      boxShadow: '0 12px 30px -12px rgba(0,0,0,0.62)',
+                      color: 'var(--text-primary)',
+                      fontSize: 12.5,
+                      lineHeight: 1.45,
+                      cursor: 'pointer',
+                      pointerEvents: 'auto',
+                    }}
+                  >
+                    <AlertTriangle
+                      size={15}
+                      strokeWidth={2.2}
+                      style={{ flexShrink: 0, marginTop: 1, color: 'var(--danger, #c87a7a)' }}
+                    />
+                    <span>{pipelineError}</span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </motion.div>
           )}
         </div>
@@ -3148,13 +3329,15 @@ function AppMain() {
               zIndex: 59,
               display: 'flex',
               alignItems: 'center',
-              gap: 11,
+              gap: 10,
               maxWidth: 460,
-              padding: '10px 14px 10px 13px',
+              padding: '11px 14px',
               borderRadius: 12,
-              background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.72))',
-              border: '1px solid rgba(255,255,255,0.12)',
-              borderLeft: '3px solid var(--accent, #c44444)',
+              // Same tinted-surface treatment as the pipeline-error toast
+              // (full border + matching tint), just keyed to the ember
+              // accent since this is a positive confirmation. No side-stripe.
+              background: 'rgba(196, 68, 68, 0.13)',
+              border: '1px solid rgba(196, 68, 68, 0.38)',
               backdropFilter: 'var(--glass-blur)',
               WebkitBackdropFilter: 'var(--glass-blur)',
               boxShadow: '0 12px 30px -12px rgba(0,0,0,0.62)',
@@ -3163,21 +3346,12 @@ function AppMain() {
               lineHeight: 1.35,
             }}
           >
-            <span
+            <Check
+              size={15}
+              strokeWidth={2.4}
               aria-hidden
-              style={{
-                flex: '0 0 auto',
-                width: 22,
-                height: 22,
-                borderRadius: '50%',
-                display: 'grid',
-                placeItems: 'center',
-                background: 'rgba(196, 68, 68, 0.18)',
-                color: 'var(--accent, #c44444)',
-              }}
-            >
-              <Check size={13} strokeWidth={2.5} />
-            </span>
+              style={{ flexShrink: 0, marginTop: 1, color: 'var(--accent, #c44444)' }}
+            />
             <span style={{ flex: 1 }}>
               {(() => {
                 const names = storeToast.ids.map((id) => agentById[id]?.name ?? id);
@@ -3229,11 +3403,16 @@ function AppMain() {
               transform: 'translateX(-50%)',
               zIndex: 59,
               maxWidth: 440,
-              padding: '10px 14px',
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 9,
+              padding: '11px 14px',
               borderRadius: 12,
-              background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.72))',
-              border: '1px solid rgba(255,255,255,0.12)',
-              borderLeft: '3px solid var(--accent, #c44444)',
+              // Same cinder treatment as the pipeline-error toast: this is a
+              // soft-failure ("can't cover the spend"), full border + tint,
+              // no side-stripe.
+              background: 'rgba(200, 122, 122, 0.14)',
+              border: '1px solid rgba(200, 122, 122, 0.40)',
               backdropFilter: 'var(--glass-blur)',
               WebkitBackdropFilter: 'var(--glass-blur)',
               boxShadow: '0 12px 30px -12px rgba(0,0,0,0.62)',
@@ -3242,7 +3421,12 @@ function AppMain() {
               lineHeight: 1.4,
             }}
           >
-            {clawsNotice}
+            <AlertTriangle
+              size={15}
+              strokeWidth={2.2}
+              style={{ flexShrink: 0, marginTop: 1, color: 'var(--danger, #c87a7a)' }}
+            />
+            <span>{clawsNotice}</span>
           </motion.div>
         )}
       </AnimatePresence>

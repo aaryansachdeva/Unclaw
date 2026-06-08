@@ -7,8 +7,8 @@
 const STORE_URL = 'https://store.unclaw.io';
 
 /** Display constants — must match the worker's authoritative values. */
-export const STARTING_CLAWS = 250;
-export const CHARACTER_CLAW_COST = 200;
+export const STARTING_CLAWS = 750;
+export const CHARACTER_CLAW_COST = 500;
 
 function authHeaders(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}` };

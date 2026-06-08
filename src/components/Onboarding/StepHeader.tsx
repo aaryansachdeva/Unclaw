@@ -1,6 +1,8 @@
-// Shared step heading — quiet, sized in the same family as SheetPanel
-// titles (16/600). The wizard is the focal point so we stretch to 19px,
-// but the voice stays consistent with the rest of the chrome.
+// Shared step heading. The wizard is the focal point of the app, so the
+// title carries real weight here (bolder + larger than steady-state chrome)
+// while the voice stays on brand. A single ember accent tick sits above the
+// title as the step's one precious accent moment, the only saturated mark on
+// the screen until a field is focused or an option selected.
 
 interface Props {
   title: string;
@@ -9,32 +11,45 @@ interface Props {
 
 export function StepHeader({ title, subtitle }: Props) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <h2
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <span
+        aria-hidden
         style={{
-          fontSize: 19,
-          fontWeight: 600,
-          color: 'var(--text-primary)',
-          letterSpacing: '-0.01em',
-          margin: 0,
-          lineHeight: 1.2,
+          width: 26,
+          height: 3,
+          borderRadius: 2,
+          background: 'var(--accent, #c44444)',
+          boxShadow: '0 0 12px -1px rgba(196, 68, 68, 0.55)',
         }}
-      >
-        {title}
-      </h2>
-      {subtitle && (
-        <p
+      />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <h2
           style={{
-            fontSize: 13.5,
-            color: 'var(--text-secondary)',
+            fontSize: 24,
+            fontWeight: 700,
+            color: 'var(--text-primary)',
+            letterSpacing: '-0.022em',
             margin: 0,
-            letterSpacing: '0.005em',
-            lineHeight: 1.5,
+            lineHeight: 1.12,
           }}
         >
-          {subtitle}
-        </p>
-      )}
+          {title}
+        </h2>
+        {subtitle && (
+          <p
+            style={{
+              fontSize: 13,
+              color: 'var(--text-secondary)',
+              margin: 0,
+              letterSpacing: '-0.003em',
+              lineHeight: 1.5,
+              maxWidth: 240,
+            }}
+          >
+            {subtitle}
+          </p>
+        )}
+      </div>
     </div>
   );
 }

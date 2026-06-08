@@ -35,6 +35,14 @@ export type UserSchedule = 'early_bird' | 'night_owl' | 'mixed';
  *  change here. Future fields (UI prefs, feature toggles, voice
  *  preferences) should live as top-level keys or grouped sub-objects
  *  (e.g. `ui: {chatPaneWidth: ...}`). */
+/** First name only. Google/Gmail sign-in hands us the full name
+ *  ("Aryan Sachdeva"); we address the user by first name everywhere
+ *  (greeting + Grace's voice via the synced profile). Splits on
+ *  whitespace, keeps the first token. Safe on null/empty/single-word. */
+export function firstName(full: string | null | undefined): string {
+  return (full ?? '').trim().split(/\s+/)[0] ?? '';
+}
+
 export interface UserSettings {
   /** Required. Wizard fires when this is missing. */
   name: string;

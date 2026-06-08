@@ -125,6 +125,41 @@ function packagedSoulSrcDir(): string {
 }
 
 /**
+ * Seed the updater's version ledger (<runtime>/.installed-versions.json) with
+ * the bundle versions the wizard just provisioned. Without this, the first
+ * post-setup update pass reads an empty ledger and redundantly re-downloads
+ * the ~1.9 GB UE + ~1.2 GB assets the wizard already fetched. Merge-MAX with
+ * any existing ledger (date-tags sort lexicographically) so a newer
+ * updater-installed version is never clobbered by an older DMG baseline on a
+ * releaseTag re-run, and so unrelated keys (soul, soul_requirements_sha) are
+ * preserved. Schema mirrors InstalledVersions in updateManifest.ts.
+ */
+function seedUpdaterLedger(root: string): void {
+  const ledgerPath = path.join(root, '.installed-versions.json');
+  let ledger: Record<string, string> = {};
+  try {
+    if (fs.existsSync(ledgerPath)) {
+      ledger = JSON.parse(fs.readFileSync(ledgerPath, 'utf-8')) as Record<string, string>;
+    }
+  } catch {
+    ledger = {};
+  }
+  const seed = (key: string, version: string | undefined) => {
+    if (!version) return;
+    const cur = ledger[key];
+    if (cur == null || version > cur) ledger[key] = version;
+  };
+  seed('app', app.getVersion());
+  seed('unreal', MANIFEST.unreal.version);
+  seed('assets', MANIFEST.runtimeAssets.version);
+  try {
+    fs.writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
+  } catch {
+    /* non-fatal: worst case the updater re-checks (and may re-download) next launch */
+  }
+}
+
+/**
  * Resolve uv: prefer the bundled binary inside the .app's Resources/
  * (zero user-side install requirement); fall back to system `uv` only
  * in dev / unpackaged renderers.
@@ -216,6 +251,10 @@ export async function runSetup(window: BrowserWindow): Promise<boolean> {
         completedAt: new Date().toISOString(),
       }, null, 2),
     );
+
+    // Seed the updater ledger so the first post-setup update pass doesn't
+    // re-download the multi-GB UE + assets bundles we just provisioned.
+    seedUpdaterLedger(paths.root);
 
     setStage(window, {
       id: 'complete',

@@ -2237,14 +2237,13 @@ function FieldLabel({
           alignItems: 'baseline',
           justifyContent: 'space-between',
           gap: 8,
-          // 12 / 0.05em uppercase reads as a deliberate label, not as
-          // "almost-disappeared microcopy". 11 was chic but disappeared
-          // into the frosted panel for users not sitting six inches
-          // from the screen.
-          fontSize: 12,
-          fontWeight: 500,
+          // Matches the shared onboarding eyebrow (onboardingKit FieldLabel):
+          // 11/700 uppercase. The 700 weight carries the legibility that the
+          // old 11/500 lacked while staying cleaner than a 12/500 label.
+          fontSize: 11,
+          fontWeight: 700,
           color: 'var(--text-secondary)',
-          letterSpacing: '0.05em',
+          letterSpacing: '0.08em',
           textTransform: 'uppercase',
         }}
       >

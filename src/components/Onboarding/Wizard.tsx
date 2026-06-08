@@ -16,9 +16,10 @@ import { useEffect, useMemo, useRef, useState, KeyboardEvent } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { Volume2, VolumeX } from 'lucide-react';
 
-import { IdentityStep, type IdentityValues } from './IdentityStep';
+import { type IdentityValues } from './IdentityStep';
 import { VibeStep } from './VibeStep';
-import { InterestsStep, type InterestsValues } from './InterestsStep';
+import { type InterestsValues } from './InterestsStep';
+import { GettingToKnowYou } from './GettingToKnowYou';
 import { WelcomeStep } from './WelcomeStep';
 import { BrandLogo } from './BrandLogo';
 import { ClawsStep } from './ClawsStep';
@@ -28,6 +29,7 @@ import type { AuthSession, AuthUser } from '../../services/auth';
 import type { VibeValues } from './VibeStep';
 import {
   DEFAULT_VIBE,
+  firstName,
   type UserSettings,
   type UserSchedule,
 } from '../../services/userSettings';
@@ -46,6 +48,10 @@ const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 interface WizardProps {
   /** True on first launch (no profile yet). False when reopened to edit. */
   firstRun: boolean;
+  /** True once UE reports the character is spawned + on-screen. The first-run
+   *  welcome voice line waits on this so it doesn't play into the black /
+   *  transitioning stage before Grace exists. */
+  characterReady?: boolean;
   /** Pre-fill values when reopening to edit. */
   initial?: UserSettings | null;
   /** Active persona's prompt — passed to /onboarding/greet so the
@@ -81,14 +87,14 @@ interface WizardProps {
   onSignedIn?: (session: AuthSession) => void;
 }
 
-type StepKey = 'welcome' | 'auth' | 'claws' | 'identity' | 'vibe' | 'interests' | 'llm' | 'voice';
+type StepKey = 'welcome' | 'auth' | 'claws' | 'identity' | 'vibe' | 'llm' | 'voice';
 // First-run for a NOT-yet-signed-in user: lead with the stream, welcome, fold
 // login in as a step, then introduce Claws (the in-app currency) before setup.
-const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'auth', 'claws', 'identity', 'vibe', 'interests', 'llm', 'voice'];
+const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'auth', 'claws', 'identity', 'vibe', 'llm', 'voice'];
 // First-run when ALREADY signed in (e.g. fresh device, profile not synced):
 // skip welcome + auth, but still introduce Claws before profile setup.
-const FIRST_RUN_STEPS_AUTHED: StepKey[] = ['claws', 'identity', 'vibe', 'interests', 'llm', 'voice'];
-const EDIT_STEPS: StepKey[] = ['identity', 'vibe', 'interests', 'llm', 'voice'];
+const FIRST_RUN_STEPS_AUTHED: StepKey[] = ['claws', 'identity', 'vibe', 'llm', 'voice'];
+const EDIT_STEPS: StepKey[] = ['identity', 'vibe', 'llm', 'voice'];
 
 /** localStorage key for the onboarding-mute preference. Persisted so a
  *  user who finished onboarding with audio off doesn't have to mute
@@ -105,6 +111,7 @@ function detectTimezone(): string {
 
 export function Wizard({
   firstRun,
+  characterReady = false,
   initial,
   // `personaPrompt` is still part of the public prop shape (App.tsx
   // passes it) but unused now that the LLM-driven /onboarding/greet
@@ -136,7 +143,7 @@ export function Wizard({
     // Seed the name from an existing profile, else from the signed-in user
     // (Google/Discord profile or the email sign-up's name) so we never ask
     // for it twice.
-    name:     initial?.name ?? authUser?.name ?? '',
+    name:     initial?.name ?? firstName(authUser?.name) ?? '',
     pronouns: initial?.pronouns ?? '',
     city:     initial?.city ?? '',
     timezone: initial?.timezone ?? detectTimezone(),
@@ -148,7 +155,7 @@ export function Wizard({
   // initializer has already run with an empty name — seed it now from the
   // freshly-available account name (unless they've already typed one).
   useEffect(() => {
-    const n = authUser?.name;
+    const n = firstName(authUser?.name);
     if (n) setIdentity((prev) => (prev.name.trim() ? prev : { ...prev, name: n }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser?.name]);
@@ -341,6 +348,10 @@ export function Wizard({
   const welcomeFiredRef = useRef(false);
   useEffect(() => {
     if (!firstRun) return;
+    // Wait for UE to report the character is actually on-screen. The stream now
+    // boots black and transitions into Grace; firing the welcome audio before
+    // that means the pre-recorded line plays into an empty/transitioning stage.
+    if (!characterReady) return;
     if (welcomeFiredRef.current) return;
     welcomeFiredRef.current = true;
     if (mutedRef.current) return;
@@ -348,7 +359,7 @@ export function Wizard({
     // playLine is defined per-render and is intentionally omitted —
     // the ref guard guarantees fire-once regardless of identity churn.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [firstRun]);
+  }, [firstRun, characterReady]);
 
   const handleAdvance = () => {
     // Per-step gate. Identity needs a name to move forward; Connections
@@ -516,9 +527,11 @@ export function Wizard({
     }
     if (step === 'identity') {
       return (
-        <IdentityStep
-          values={identity}
-          onChange={setIdentity}
+        <GettingToKnowYou
+          identity={identity}
+          onIdentityChange={setIdentity}
+          interests={interests}
+          onInterestsChange={setInterests}
           onAdvance={handleAdvance}
           hideName={nameFromAuth}
         />
@@ -526,9 +539,6 @@ export function Wizard({
     }
     if (step === 'vibe') {
       return <VibeStep values={vibe} onChange={setVibe} />;
-    }
-    if (step === 'interests') {
-      return <InterestsStep values={interests} onChange={setInterests} />;
     }
     // Both LLM + Voice pages reuse ConnectionsStep with a `mode`
     // prop. The component itself owns layout; the mode just toggles

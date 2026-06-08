@@ -24,6 +24,14 @@ export interface RemoteAsset {
   /** Total bytes, surfaces ETA + progress percentage in the UI without
    *  having to read Content-Length first (lets us validate that too). */
   sizeBytes: number;
+  /** Date-tag version (e.g. '2026.0607.03'). Optional on RemoteAsset in
+   *  general, but set on the unreal + runtimeAssets bundles so the setup
+   *  coordinator can SEED the updater's .installed-versions.json ledger
+   *  with what it just provisioned. Without this seed the first post-setup
+   *  updater pass sees an empty ledger and redundantly re-downloads the
+   *  multi-GB UE + assets the wizard already fetched. Must match the
+   *  corresponding category version in the remote latest.json. */
+  version?: string;
 }
 
 export interface SetupManifest {
@@ -72,36 +80,45 @@ export interface CharacterPakAsset extends RemoteAsset {
 }
 
 export const MANIFEST: SetupManifest = {
-  releaseTag: '2026.0527.02-mac',
+  releaseTag: '2026.0608.01-mac',
   pythonVersion: '3.11',
   minFreeDiskBytes: 15 * 1024 * 1024 * 1024, // 15 GB
 
   unreal: {
-    // 2026.0527.01 Mac build, ships the LiveLinkFaceStreamComponent
-    // cmdline-port override (reads -SoulPort=NNNN at BeginPlay so the
-    // dynamic-ports flow reaches UE), plus the PixelStreaming2NativeMac
-    // Tier 1 plugin from prior cycle.
+    // 2026.0607.03 Mac build, adds the rendering/VRAM optimizations
+    // (Screen Space GI + reflections, ray tracing + path tracing off, VSM
+    // page cap, dome rect-light relight) on top of the LiveLinkFaceStream
+    // cmdline-port override + PixelStreaming2NativeMac Tier 1 plugin.
+    // Paid character chunks (ava/goblin/chris/joi) carved OUT of the bundle
+    // (they download on purchase from the private store bucket); ships
+    // chunk0 (base+grace) + chunk5 (mark) only.
     //
     // Carve-out applied: rename .app + inner binary to "Unclaw Character",
     // CFBundleName/DisplayName/IconFile set, LSUIElement true (hides Dock
     // entry), custom AppIcon.icns, Assets.car deleted, ad-hoc re-signed
     // WITHOUT --options runtime (libtbb team-ID mismatch crash-loops if
     // hardened runtime is on, see Mac - Known Issues and Gotchas).
-    url: 'https://files.fotonlabs.com/mac/unreal/unreal-2026.0527.01-mac.zip',
-    sha256: 'b1fc3c951f4cc5a98ca0cf31ee90904a2c423e143c9535cf4e50088b128ec0b4',
-    sizeBytes: 1_902_906_141,
+    url: 'https://files.fotonlabs.com/mac/unreal/unreal-2026.0607.03-mac.zip',
+    sha256: '618421654e90f22a286d90a0816e48a6ac1052aeab79db84df9eff7c2777594f',
+    sizeBytes: 1_982_448_271,
+    // Seeds the updater ledger so a fresh install doesn't re-download this
+    // ~2 GB bundle. MUST equal the `unreal` version in remote latest.json.
+    version: '2026.0607.03',
   },
 
   runtimeAssets: {
     url: 'https://files.fotonlabs.com/mac/assets/runtime-2026.0523.01-mac.zip',
     sha256: 'c143b8feadd8d15bc603dbffcbc6812f43b63e7ab26239c12f6d1a9b26bb8524',
     sizeBytes: 1_204_449_785,
+    // Seeds the updater ledger (see unreal above). MUST equal the `assets`
+    // version in remote latest.json.
+    version: '2026.0523.01',
   },
 
-  // Paid character paks. Cooked from AudioTestProject02 build 2026.0604.01 as
+  // Paid character paks. Cooked from AudioTestProject02 build 2026.0607.03 as
   // per-character chunks (chunk1=ava .. chunk4=joi), each zipped (<id>.pak
   // inside) and uploaded to the PRIVATE R2 bucket unclaw-paks-private at
-  // characters/<id>/current.zip. `url` is documentation only — the real,
+  // characters/<id>/current.zip. `url` is documentation only, the real,
   // short-lived presigned download URL is handed back by the store Worker after
   // it verifies the account's entitlement; sha256 + sizeBytes here verify the
   // exact bytes (same discipline as the base bundles). grace + mark are free and
@@ -109,31 +126,31 @@ export const MANIFEST: SetupManifest = {
   characterPaks: {
     ava: {
       characterId: 'ava',
-      version: '2026.0605.01',
+      version: '2026.0607.03',
       url: 'https://store.unclaw.io/store/characters/ava/download',
-      sha256: '695113270e37c364568eec20123b9ba630bd9fbf87c2e8b214be9e8c692994dc',
-      sizeBytes: 176_562_508,
+      sha256: '85b9207c7504bb2e1ad56cf6f74642e6c2cae6b1f3f3cb89ead37fdaeea3308f',
+      sizeBytes: 176_562_562,
     },
     goblin: {
       characterId: 'goblin',
-      version: '2026.0605.01',
+      version: '2026.0607.03',
       url: 'https://store.unclaw.io/store/characters/goblin/download',
-      sha256: '6c194de44fb3216347b628ee0962f1355b0cc5393885cf26865ccb90d760bfb3',
-      sizeBytes: 88_141_685,
+      sha256: '4e68426f3b43f5049e2c720147dc26c5a495d66c9c791ee6f53881dab4320172',
+      sizeBytes: 88_141_739,
     },
     chris: {
       characterId: 'chris',
-      version: '2026.0605.01',
+      version: '2026.0607.03',
       url: 'https://store.unclaw.io/store/characters/chris/download',
-      sha256: '870dc7645d63e1809813b02de0513ce78858e76d114b25d60d77681fffe5c484',
-      sizeBytes: 129_965_497,
+      sha256: '0b33eb86d160daac35d9015c50555b2ef1f98bc5ee8f934eb5790f5fb666c876',
+      sizeBytes: 129_965_551,
     },
     joi: {
       characterId: 'joi',
-      version: '2026.0605.01',
+      version: '2026.0607.03',
       url: 'https://store.unclaw.io/store/characters/joi/download',
-      sha256: 'd6bb50361f6c051ed454852a37688a8939f9d4eefa38cedc617f49d75e3e5a19',
-      sizeBytes: 136_502_842,
+      sha256: '48eb8dc04434ad2676880b3a49c1729ded520b7e7e00e450880d1280cbce6830',
+      sizeBytes: 136_502_896,
     },
   },
 };

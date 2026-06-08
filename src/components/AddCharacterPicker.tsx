@@ -198,16 +198,6 @@ export function AddCharacterPicker({
           }}
         >
           Unlock all agents
-          <span style={{
-            padding: '2px 8px',
-            borderRadius: 999,
-            background: 'color-mix(in srgb, var(--accent, #c44444) 88%, transparent)',
-            color: '#fff',
-            fontSize: 11,
-            fontWeight: 700,
-          }}>
-            ${bundle!.priceUsd}
-          </span>
         </motion.button>
       )}
 

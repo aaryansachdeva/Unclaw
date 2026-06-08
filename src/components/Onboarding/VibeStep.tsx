@@ -1,10 +1,12 @@
 // Step 2 — agent-name input + four vibe sliders. Naming the assistant
 // belongs here (not on Identity) because it's a personality choice,
-// not an identity fact about the user — same conceptual category as
-// "how formal", "how playful", etc.
+// not an identity fact about the user, same conceptual category as
+// "how formal", "how playful", etc. Uses the shared onboarding kit so the
+// header / labels / field surface match every other step.
 
 import { Slider } from './Slider';
 import { StepHeader } from './StepHeader';
+import { FIELD_BASE, applyFocus, applyBlur, FieldLabel, STEP_COL_WIDTH } from './onboardingKit';
 import { vibeWord } from '../../services/userSettings';
 
 export interface VibeValues {
@@ -22,42 +24,16 @@ interface Props {
   onChange: (next: VibeValues) => void;
 }
 
-const FIELD_BASE: React.CSSProperties = {
-  background: 'rgba(255, 255, 255, 0.04)',
-  border: '1px solid var(--glass-border)',
-  borderRadius: 10,
-  color: 'var(--text-primary)',
-  fontFamily: 'inherit',
-  fontSize: 14,
-  padding: '10px 12px',
-  outline: 'none',
-  width: '100%',
-  letterSpacing: '-0.005em',
-  transition:
-    'border-color 0.16s var(--ease-out-quart), box-shadow 0.16s var(--ease-out-quart), background 0.16s var(--ease-out-quart)',
-};
-
-function applyFocus(el: HTMLElement) {
-  el.style.borderColor = 'var(--glass-border-focus)';
-  el.style.background = 'rgba(255, 255, 255, 0.06)';
-  el.style.boxShadow = '0 0 0 3px rgba(196, 68, 68, 0.10)';
-}
-function applyBlur(el: HTMLElement) {
-  el.style.borderColor = 'var(--glass-border)';
-  el.style.background = 'rgba(255, 255, 255, 0.04)';
-  el.style.boxShadow = 'none';
-}
-
 export function VibeStep({ values, onChange }: Props) {
   const set = <K extends keyof VibeValues>(key: K, v: VibeValues[K]) =>
     onChange({ ...values, [key]: v });
 
   return (
-    <div style={{ display: 'flex', gap: 28, alignItems: 'flex-start' }}>
-      <div style={{ width: 180, flexShrink: 0, paddingTop: 2 }}>
+    <div style={{ display: 'flex', gap: 30, alignItems: 'flex-start' }}>
+      <div style={{ width: STEP_COL_WIDTH, flexShrink: 0, paddingTop: 2 }}>
         <StepHeader
           title="Set the vibe."
-          subtitle="You can change this anytime."
+          subtitle="How Grace talks to you. Change it anytime."
         />
       </div>
 
@@ -67,30 +43,10 @@ export function VibeStep({ values, onChange }: Props) {
           minWidth: 0,
           display: 'flex',
           flexDirection: 'column',
-          gap: 16,
+          gap: 18,
         }}
       >
-        {/* Agent name — full-width row at the top of the step.
-            Optional; placeholder shows the default. */}
-        <label
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 5,
-            minWidth: 0,
-          }}
-        >
-          <span
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              color: 'var(--text-secondary)',
-              letterSpacing: '0.05em',
-              textTransform: 'uppercase',
-            }}
-          >
-            Name your primary assistant
-          </span>
+        <FieldLabel text="Name your assistant">
           <input
             type="text"
             value={values.agent_name}
@@ -100,13 +56,16 @@ export function VibeStep({ values, onChange }: Props) {
             onFocus={(e) => applyFocus(e.target)}
             onBlur={(e) => applyBlur(e.target)}
           />
-        </label>
+        </FieldLabel>
+
+        {/* Hairline groups the name from the personality sliders. */}
+        <div style={{ height: 1, background: 'var(--border-subtle)', margin: '2px 0 0' }} />
 
         <div
           style={{
             display: 'grid',
             gridTemplateColumns: '1fr 1fr',
-            rowGap: 14,
+            rowGap: 16,
             columnGap: 28,
           }}
         >
