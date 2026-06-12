@@ -391,7 +391,7 @@ async function runStageRuntime(
 
   // 2. Create the venv (idempotent, uv venv is a no-op if it exists
   //    with the same python version).
-  const venvExists = fs.existsSync(path.join(paths.pythonEnv, 'bin', 'python'));
+  const venvExists = fs.existsSync(venvPythonPath(paths.pythonEnv));
   if (!venvExists) {
     await runCommand(
       window,
@@ -414,9 +414,9 @@ async function runStageRuntime(
     detail: 'This is the slowest step, ~2 minutes on a fast connection',
   });
 
-  const requirementsFile = path.join(packagedSoulSrcDir(), 'requirements-mac.txt');
+  const requirementsFile = path.join(packagedSoulSrcDir(), requirementsFileName());
   if (!fs.existsSync(requirementsFile)) {
-    throw new Error(`requirements-mac.txt missing from packaged Resources: ${requirementsFile}`);
+    throw new Error(`${requirementsFileName()} missing from packaged Resources: ${requirementsFile}`);
   }
 
   await runCommand(
@@ -424,7 +424,7 @@ async function runStageRuntime(
     uv,
     [
       'pip', 'install',
-      '--python', path.join(paths.pythonEnv, 'bin', 'python'),
+      '--python', venvPythonPath(paths.pythonEnv),
       '-r', requirementsFile,
       '--index-strategy', 'unsafe-best-match',
     ],
@@ -469,7 +469,7 @@ export async function syncSoulVenv(
   lastInstalledSha: string | null,
 ): Promise<{ ran: boolean; sha: string | null }> {
   const paths = runtimePaths();
-  const requirementsFile = path.join(soulOverlayDir, 'requirements-mac.txt');
+  const requirementsFile = path.join(soulOverlayDir, requirementsFileName());
 
   if (!fs.existsSync(requirementsFile)) {
     // The new soul overlay didn't ship a requirements file, that's
@@ -477,7 +477,7 @@ export async function syncSoulVenv(
     // failed extraction earlier). Skip pip-sync, keep the previously
     // recorded SHA so we don't churn on every update cycle.
     pushLog(window, 'meta',
-      '[venv-sync] requirements-mac.txt missing in overlay; skipping pip-install');
+      `[venv-sync] ${requirementsFileName()} missing in overlay; skipping pip-install`);
     return { ran: false, sha: lastInstalledSha };
   }
 
@@ -505,7 +505,7 @@ export async function syncSoulVenv(
   // we can't pip-install into a non-existent venv. Caller logs the
   // skip; STT/whatever new dep was supposed to land will lazy-fail
   // at runtime.
-  const venvPython = path.join(paths.pythonEnv, 'bin', 'python');
+  const venvPython = venvPythonPath(paths.pythonEnv);
   if (!fs.existsSync(venvPython)) {
     pushLog(window, 'meta',
       `[venv-sync] venv missing at ${venvPython}; skipping pip-install`);
@@ -543,7 +543,12 @@ async function runStageUnreal(
   window: BrowserWindow,
   paths: ReturnType<typeof runtimePaths>,
 ): Promise<void> {
-  const installedApp = path.join(paths.unreal, 'Unclaw Character.app');
+  // macOS ships a `.app` bundle; the Windows packaged build extracts as a
+  // plain folder (AudioTestProject02/ + launcher exe), so the install root IS
+  // the unreal dir. Quarantine-strip below no-ops off macOS regardless.
+  const installedApp = process.platform === 'win32'
+    ? paths.unreal
+    : path.join(paths.unreal, 'Unclaw Character.app');
   // Per-asset version sentinel, separate from the .setup-complete marker
   // because the wizard may need to re-fetch this specific category without
   // re-running every stage. Holds the asset's SHA so a manifest bump
@@ -602,12 +607,7 @@ async function runStageUnreal(
     headline: 'Unpacking character…',
   });
   fs.mkdirSync(paths.unreal, { recursive: true });
-  await runCommand(
-    window,
-    '/usr/bin/ditto',
-    ['-x', '-k', zipPath, paths.unreal],
-    { stream: true },
-  );
+  await extractZip(window, zipPath, paths.unreal);
   fs.unlinkSync(zipPath);
 
   // Strip the quarantine xattr that the OS applies to anything we
@@ -620,12 +620,7 @@ async function runStageUnreal(
     progress: null,
     headline: 'Authorizing character…',
   });
-  await runCommand(
-    window,
-    '/usr/bin/xattr',
-    ['-dr', 'com.apple.quarantine', installedApp],
-    { stream: true, ignoreNonZeroExit: true },
-  );
+  await stripQuarantineMac(window, installedApp);
 
   // Stamp the asset SHA so the next launch can compare and skip vs re-fetch.
   if (wantSha) fs.writeFileSync(versionFile, wantSha);
@@ -716,12 +711,7 @@ async function runStageModels(
     headline: 'Unpacking models…',
   });
   fs.mkdirSync(paths.assets, { recursive: true });
-  await runCommand(
-    window,
-    '/usr/bin/ditto',
-    ['-x', '-k', zipPath, paths.assets],
-    { stream: true },
-  );
+  await extractZip(window, zipPath, paths.assets);
   fs.unlinkSync(zipPath);
 
   // Stamp the asset SHA so the next launch can compare and skip vs re-fetch.
@@ -932,12 +922,18 @@ export function characterPaksStageDir(): string {
   return path.join(getRuntimeDir(), 'character-paks');
 }
 
-/** The UE app's sandbox container Saved/Paks. UE (sandboxed) can only read paks
- *  that physically live inside its own container, so for a MID-SESSION mount
- *  (no relaunch) the pak must be copied here, then mounted via the
- *  `mountCharacterPak` descriptor. Must match the path run_soul.sh stages into.
- *  Electron itself is not sandboxed, so it can write here freely. */
+/** UE's readable Saved/Paks dir, for a MID-SESSION mount (no relaunch): the pak
+ *  is copied here, then mounted via the `mountCharacterPak` descriptor. Must
+ *  match the dir run_soul stages into. Best-effort — if it doesn't resolve, the
+ *  boot-mount path via UNCLAW_CHARACTERS_SRC still mounts on next launch.
+ *
+ *  macOS: UE is sandboxed, so this is its container Saved/Paks.
+ *  Windows: UE is NOT sandboxed; it reads from the packaged build's
+ *  ProjectSavedDir/Paks (the Windows UE bundle extracts under runtime/unreal/). */
 export function ueContainerPaksDir(): string {
+  if (process.platform === 'win32') {
+    return path.join(getRuntimeDir(), 'unreal', 'AudioTestProject02', 'Saved', 'Paks');
+  }
   return path.join(
     app.getPath('home'),
     'Library/Containers/com.YourCompany.AudioTestProject02/Data/Library',
@@ -973,17 +969,13 @@ export async function downloadAndExtractCharacterPak(
   // Fresh extract: nuke any partial/previous install first.
   fs.rmSync(destDir, { recursive: true, force: true });
   fs.mkdirSync(destDir, { recursive: true });
-  await runCommand(window, '/usr/bin/ditto', ['-x', '-k', zipPath, destDir], { stream: true });
+  await extractZip(window, zipPath, destDir);
   try { fs.unlinkSync(zipPath); } catch { /* ignore */ }
 
   // Strip quarantine on any extracted binaries/content, same as the base
-  // bundle, so Gatekeeper never blocks pak content on first mount.
-  await runCommand(
-    window,
-    '/usr/bin/xattr',
-    ['-dr', 'com.apple.quarantine', destDir],
-    { stream: true, ignoreNonZeroExit: true },
-  );
+  // bundle, so Gatekeeper never blocks pak content on first mount. No-op on
+  // Windows.
+  await stripQuarantineMac(window, destDir);
 
   // The zip carries exactly one `.pak` (named <id>.pak at upload time). Find it
   // defensively rather than assuming the name, so a re-cook with a different
@@ -1129,11 +1121,13 @@ export function runCommand(
     const proc = spawn(cmd, args, {
       env: {
         ...process.env,
-        PATH: [
-          '/opt/homebrew/bin',
-          '/usr/local/bin',
-          process.env.PATH ?? '',
-        ].filter(Boolean).join(':'),
+        // On macOS prepend the Homebrew bins (GUI apps launched from Finder
+        // don't inherit a login shell PATH). On Windows there's no Homebrew
+        // and the separator is ';', so just pass the inherited PATH through.
+        PATH: process.platform === 'win32'
+          ? (process.env.PATH ?? '')
+          : ['/opt/homebrew/bin', '/usr/local/bin', process.env.PATH ?? '']
+              .filter(Boolean).join(':'),
         ...(opts.extraEnv ?? {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -1159,24 +1153,76 @@ export function runCommand(
 }
 
 async function which(cmd: string): Promise<string | null> {
+  const isWin = process.platform === 'win32';
+  // Windows: `where.exe` (System32); POSIX: `/usr/bin/which`. `where` can
+  // print multiple lines — take the first.
+  const finder = isWin ? 'where.exe' : '/usr/bin/which';
   return new Promise((resolve) => {
-    const proc = spawn('/usr/bin/which', [cmd], {
+    const proc = spawn(finder, [cmd], {
       env: {
         ...process.env,
-        PATH: [
-          '/opt/homebrew/bin',
-          '/usr/local/bin',
-          process.env.PATH ?? '',
-        ].filter(Boolean).join(':'),
+        PATH: isWin
+          ? (process.env.PATH ?? '')
+          : ['/opt/homebrew/bin', '/usr/local/bin', process.env.PATH ?? '']
+              .filter(Boolean).join(':'),
       },
     });
     let out = '';
     proc.stdout.on('data', (c: Buffer) => { out += c.toString(); });
     proc.on('exit', (code) => {
-      resolve(code === 0 ? out.trim() : null);
+      const first = out.split(/\r?\n/).map((s) => s.trim()).find(Boolean);
+      resolve(code === 0 && first ? first : null);
     });
     proc.on('error', () => resolve(null));
   });
+}
+
+// ----------------------------------------------------------------------
+// Cross-platform archive + filesystem helpers. macOS uses the system
+// `ditto`/`xattr`; Windows uses bundled-in OS tooling (`tar.exe`, which is
+// bsdtar on Windows 10 1803+, extracts .zip too). Centralized so every
+// extraction/quarantine site stays platform-correct.
+// ----------------------------------------------------------------------
+
+/** Extract a .zip into destDir, cross-platform. destDir is created if absent. */
+export async function extractZip(
+  window: BrowserWindow,
+  zipPath: string,
+  destDir: string,
+): Promise<void> {
+  fs.mkdirSync(destDir, { recursive: true });
+  if (process.platform === 'win32') {
+    // bsdtar (tar.exe) ships in Windows 10 1803+ and reads .zip. Faster and
+    // far more robust on multi-GB archives than PowerShell Expand-Archive.
+    await runCommand(window, 'tar.exe', ['-xf', zipPath, '-C', destDir], { stream: true });
+  } else {
+    await runCommand(window, '/usr/bin/ditto', ['-x', '-k', zipPath, destDir], { stream: true });
+  }
+}
+
+/** Strip the macOS Gatekeeper quarantine xattr. No-op off macOS (Windows has
+ *  no equivalent — Mark-of-the-Web doesn't block our own runtime files). */
+async function stripQuarantineMac(window: BrowserWindow, target: string): Promise<void> {
+  if (process.platform !== 'darwin') return;
+  await runCommand(
+    window,
+    '/usr/bin/xattr',
+    ['-dr', 'com.apple.quarantine', target],
+    { stream: true, ignoreNonZeroExit: true },
+  );
+}
+
+/** Path to the venv's python interpreter for this platform. Windows venvs put
+ *  it at Scripts\python.exe; POSIX at bin/python. */
+function venvPythonPath(pythonEnv: string): string {
+  return process.platform === 'win32'
+    ? path.join(pythonEnv, 'Scripts', 'python.exe')
+    : path.join(pythonEnv, 'bin', 'python');
+}
+
+/** Platform-specific soul pip requirements filename. */
+function requirementsFileName(): string {
+  return process.platform === 'win32' ? 'requirements-windows.txt' : 'requirements-mac.txt';
 }
 
 // ----------------------------------------------------------------------

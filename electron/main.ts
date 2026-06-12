@@ -20,7 +20,7 @@ import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
 import { startSoul, stopSoul, getSoulSnapshot, getSoulPorts } from './soulSupervisor';
 import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent } from './setupCoordinator';
-import { MANIFEST } from './setupManifest';
+import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
 
@@ -1182,11 +1182,14 @@ ipcMain.handle(
     }
     const meta = MANIFEST.characterPaks?.[args.characterId];
     if (!meta) return { ok: false, error: 'pak_unavailable' };
+    // Mac and Windows paks are cooked separately; pick the bytes for THIS
+    // platform so the SHA-verify matches what the store Worker presigned.
+    const platMeta = characterPakForPlatform(meta);
     try {
       const installed = await downloadAndExtractCharacterPak(
         mainWindow,
         args.characterId,
-        { url: args.url, sha256: meta.sha256, sizeBytes: meta.sizeBytes },
+        { url: args.url, sha256: platMeta.sha256, sizeBytes: platMeta.sizeBytes },
         (downloaded, total) => {
           mainWindow?.webContents.send('character-store:pak-progress', {
             characterId: args.characterId,

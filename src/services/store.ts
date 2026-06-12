@@ -53,10 +53,18 @@ export async function createCheckout(token: string, sku: string): Promise<{ url:
 /** Entitlement-gated: returns a short-lived presigned R2 URL for the pak zip.
  *  403 if the user does not own the character. The Worker serves the pak's
  *  current pointer; the client SHA-verifies against its manifest on download. */
+/** Mac and Windows paks are cooked separately and stored under
+ *  characters/<id>/<platform>/current.zip. Tell the Worker which one to
+ *  presign. Host OS comes from the preload bridge (never UA sniffing). */
+function storePlatform(): 'windows' | 'mac' {
+  return window.electronAPI?.platform === 'win32' ? 'windows' : 'mac';
+}
+
 export async function fetchDownloadUrl(token: string, characterId: string): Promise<string> {
-  const res = await fetch(`${STORE_URL}/store/characters/${characterId}/download`, {
-    headers: authHeaders(token),
-  });
+  const res = await fetch(
+    `${STORE_URL}/store/characters/${characterId}/download?platform=${storePlatform()}`,
+    { headers: authHeaders(token) },
+  );
   if (!res.ok) throw new Error(`store /download ${res.status}`);
   const data = (await res.json()) as { url: string };
   return data.url;

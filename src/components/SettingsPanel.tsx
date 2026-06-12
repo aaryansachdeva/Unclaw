@@ -1093,7 +1093,7 @@ function ProfileFacet({ profile, updateProfile }: PaneContext) {
     <Composition
       eyebrow="you + the agent"
       title={`Hello, ${profile.name || 'there'}.`}
-      tagline="Everything from your first run, here so you can change your mind. Saves go to the same encrypted store on this Mac."
+      tagline="Everything from your first run, here so you can change your mind. Saves go to the same encrypted store on this computer."
     >
       <Stack>
         <FieldStack label="Your name">

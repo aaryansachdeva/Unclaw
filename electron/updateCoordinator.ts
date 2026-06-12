@@ -33,7 +33,7 @@ import {
 } from './updateManifest';
 import {
   downloadWithResumeAndVerify,
-  runCommand,
+  extractZip,
   formatBytes,
   syncSoulVenv,
 } from './setupCoordinator';
@@ -315,12 +315,7 @@ async function installCategory(
   if (fs.existsSync(newDir)) fs.rmSync(newDir, { recursive: true, force: true });
   fs.mkdirSync(newDir, { recursive: true });
 
-  await runCommand(
-    window!,
-    '/usr/bin/ditto',
-    ['-x', '-k', stagingZip, newDir],
-    { stream: true },
-  );
+  await extractZip(window!, stagingZip, newDir);
 
   // Atomic swap. macOS rename(2) is atomic within a filesystem; both
   // directories are under the same userData volume so we're safe.

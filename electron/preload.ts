@@ -10,6 +10,10 @@ interface SoulPortsPayload {
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  /** Host OS, surfaced from the main process so the renderer never has to
+   *  sniff navigator.userAgent/platform. 'darwin' | 'win32' | 'linux'. */
+  platform: process.platform,
+
   // Window controls.
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close'),

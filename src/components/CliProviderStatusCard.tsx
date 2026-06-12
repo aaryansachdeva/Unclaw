@@ -114,7 +114,7 @@ export function CliProviderStatusCard({
     probing: `Checking for ${meta.displayName}`,
     ready: `Signed in to ${meta.displayName}`,
     setup_token: `${meta.displayName} is installed, but you need to sign in`,
-    not_installed: `${meta.displayName} isn't installed on this Mac`,
+    not_installed: `${meta.displayName} isn't installed on this computer`,
   };
 
   const statusWord: Record<Status, string> = {

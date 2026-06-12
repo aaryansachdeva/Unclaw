@@ -74,9 +74,37 @@ export interface SetupManifest {
   characterPaks?: Record<string, CharacterPakAsset>;
 }
 
-export interface CharacterPakAsset extends RemoteAsset {
+/** The verifiable bytes of one character pak on one platform. Mac and Windows
+ *  paks are cooked separately (different UE target) so each has its own hash. */
+export interface CharacterPakPlatformAsset {
+  sha256: string;
+  sizeBytes: number;
+}
+
+export interface CharacterPakAsset {
   characterId: string;
   version: string;
+  /** Doc-only reference; the live presigned download URL comes from the store
+   *  Worker (entitlement-gated). The Worker serves the platform-matched key
+   *  characters/<id>/<platform>/current.zip. */
+  url: string;
+  /** Per-platform pak bytes. The client picks by process.platform and
+   *  SHA-verifies the download against the matching entry. */
+  mac: CharacterPakPlatformAsset;
+  windows: CharacterPakPlatformAsset;
+}
+
+/** Pick the pak bytes for the running platform (Windows → windows, else mac). */
+export function characterPakForPlatform(
+  entry: CharacterPakAsset,
+): CharacterPakPlatformAsset {
+  return process.platform === 'win32' ? entry.windows : entry.mac;
+}
+
+/** Query-string platform token the client appends to the store Worker's
+ *  /download endpoint so it presigns the matching platform key. */
+export function storePlatformParam(): 'windows' | 'mac' {
+  return process.platform === 'win32' ? 'windows' : 'mac';
 }
 
 export const MANIFEST: SetupManifest = {
@@ -123,34 +151,61 @@ export const MANIFEST: SetupManifest = {
   // it verifies the account's entitlement; sha256 + sizeBytes here verify the
   // exact bytes (same discipline as the base bundles). grace + mark are free and
   // ship in the base app (chunk0/chunk5), so they have no entry here.
+  // mac hashes: Mac build 2026.0607.03 (chunk1=ava..chunk4=joi).
+  // windows hashes: Windows build 2026.0611.01 (pakchunk1-4-Windows.pak), each
+  // re-zipped store-0 as <id>.pak → uploaded to characters/<id>/windows/current.zip.
   characterPaks: {
     ava: {
       characterId: 'ava',
       version: '2026.0607.03',
       url: 'https://store.unclaw.io/store/characters/ava/download',
-      sha256: '85b9207c7504bb2e1ad56cf6f74642e6c2cae6b1f3f3cb89ead37fdaeea3308f',
-      sizeBytes: 176_562_562,
+      mac: {
+        sha256: '85b9207c7504bb2e1ad56cf6f74642e6c2cae6b1f3f3cb89ead37fdaeea3308f',
+        sizeBytes: 176_562_562,
+      },
+      windows: {
+        sha256: '8938fc9255f1c0b526cb704262377be706627620049edc2cb7950083c63524a3',
+        sizeBytes: 175_127_975,
+      },
     },
     goblin: {
       characterId: 'goblin',
       version: '2026.0607.03',
       url: 'https://store.unclaw.io/store/characters/goblin/download',
-      sha256: '4e68426f3b43f5049e2c720147dc26c5a495d66c9c791ee6f53881dab4320172',
-      sizeBytes: 88_141_739,
+      mac: {
+        sha256: '4e68426f3b43f5049e2c720147dc26c5a495d66c9c791ee6f53881dab4320172',
+        sizeBytes: 88_141_739,
+      },
+      windows: {
+        sha256: 'd716c780850a30a85015c2a945bc9acb8936c8a086b1ae3465cc1f1ec55dbe2e',
+        sizeBytes: 85_499_550,
+      },
     },
     chris: {
       characterId: 'chris',
       version: '2026.0607.03',
       url: 'https://store.unclaw.io/store/characters/chris/download',
-      sha256: '0b33eb86d160daac35d9015c50555b2ef1f98bc5ee8f934eb5790f5fb666c876',
-      sizeBytes: 129_965_551,
+      mac: {
+        sha256: '0b33eb86d160daac35d9015c50555b2ef1f98bc5ee8f934eb5790f5fb666c876',
+        sizeBytes: 129_965_551,
+      },
+      windows: {
+        sha256: '4c9ae76031af83ed1d1c64c2ae648eba3b59ed813078d2b6e2a0db01213b6641',
+        sizeBytes: 128_165_017,
+      },
     },
     joi: {
       characterId: 'joi',
       version: '2026.0607.03',
       url: 'https://store.unclaw.io/store/characters/joi/download',
-      sha256: '48eb8dc04434ad2676880b3a49c1729ded520b7e7e00e450880d1280cbce6830',
-      sizeBytes: 136_502_896,
+      mac: {
+        sha256: '48eb8dc04434ad2676880b3a49c1729ded520b7e7e00e450880d1280cbce6830',
+        sizeBytes: 136_502_896,
+      },
+      windows: {
+        sha256: 'f78f1aa6b21c61cc136fb42722b0e266ed9a86a880a63e7f1c7a9c531e8249d4',
+        sizeBytes: 134_082_740,
+      },
     },
   },
 };

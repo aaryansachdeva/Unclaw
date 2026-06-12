@@ -8,6 +8,8 @@ interface SoulPorts {
 }
 
 interface ElectronAPI {
+  /** Host OS from the main process. 'darwin' | 'win32' | 'linux'. */
+  platform: string;
   minimize: () => void;
   close: () => void;
   togglePin: (pinned: boolean) => void;
