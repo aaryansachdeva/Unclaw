@@ -1025,8 +1025,14 @@ export async function downloadAndExtractCharacterPak(
 //   kokoro     -> <SOUL_DATA>/kokoro/voices/<id>_kokoro.safetensors
 // ----------------------------------------------------------------------
 function soulVoicesDir(engine: 'supertonic' | 'kokoro'): string {
-  // Mirror run_soul.sh: packaged soul reads SOUL_DATA_DIR = <runtime>/data.
-  return path.join(getRuntimeDir(), 'data', engine, 'voices');
+  // Must land where soul actually reads voices (SOUL_DATA_DIR/<engine>/voices).
+  // Packaged: run_soul sets SOUL_DATA_DIR = <runtime>/data. Dev: run_soul sets
+  // it to <repo>/soul/data — and that repo is whatever UNCLAW_SOUL_REPO points
+  // at (same override resolveSoulScript uses). Honor it so a dev download drops
+  // the voice next to grace.json instead of into the unused packaged runtime.
+  const devRepo = process.env.UNCLAW_SOUL_REPO;
+  const base = devRepo ? path.join(devRepo, 'data') : path.join(getRuntimeDir(), 'data');
+  return path.join(base, engine, 'voices');
 }
 
 /** Expected on-disk voice filenames for a character, by engine. Kept in lockstep
