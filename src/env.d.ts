@@ -78,7 +78,10 @@ interface ElectronAPI {
       recentLogs: { stream: 'stdout' | 'stderr' | 'meta'; line: string }[];
       elapsedMs: number;
       ports: SoulPorts | null;
+      failed: boolean;
     }>;
+    /** User-initiated retry from the boot-failure screen. */
+    restart: () => Promise<boolean>;
     /** Latest known port mapping, or null while soul is still booting.
      *  Renderer-side URL builders (services/soulBase.ts) call this
      *  during init so they don't construct stale URLs. */
@@ -97,6 +100,14 @@ interface ElectronAPI {
     /** Fired if soul exits (clean or crashed). */
     onExit: (
       cb: (data: { code: number | null; signal: string | null }) => void,
+    ) => () => void;
+    /** Fired when the supervisor auto-respawns soul after an unexpected
+     *  exit during boot. */
+    onRetrying: (cb: (data: { attempt: number; max: number }) => void) => () => void;
+    /** Fired when soul boot fails unrecoverably (timeout or exhausted
+     *  retries). The boot screen shows a recoverable error + Retry. */
+    onFailed: (
+      cb: (data: { reason: string; recentErrors: string[] }) => void,
     ) => () => void;
   };
 

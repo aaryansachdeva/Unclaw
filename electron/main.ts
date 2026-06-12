@@ -597,6 +597,14 @@ ipcMain.on('window:focus', () => {
 // because the IPC events had already fired into the void.
 ipcMain.handle('soul:get-status', () => getSoulSnapshot());
 ipcMain.handle('soul:get-ports', () => getSoulPorts());
+// User-initiated retry from the boot-failure screen. Tears down any
+// half-started soul and runs a fresh boot episode (clears the failure
+// latch + respawn budget). Returns once the new startSoul kicks off.
+ipcMain.handle('soul:restart', async () => {
+  if (!mainWindow) return false;
+  await restartSoul(mainWindow);
+  return true;
+});
 
 // First-run setup pipeline. SetupWizard subscribes to 'setup:log' +
 // 'setup:stage' for live progress; getStatus is the snapshot for

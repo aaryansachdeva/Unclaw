@@ -40,6 +40,12 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
   const [spawnedAt, setSpawnedAt] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const feedRef = useRef<HTMLDivElement | null>(null);
+  // Resilience surface: 'booting' (normal), 'retrying' (supervisor is
+  // auto-respawning soul after an unexpected exit), 'failed' (boot gave
+  // up — show a real reason + Retry instead of an infinite spinner).
+  const [status, setStatus] = useState<'booting' | 'retrying' | 'failed'>('booting');
+  const [failInfo, setFailInfo] = useState<{ reason: string; recentErrors: string[] } | null>(null);
+  const [retryInfo, setRetryInfo] = useState<{ attempt: number; max: number } | null>(null);
 
   // Hydrate from the supervisor's snapshot at mount AND subscribe to
   // future events. Snapshot covers refresh-after-ready; subscription
@@ -51,6 +57,7 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
       setLogs(snap.recentLogs.slice(-MAX_LINES));
       setSpawnedAt(Date.now() - snap.elapsedMs);
       if (snap.ready) onReady();
+      else if (snap.failed) setStatus('failed');
     });
 
     const offLog = window.electronAPI?.soul?.onLog?.((data) => {
@@ -60,13 +67,36 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
       });
     });
     const offReady = window.electronAPI?.soul?.onReady?.(() => onReady());
+    const offRetrying = window.electronAPI?.soul?.onRetrying?.((d) => {
+      setStatus('retrying'); setRetryInfo(d);
+    });
+    const offFailed = window.electronAPI?.soul?.onFailed?.((d) => {
+      setStatus('failed'); setFailInfo(d);
+    });
 
     return () => {
       cancelled = true;
       offLog?.();
       offReady?.();
+      offRetrying?.();
+      offFailed?.();
     };
   }, [onReady]);
+
+  // User-initiated retry from the failure screen: clear failure state,
+  // re-anchor the clock, and ask the supervisor for a fresh boot episode.
+  const handleRetry = () => {
+    setStatus('booting');
+    setFailInfo(null);
+    setRetryInfo(null);
+    setSpawnedAt(Date.now());
+    setLogs([]);
+    void window.electronAPI?.soul?.restart?.();
+  };
+
+  // After ~25s of a normal boot, reassure the user this is expected on a
+  // cold first run (model loads) rather than a hang.
+  const showSlowHint = status === 'booting' && elapsed >= 25;
 
   // Clock tick.
   useEffect(() => {
@@ -348,6 +378,121 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
           opacity: 0.45,
         }}
       />
+
+      {/* Reassurance on a slow-but-healthy cold boot (first run loads
+          models). Whisper-quiet so it never reads as an error. */}
+      {showSlowHint && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '60%',
+            left: 0,
+            right: 0,
+            textAlign: 'center',
+            fontSize: 12.5,
+            lineHeight: 1.5,
+            color: 'rgba(255, 255, 255, 0.5)',
+            pointerEvents: 'none',
+            padding: '0 40px',
+          }}
+        >
+          First launch is preparing your companion.<br />Loading the AI models can take a minute.
+        </div>
+      )}
+
+      {/* Auto-respawn in progress: brief, calm. */}
+      {status === 'retrying' && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '60%',
+            left: 0,
+            right: 0,
+            textAlign: 'center',
+            fontSize: 12.5,
+            color: 'rgba(220, 190, 185, 0.7)',
+            pointerEvents: 'none',
+            padding: '0 40px',
+          }}
+        >
+          Restarting{retryInfo ? ` (${retryInfo.attempt}/${retryInfo.max})` : ''}…
+        </div>
+      )}
+
+      {/* Unrecoverable boot failure: a real reason + Retry, never an
+          infinite spinner. Covers the whole void so it's unmissable. */}
+      {status === 'failed' && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 80,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 16,
+            background: 'rgba(5, 5, 6, 0.86)',
+            backdropFilter: 'blur(2px)',
+            WebkitAppRegion: 'no-drag',
+            padding: '0 48px',
+            textAlign: 'center',
+          } as React.CSSProperties}
+        >
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'rgba(255,255,255,0.92)', letterSpacing: '-0.01em' }}>
+            Unclaw couldn't start
+          </div>
+          <div style={{ fontSize: 13, lineHeight: 1.5, color: 'rgba(255,255,255,0.6)', maxWidth: 360 }}>
+            {failInfo?.reason
+              ? `Soul didn't come up: ${failInfo.reason}.`
+              : 'Soul didn’t come up.'}{' '}
+            This is usually transient. Retry, and if it keeps happening, restart the app.
+          </div>
+          {failInfo?.recentErrors && failInfo.recentErrors.length > 0 && (
+            <details style={{ maxWidth: 460, width: '100%' }}>
+              <summary style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', cursor: 'pointer', userSelect: 'none' }}>
+                Show details
+              </summary>
+              <pre style={{
+                marginTop: 8,
+                maxHeight: 160,
+                overflow: 'auto',
+                textAlign: 'left',
+                fontFamily: '"SF Mono", ui-monospace, Menlo, monospace',
+                fontSize: 10,
+                lineHeight: 1.5,
+                color: 'rgba(220, 170, 160, 0.7)',
+                background: 'rgba(255,255,255,0.03)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 8,
+                padding: '10px 12px',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}>
+                {failInfo.recentErrors.join('\n')}
+              </pre>
+            </details>
+          )}
+          <button
+            type="button"
+            onClick={handleRetry}
+            style={{
+              marginTop: 4,
+              padding: '10px 26px',
+              borderRadius: 999,
+              border: '1px solid rgba(196, 68, 68, 0.5)',
+              background: 'var(--accent-dim, rgba(196,68,68,0.16))',
+              color: 'rgba(255,255,255,0.95)',
+              fontSize: 13.5,
+              fontWeight: 600,
+              fontFamily: 'inherit',
+              cursor: 'pointer',
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       <style>{`
         @keyframes unclaw-boot-breath {

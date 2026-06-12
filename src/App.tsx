@@ -1026,7 +1026,7 @@ function AppMain() {
       void refreshEntitlements();
       console.log(`[claws] unlocked ${name}, balance ${res.balance}`);
     } else if (res.reason === 'insufficient') {
-      setClawsNotice(`Not enough claws — ${agentById[sku]?.name ?? 'this character'} costs ${CHARACTER_CLAW_COST}. Earn more by chatting.`);
+      setClawsNotice(`Not enough claws. ${agentById[sku]?.name ?? 'This character'} costs ${CHARACTER_CLAW_COST}. Earn more by chatting.`);
     } else if (res.reason === 'already_owned') {
       void refreshEntitlements();
     }

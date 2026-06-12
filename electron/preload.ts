@@ -117,7 +117,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       recentLogs: { stream: 'stdout' | 'stderr' | 'meta'; line: string }[];
       elapsedMs: number;
       ports: SoulPortsPayload | null;
+      failed: boolean;
     }> => ipcRenderer.invoke('soul:get-status'),
+    /** User-initiated retry from the boot-failure screen. Tears down any
+     *  half-started soul and runs a fresh boot episode. */
+    restart: (): Promise<boolean> => ipcRenderer.invoke('soul:restart'),
     /** Latest discovered ports, or null while soul is still booting.
      *  Renderer code that constructs URLs should prefer onPorts() +
      *  the snapshot's ports field over hardcoded 8765/8080/8888. */
@@ -153,6 +157,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ) => cb(data);
       ipcRenderer.on('soul:exit', handler);
       return () => ipcRenderer.removeListener('soul:exit', handler);
+    },
+    /** Soul is auto-respawning after an unexpected exit during boot. */
+    onRetrying: (
+      cb: (data: { attempt: number; max: number }) => void,
+    ): (() => void) => {
+      const handler = (_evt: IpcRendererEvent, data: { attempt: number; max: number }) => cb(data);
+      ipcRenderer.on('soul:retrying', handler);
+      return () => ipcRenderer.removeListener('soul:retrying', handler);
+    },
+    /** Soul boot failed unrecoverably (timeout or exhausted retries). The
+     *  boot screen shows a real error + a Retry affordance instead of an
+     *  infinite spinner. */
+    onFailed: (
+      cb: (data: { reason: string; recentErrors: string[] }) => void,
+    ): (() => void) => {
+      const handler = (
+        _evt: IpcRendererEvent,
+        data: { reason: string; recentErrors: string[] },
+      ) => cb(data);
+      ipcRenderer.on('soul:failed', handler);
+      return () => ipcRenderer.removeListener('soul:failed', handler);
     },
   },
 

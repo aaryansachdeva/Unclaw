@@ -35,6 +35,32 @@ import http from 'http';
 // the user explicitly pinned --port 8765.
 const SOUL_LEGACY_HTTP_PORT = 8765;
 const SOUL_HEALTH_TIMEOUT_MS = 1200;
+// --- Boot resilience knobs ---------------------------------------------
+// The READY marker is the FAST path to "soul is up", but it's a single
+// point of failure: if soul never prints it (a hung/crashing startup hook,
+// a slow first-run model load that the user kills, or stdout buffering),
+// the renderer would otherwise sit on the boot screen forever. These add a
+// health-poll fallback, crash-respawn, and a hard timeout so the boot
+// either succeeds or surfaces an actionable error, never hangs.
+//
+// How long we poll /health as a fallback path to "ready" (independent of
+// the stdout marker). Cheap loopback GET.
+const SOUL_HEALTH_POLL_MS = 1500;
+// Total automatic respawns within one boot episode before we give up and
+// surface a failure. Self-heals transient first-run crashes (OOM on first
+// model load, a flaky import) without looping forever.
+const MAX_SOUL_RESPAWNS = 3;
+// Backoff between respawns (indexed by attempt-1), capped.
+const SOUL_RESPAWN_BACKOFF_MS = [1500, 3000, 6000];
+// Hard ceiling for the whole boot episode. Generous because a cold first
+// run loads several models (lipsync + t2f) from disk before READY. If
+// neither the marker nor /health confirms within this window, we declare
+// failure rather than spin. Spans respawns (one overall budget).
+const SOUL_BOOT_TIMEOUT_MS = 150_000;
+// If soul stays ready this long, reset the respawn counter so a much-later
+// crash gets a fresh retry budget (without letting a ready→crash loop reset
+// it every cycle).
+const SOUL_STABLE_MS = 30_000;
 // Marker soul prints once everything is up (the actual line is:
 // "[soul] READY ,  listening on 127.0.0.1:NNNN"). Substring match so
 // future banner tweaks don't break the gate as long as "READY" appears.
@@ -54,6 +80,14 @@ export interface SoulPorts {
 let soulProc: ChildProcess | null = null;
 let alreadyReadyFired = false;
 let livePorts: SoulPorts | null = null;
+
+// --- Boot resilience state ---------------------------------------------
+let respawnAttempts = 0;            // respawns used in the current boot episode
+let intentionalStop = false;        // set by stopSoul() so quit/restart don't respawn
+let bootTimer: ReturnType<typeof setTimeout> | null = null;   // overall boot watchdog
+let healthTimer: ReturnType<typeof setInterval> | null = null; // /health fallback poll
+let stableTimer: ReturnType<typeof setTimeout> | null = null;  // ready-stability timer
+let bootFailed = false;             // latched once we surface soul:failed
 
 interface LogPayload {
   stream: 'stdout' | 'stderr' | 'meta';
@@ -78,13 +112,83 @@ export function getSoulSnapshot(): {
   recentLogs: LogPayload[];
   elapsedMs: number;
   ports: SoulPorts | null;
+  failed: boolean;
 } {
   return {
     ready: soulIsReady,
     recentLogs: recentLogs.slice(),
     elapsedMs: soulSpawnAt ? Date.now() - soulSpawnAt : 0,
     ports: livePorts,
+    failed: bootFailed,
   };
+}
+
+// ----------------------------------------------------------------------
+// Boot resilience: a single source of truth for "soul became ready",
+// reached via EITHER the stdout marker OR a /health probe, so a missed/
+// unflushed marker line can't strand the boot. Idempotent.
+// ----------------------------------------------------------------------
+
+function clearHealthPoll(): void {
+  if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
+}
+function clearBootTimers(): void {
+  clearHealthPoll();
+  if (bootTimer) { clearTimeout(bootTimer); bootTimer = null; }
+}
+
+function markReady(window: BrowserWindow, via: 'marker' | 'health'): void {
+  if (soulIsReady) return;
+  alreadyReadyFired = true;
+  soulIsReady = true;
+  bootFailed = false;
+  clearBootTimers();
+  if (via === 'health') {
+    log(window, 'meta', '[unclaw] soul confirmed ready via /health (marker not seen yet)');
+  }
+  emit(window, 'soul:ready');
+  // If soul stays up this long, hand back a fresh respawn budget so a
+  // much-later crash isn't starved by boot-time retries — but a rapid
+  // ready→crash loop (crash before this fires) keeps the spent budget.
+  if (stableTimer) clearTimeout(stableTimer);
+  stableTimer = setTimeout(() => {
+    if (soulIsReady) respawnAttempts = 0;
+  }, SOUL_STABLE_MS);
+}
+
+/** Poll soul's /health on the best-known port until it answers 200, then
+ *  mark ready. Runs alongside the marker path; whichever lands first wins. */
+function startHealthPoll(window: BrowserWindow): void {
+  clearHealthPoll();
+  healthTimer = setInterval(() => {
+    if (soulIsReady || bootFailed) { clearHealthPoll(); return; }
+    const port = livePorts?.http ?? readPortsJson()?.http ?? SOUL_LEGACY_HTTP_PORT;
+    const req = http.get(
+      `http://127.0.0.1:${port}/health`,
+      { timeout: SOUL_HEALTH_TIMEOUT_MS },
+      (res) => {
+        res.resume();
+        if (res.statusCode === 200) markReady(window, 'health');
+      },
+    );
+    req.on('error', () => { /* not up yet */ });
+    req.on('timeout', () => req.destroy());
+  }, SOUL_HEALTH_POLL_MS);
+}
+
+/** Surface an unrecoverable boot failure to the renderer (instead of an
+ *  infinite spinner). Carries the recent stderr tail so the UI can show a
+ *  real reason + a "view logs" affordance. */
+function handleBootFailure(window: BrowserWindow, reason: string): void {
+  if (soulIsReady) return; // we made it after all; ignore late failure signals
+  bootFailed = true;
+  clearBootTimers();
+  const errTail = recentLogs
+    .filter((l) => l.stream === 'stderr' || l.stream === 'meta')
+    .slice(-12)
+    .map((l) => l.line);
+  log(window, 'meta', `[unclaw] soul boot FAILED: ${reason}`);
+  emit(window, 'soul:failed', { reason, recentErrors: errTail });
 }
 
 /** Live ports soul is bound to. Null until the [ports] banner has been
@@ -114,11 +218,7 @@ function log(window: BrowserWindow, stream: LogPayload['stream'], line: string):
 
 function maybeFireReady(window: BrowserWindow, line: string): void {
   if (alreadyReadyFired) return;
-  if (line.includes(SOUL_READY_MARKER)) {
-    alreadyReadyFired = true;
-    soulIsReady = true;
-    emit(window, 'soul:ready');
-  }
+  if (line.includes(SOUL_READY_MARKER)) markReady(window, 'marker');
 }
 
 function maybeParsePorts(window: BrowserWindow, line: string): void {
@@ -424,10 +524,53 @@ function spawnSoul(window: BrowserWindow): boolean {
     }
     emit(window, 'soul:exit', { code, signal });
     soulProc = null;
+    clearHealthPoll();
+
+    // Intentional shutdown (quit / explicit restart) → never respawn.
+    if (intentionalStop) return;
+
+    // Unexpected exit. Auto-respawn with backoff so a transient first-run
+    // crash (OOM on a cold model load, a flaky import) self-heals instead
+    // of stranding the user. The overall boot watchdog (armed in startSoul)
+    // still bounds the whole episode; the stability timer resets the count
+    // once soul has been healthy for a while.
+    if (respawnAttempts < MAX_SOUL_RESPAWNS) {
+      const attempt = respawnAttempts + 1;
+      respawnAttempts = attempt;
+      // Re-detect on the fresh process: a respawn may pick new ports.
+      soulIsReady = false;
+      alreadyReadyFired = false;
+      livePorts = null;
+      const backoff = SOUL_RESPAWN_BACKOFF_MS[Math.min(attempt - 1, SOUL_RESPAWN_BACKOFF_MS.length - 1)];
+      log(window, 'meta',
+        `[unclaw] respawning soul (attempt ${attempt}/${MAX_SOUL_RESPAWNS}) in ${backoff}ms`);
+      emit(window, 'soul:retrying', { attempt, max: MAX_SOUL_RESPAWNS });
+      setTimeout(() => {
+        if (intentionalStop) return;
+        // Re-sweep first: the dead process may have leaked UE/wilbur
+        // children holding the ports the respawn needs to bind.
+        void sweepStaleProcesses(window).finally(() => {
+          if (intentionalStop) return;
+          if (spawnSoul(window)) startHealthPoll(window);
+        });
+      }, backoff);
+      return;
+    }
+
+    // Out of retries and never reached ready → surface a real failure.
+    if (!soulIsReady) {
+      handleBootFailure(window,
+        `soul exited (code=${code ?? 'null'} signal=${signal ?? 'null'}) ` +
+        `and exhausted ${MAX_SOUL_RESPAWNS} restart attempts`);
+    }
   });
   soulProc.on('error', (err) => {
     log(window, 'meta', `[unclaw] soul error: ${err.message}`);
   });
+
+  // Fallback readiness path: poll /health alongside the stdout marker so a
+  // missed/unflushed marker line can never strand the boot.
+  startHealthPoll(window);
 
   return true;
 }
@@ -446,6 +589,12 @@ export async function startSoul(window: BrowserWindow): Promise<void> {
   livePorts = null;
   recentLogs.length = 0;
   soulSpawnAt = Date.now();
+  // Fresh boot episode: clear resilience state + any leftover timers.
+  respawnAttempts = 0;
+  intentionalStop = false;
+  bootFailed = false;
+  if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
+  clearBootTimers();
 
   // In packaged builds, refuse to spawn until the first-run wizard has
   // provisioned the runtime (python-env, downloaded UE app, downloaded
@@ -499,7 +648,36 @@ export async function startSoul(window: BrowserWindow): Promise<void> {
   // be conservative: a generic process holding port 8888 we leave alone
   // and just log a warning.
   await sweepStaleProcesses(window);
+
+  // Arm the overall boot watchdog BEFORE spawning. It spans the whole
+  // episode (including any respawns); if neither the READY marker nor a
+  // /health probe confirms within the budget, we surface a failure instead
+  // of letting the renderer spin forever.
+  if (bootTimer) clearTimeout(bootTimer);
+  bootTimer = setTimeout(() => {
+    if (!soulIsReady && !intentionalStop) {
+      handleBootFailure(window,
+        `soul did not become ready within ${Math.round(SOUL_BOOT_TIMEOUT_MS / 1000)}s`);
+    }
+  }, SOUL_BOOT_TIMEOUT_MS);
+
   spawnSoul(window);
+}
+
+/**
+ * User-initiated restart from the boot-failure screen. Clears the failure
+ * latch + retry budget and runs a fresh boot episode.
+ */
+export async function restartSoul(window: BrowserWindow): Promise<void> {
+  log(window, 'meta', '[unclaw] manual soul restart requested');
+  // Tear down any current process first so the respawn binds clean ports.
+  intentionalStop = true;
+  if (soulProc) {
+    try { process.kill(-soulProc.pid!, 'SIGTERM'); } catch { /* group may be gone */ }
+    soulProc = null;
+  }
+  clearBootTimers();
+  await startSoul(window);
 }
 
 /**
@@ -615,6 +793,11 @@ async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
  * point (launchd cleans up orphans whose group leader is gone).
  */
 export function stopSoul(): void {
+  // Mark intentional FIRST so the exit handler never auto-respawns a
+  // process we're deliberately tearing down, and stop all boot timers.
+  intentionalStop = true;
+  clearBootTimers();
+  if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
   if (!soulProc) return;
   const pid = soulProc.pid;
   soulProc = null;

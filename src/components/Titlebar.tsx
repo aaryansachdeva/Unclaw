@@ -513,9 +513,18 @@ export function Titlebar({
                       minWidth: 248,
                       padding: 6,
                       borderRadius: 14,
-                      background: 'var(--glass-bg-panel)',
-                      backdropFilter: 'var(--glass-blur)',
-                      WebkitBackdropFilter: 'var(--glass-blur)',
+                      // NOTE: this popover is nested inside the profile capsule,
+                      // which itself has backdrop-filter. Chromium can't
+                      // composite the page content behind a *nested*
+                      // backdrop-filter, so the blur here references the
+                      // capsule's tiny region, not the chat/stream the menu
+                      // floats over — it reads as un-blurred and blends in. We
+                      // therefore carry readability with a near-opaque surface
+                      // (the backdrop-filter stays as a harmless enhancement
+                      // wherever it does composite).
+                      background: 'rgba(26, 31, 43, 0.88)',
+                      backdropFilter: 'blur(16px) saturate(1.4)',
+                      WebkitBackdropFilter: 'blur(16px) saturate(1.4)',
                       border: '1px solid var(--glass-border)',
                       // Use the shared panel-ground shadow so the popover
                       // sits in the same depth language as the SettingsPanel
