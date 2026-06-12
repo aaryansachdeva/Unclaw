@@ -1021,6 +1021,91 @@ export async function downloadAndExtractCharacterPak(
 }
 
 // ----------------------------------------------------------------------
+// Character voice install. A paid character's cloned voice (supertonic JSON +
+// kokoro safetensors) lives in the same private, entitlement-gated bucket as
+// the pak. The renderer fetches short-lived presigned URLs from the store
+// Worker (it holds the auth token) and hands them here; we drop each file into
+// the soul data dir soul actually reads, so the avatar speaks in its cloned
+// voice instead of the generic F1 fallback. soul needs no change: _resolve_voice
+// loads <id>.json straight off disk when present.
+//
+//   supertonic -> <SOUL_DATA>/supertonic/voices/<id>.json
+//   kokoro     -> <SOUL_DATA>/kokoro/voices/<id>_kokoro.safetensors
+// ----------------------------------------------------------------------
+function soulVoicesDir(engine: 'supertonic' | 'kokoro'): string {
+  // Mirror run_soul.sh: packaged soul reads SOUL_DATA_DIR = <runtime>/data.
+  return path.join(getRuntimeDir(), 'data', engine, 'voices');
+}
+
+/** Expected on-disk voice filenames for a character, by engine. Kept in lockstep
+ *  with src/characters/<id>.ts (supertonic stem `<id>`, kokoro stem `<id>_kokoro`)
+ *  and the store Worker's /voice key layout. */
+function voiceFileNames(characterId: string): { supertonic: string; kokoro: string } {
+  assertSafeCharacterId(characterId);
+  return { supertonic: `${characterId}.json`, kokoro: `${characterId}_kokoro.safetensors` };
+}
+
+/** Which of a character's voice files are already present on disk (non-empty).
+ *  Lets the renderer skip a gated fetch when nothing is missing. */
+export function characterVoicesPresent(characterId: string): { supertonic: boolean; kokoro: boolean } {
+  const names = voiceFileNames(characterId);
+  const ok = (engine: 'supertonic' | 'kokoro', name: string): boolean => {
+    try {
+      const st = fs.statSync(path.join(soulVoicesDir(engine), name));
+      return st.isFile() && st.size > 0;
+    } catch { return false; }
+  };
+  return {
+    supertonic: ok('supertonic', names.supertonic),
+    kokoro: ok('kokoro', names.kokoro),
+  };
+}
+
+export interface VoiceDownloadFile {
+  kind: 'supertonic' | 'kokoro';
+  filename: string;
+  url: string;
+}
+
+/** Download a character's presigned voice files into the soul voices dirs.
+ *  Best-effort and idempotent: writes atomically (temp + rename), routes by
+ *  `kind`, and ignores unknown kinds. Returns the count actually written. A
+ *  failure here never blocks the pak: the avatar just falls back to F1 until
+ *  the next attempt. */
+export async function downloadCharacterVoices(
+  characterId: string,
+  files: VoiceDownloadFile[],
+): Promise<number> {
+  assertSafeCharacterId(characterId);
+  const names = voiceFileNames(characterId);
+  let written = 0;
+  for (const f of files) {
+    if (f.kind !== 'supertonic' && f.kind !== 'kokoro') continue;
+    // Force the destination name from the trusted id, never the server-supplied
+    // filename, so a rogue presign response can't write outside the voices dir.
+    const destName = f.kind === 'supertonic' ? names.supertonic : names.kokoro;
+    const dir = soulVoicesDir(f.kind);
+    fs.mkdirSync(dir, { recursive: true });
+    const dest = path.join(dir, destName);
+    const tmp = `${dest}.part`;
+    try {
+      const res = await fetch(f.url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length === 0) throw new Error('empty body');
+      fs.writeFileSync(tmp, buf);
+      fs.renameSync(tmp, dest);
+      written += 1;
+      console.log(`[voice] installed ${characterId} ${f.kind} -> ${dest} (${buf.length} B)`);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+      console.warn(`[voice] ${characterId} ${f.kind} failed: ${(err as Error).message}`);
+    }
+  }
+  return written;
+}
+
+// ----------------------------------------------------------------------
 // Subprocess helper, uv, ditto, xattr all go through here so log
 // streaming + non-zero-exit handling stays consistent.
 // ----------------------------------------------------------------------

@@ -272,6 +272,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('character-store:download-pak', args),
     listInstalled: (): Promise<{ ids: string[] }> =>
       ipcRenderer.invoke('character-store:list-installed'),
+    // Cloned-voice install. The voice files ride in the same private,
+    // entitlement-gated bucket as the pak; the renderer fetches presigned URLs
+    // and hands them here. hasVoices lets the renderer skip the fetch when the
+    // files are already on disk (already-owned, warm case).
+    hasVoices: (args: { characterId: string }): Promise<{
+      ok: boolean; present?: { supertonic: boolean; kokoro: boolean }; complete?: boolean; error?: string;
+    }> => ipcRenderer.invoke('character-store:has-voices', args),
+    downloadVoices: (args: {
+      characterId: string;
+      files: { kind: 'supertonic' | 'kokoro'; filename: string; url: string }[];
+    }): Promise<{ ok: boolean; written?: number; error?: string }> =>
+      ipcRenderer.invoke('character-store:download-voices', args),
     onPakProgress: (
       cb: (data: { characterId: string; downloaded: number; total: number }) => void,
     ): (() => void) => {

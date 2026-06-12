@@ -19,7 +19,7 @@ import fs from 'fs';
 import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
 import { startSoul, stopSoul, getSoulSnapshot, getSoulPorts } from './soulSupervisor';
-import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir } from './setupCoordinator';
+import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent } from './setupCoordinator';
 import { MANIFEST } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
@@ -1190,6 +1190,39 @@ ipcMain.handle(
       // when the UE container wasn't reachable; the pak still boot-mounts next
       // launch from UNCLAW_CHARACTERS_SRC.
       return { ok: true, dir: installed.extractDir, mountPath: installed.containerPak };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  },
+);
+
+// IPC: which of a character's cloned voice files are already on disk. Lets the
+// renderer skip a gated /voice fetch when nothing is missing (the common warm
+// case for an already-owned character).
+ipcMain.handle('character-store:has-voices', async (_event, args: { characterId: string }) => {
+  if (!args?.characterId) return { ok: false, error: 'invalid_args' };
+  try {
+    const present = characterVoicesPresent(args.characterId);
+    return { ok: true, present, complete: present.supertonic && present.kokoro };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
+// IPC: download + install a purchased character's cloned voice files. The
+// renderer fetches the presigned URLs from the store Worker (entitlement-gated)
+// and passes them here; main drops them into the soul voices dirs. Best-effort:
+// a failure leaves the avatar on the generic F1 voice until the next attempt,
+// it never blocks the pak.
+ipcMain.handle(
+  'character-store:download-voices',
+  async (_event, args: { characterId: string; files: { kind: 'supertonic' | 'kokoro'; filename: string; url: string }[] }) => {
+    if (!args?.characterId || !Array.isArray(args?.files)) {
+      return { ok: false, error: 'invalid_args' };
+    }
+    try {
+      const written = await downloadCharacterVoices(args.characterId, args.files);
+      return { ok: true, written };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }

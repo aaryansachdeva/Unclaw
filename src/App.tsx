@@ -65,6 +65,7 @@ import {
   fetchEntitlements,
   createCheckout,
   fetchDownloadUrl,
+  fetchVoiceUrls,
   BASE_CHARACTER_IDS,
   PAID_CHARACTER_IDS,
   STORE_PRICING,
@@ -1032,6 +1033,27 @@ function AppMain() {
     }
   }, [authToken, startCheckoutPoll, refreshEntitlements, agentById]);
 
+  // Install a paid character's cloned voice (supertonic + kokoro), gated by the
+  // same entitlement as the pak. Idempotent + best-effort: skips the gated fetch
+  // when both files are already on disk, and a failure just leaves the avatar on
+  // the generic fallback voice until the next attempt. Without this, a purchased
+  // character streams the wrong (default F1) voice.
+  const ensureCharacterVoices = useCallback(async (agentId: string) => {
+    if (!authToken) return;
+    const api = window.electronAPI?.characterStore;
+    if (!api?.hasVoices || !api?.downloadVoices) return;
+    try {
+      const present = await api.hasVoices({ characterId: agentId });
+      if (present?.ok && present.complete) return; // already on disk
+      const files = await fetchVoiceUrls(authToken, agentId);
+      if (!files.length) return;
+      const res = await api.downloadVoices({ characterId: agentId, files });
+      if (!res?.ok) console.warn('[store] voice install failed', agentId, res?.error);
+    } catch (err) {
+      console.warn('[store] voice install error', agentId, err);
+    }
+  }, [authToken]);
+
   const handleDownloadPak = useCallback(async (agentId: string) => {
     if (!authToken) return;
     const api = window.electronAPI?.characterStore;
@@ -1055,6 +1077,7 @@ function AppMain() {
         // fire the "ready" toast.
         setInstalledCharacterIds((prev) => (prev && !prev.includes(agentId) ? [...prev, agentId] : prev));
         void refreshLocalInstalled(); // pak is now on disk
+        void ensureCharacterVoices(agentId); // gated cloned voice, so it doesn't speak in F1
         setStoreToast({ kind: 'ready', ids: [agentId] });
       } else {
         // Leave the card on "download" so the user can retry by clicking it,
@@ -1069,7 +1092,7 @@ function AppMain() {
     } finally {
       setPakProgress((p) => { const n = { ...p }; delete n[agentId]; return n; });
     }
-  }, [authToken, pixelStreaming]);
+  }, [authToken, pixelStreaming, ensureCharacterVoices]);
 
   // Auto-download owned-but-not-installed paid characters. Fires after a
   // purchase (entitlement lands -> owned grows) and on sign-in (a character
@@ -1089,6 +1112,22 @@ function AppMain() {
       void handleDownloadPak(id);
     }
   }, [authToken, ownedCharacterIds, localInstalledIds, pakProgress, handleDownloadPak]);
+
+  // Voice reconcile: a character can be owned + its pak already installed (bought
+  // on an earlier build, or before voices were wired) yet have no cloned-voice
+  // file on disk, so it streams the generic F1 voice. Once per session per owned
+  // paid character, make sure its voice is present. ensureCharacterVoices is a
+  // cheap disk check first, so this is a no-op when nothing's missing.
+  const voiceReconciledRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!authToken || !ownedCharacterIds) return;
+    for (const id of ownedCharacterIds) {
+      if (!PAID_CHARACTER_IDS.includes(id)) continue;
+      if (voiceReconciledRef.current.has(id)) continue;
+      voiceReconciledRef.current.add(id);
+      void ensureCharacterVoices(id);
+    }
+  }, [authToken, ownedCharacterIds, ensureCharacterVoices]);
 
   // Track whether the AI is currently producing audible output. Voice
   // mode uses this to gate VAD and to detect barge-in.

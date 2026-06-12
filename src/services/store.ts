@@ -61,3 +61,25 @@ export async function fetchDownloadUrl(token: string, characterId: string): Prom
   const data = (await res.json()) as { url: string };
   return data.url;
 }
+
+/** One gated, presigned voice file: a cloned-voice asset kept in the private
+ *  bucket alongside the pak. `kind` tells the main process which soul voices
+ *  dir it belongs in (supertonic -> .json, kokoro -> .safetensors). */
+export interface VoiceFile {
+  kind: 'supertonic' | 'kokoro';
+  filename: string;
+  url: string;
+}
+
+/** Entitlement-gated: presigned R2 URLs for a paid character's cloned voice
+ *  files (supertonic JSON + kokoro safetensors). 403 if not owned. These ride
+ *  in the private bucket so a voice is never downloadable without owning the
+ *  character; the free characters (grace/mark) use the public CDN instead. */
+export async function fetchVoiceUrls(token: string, characterId: string): Promise<VoiceFile[]> {
+  const res = await fetch(`${STORE_URL}/store/characters/${characterId}/voice`, {
+    headers: authHeaders(token),
+  });
+  if (!res.ok) throw new Error(`store /voice ${res.status}`);
+  const data = (await res.json()) as { files: VoiceFile[] };
+  return data.files ?? [];
+}

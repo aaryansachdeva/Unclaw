@@ -183,6 +183,15 @@ interface ElectronAPI {
     }) => Promise<{ ok: boolean; dir?: string; mountPath?: string | null; error?: string }>;
     /** Character ids whose pak is downloaded locally (in the staging dir). */
     listInstalled: () => Promise<{ ids: string[] }>;
+    /** Which of a character's cloned voice files are already on disk. */
+    hasVoices: (args: { characterId: string }) => Promise<{
+      ok: boolean; present?: { supertonic: boolean; kokoro: boolean }; complete?: boolean; error?: string;
+    }>;
+    /** Download + install presigned cloned-voice files into the soul voices dirs. */
+    downloadVoices: (args: {
+      characterId: string;
+      files: { kind: 'supertonic' | 'kokoro'; filename: string; url: string }[];
+    }) => Promise<{ ok: boolean; written?: number; error?: string }>;
     /** Subscribe to byte progress for a pak download. */
     onPakProgress: (
       cb: (data: { characterId: string; downloaded: number; total: number }) => void,
