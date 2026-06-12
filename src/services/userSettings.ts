@@ -289,7 +289,11 @@ export async function fetchCloudSettings(token: string): Promise<CloudSettingsRe
   const res = await fetch(`${CLOUD_URL}/user_settings`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (res.status === 401) return null;
+  // CRITICAL: a non-200 means we DON'T KNOW the cloud state — it must NOT be
+  // confused with "cloud is empty". A 401 (expired/invalid token), a 5xx, or a
+  // Cloudflare edge block (e.g. 403 "error code: 1010") all THROW so the caller
+  // can keep local state as a read-cache and NOT promote it up to the cloud.
+  // Only a genuine 200-with-no-row returns null (safe to migrate local up).
   if (!res.ok) {
     const err = await res.text().catch(() => res.statusText);
     throw new Error(`cloud /user_settings GET ${res.status}: ${err.slice(0, 200)}`);
@@ -374,6 +378,12 @@ export interface ReconcileResult {
    *  local chat history) since those are NOT account-scoped and must not leak
    *  across accounts. */
   ownerChanged: boolean;
+  /** True when the cloud could NOT be read (expired token, network, or a
+   *  Cloudflare edge block). `profile` is then the local read-cache shown for
+   *  continuity, but the caller MUST NOT push it up or treat local as
+   *  authoritative — doing so would clobber the real cloud profile with stale
+   *  local data. Retry on the next sign-in / connect cycle. */
+  cloudUnavailable?: boolean;
 }
 
 /** Reconcile settings for the account signing in, scoping the machine's local
@@ -396,10 +406,19 @@ export async function reconcileForAccount(
   localOwnerId: string | null,
 ): Promise<ReconcileResult> {
   const sameOwner = localOwnerId === accountId;
-  const cloud = await fetchCloudSettings(token).catch((err) => {
-    console.warn('[settings] cloud fetch failed during reconcile', err);
-    return null;
-  });
+  let cloud: CloudSettingsRecord | null;
+  try {
+    cloud = await fetchCloudSettings(token);
+  } catch (err) {
+    // Couldn't read the cloud (expired token / network / Cloudflare edge).
+    // This is NOT "cloud empty" — promoting local up here is exactly the bug
+    // that lets a stale dev machine clobber the real cloud profile. Show the
+    // local read-cache for continuity, but push NOTHING and change NOTHING in
+    // the cloud. The driver retries on the next connect / sign-in cycle.
+    console.warn('[settings] cloud read failed during reconcile; keeping local for display, NOT pushing up', err);
+    const local = await fetchSettings().catch(() => null);
+    return { profile: local, ownerChanged: false, cloudUnavailable: true };
+  }
 
   if (cloud) {
     // Cloud is authoritative for this account; overwrite whatever soul holds

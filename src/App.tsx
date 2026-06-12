@@ -2386,8 +2386,22 @@ function AppMain() {
         const localOwner = (() => {
           try { return localStorage.getItem(LOCAL_ACCOUNT_KEY); } catch { return null; }
         })();
-        const { profile: p, ownerChanged } = await reconcileForAccount(accountId, authToken, localOwner);
+        const { profile: p, ownerChanged, cloudUnavailable } = await reconcileForAccount(accountId, authToken, localOwner);
         if (cancelled) return;
+        // Cloud couldn't be read (expired token / network / Cloudflare edge).
+        // `p` is the local read-cache shown for continuity, but we must change
+        // NOTHING in the cloud and treat NOTHING local as authoritative — that
+        // promotion is the bug that clobbers the real cloud profile with stale
+        // local. Let it retry on the next connect/sign-in cycle.
+        if (cloudUnavailable) {
+          if (p?.roster && Array.isArray(p.roster) && p.roster.length > 0) {
+            suppressRosterPushRef.current = true;
+            hydrateStack(p.roster);
+          }
+          setProfile(p && p.name ? { ...p, name: firstName(p.name) } : p);
+          profileSyncedRef.current = false; // allow a retry once cloud is reachable
+          return;
+        }
 
         if (ownerChanged) {
           // The machine is changing hands to this account (different prior
