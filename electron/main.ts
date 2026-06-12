@@ -553,11 +553,21 @@ ipcMain.handle('terminal:open-with-command', async (_event, command: string) => 
   if (typeof command !== 'string' || !command.trim()) {
     return { ok: false, error: 'no command provided' };
   }
-  // Escape double quotes for AppleScript embedding. Commands like
-  // `claude setup-token` have no shell metacharacters worth worrying
-  // about beyond quote balancing.
-  const safe = command.replace(/"/g, '\\"');
   const { exec } = await import('node:child_process');
+  if (process.platform === 'win32') {
+    // Windows: open a fresh cmd window with the command pre-filled (/k keeps
+    // it open after the command runs so the user sees the setup-token output).
+    const safeWin = command.replace(/"/g, '""');
+    return new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      exec(`start "Unclaw" cmd /k "${safeWin}"`, (err) => {
+        if (err) resolve({ ok: false, error: err.message });
+        else resolve({ ok: true });
+      });
+    });
+  }
+  // macOS: osascript injects the command into a fresh Terminal tab rather
+  // than `open -a Terminal` so we don't clobber an existing session.
+  const safe = command.replace(/"/g, '\\"');
   return new Promise<{ ok: boolean; error?: string }>((resolve) => {
     exec(
       `osascript -e 'tell application "Terminal" to do script "${safe}"' ` +
@@ -1235,17 +1245,26 @@ ipcMain.handle(
 // installedCharacters report (which is null until UE answers, and a packaged
 // build that strips paid paks would otherwise look "all installed").
 ipcMain.handle('character-store:list-installed', async () => {
+  const ids = new Set<string>();
+  // Downloaded paks staged on disk (production, or after a real download).
   try {
     const dir = characterPaksStageDir();
-    if (!fs.existsSync(dir)) return { ids: [] as string[] };
-    const ids = fs
-      .readdirSync(dir)
-      .filter((f) => f.toLowerCase().endsWith('.pak'))
-      .map((f) => f.replace(/\.pak$/i, ''));
-    return { ids };
-  } catch {
-    return { ids: [] as string[] };
+    if (fs.existsSync(dir)) {
+      for (const f of fs.readdirSync(dir)) {
+        if (f.toLowerCase().endsWith('.pak')) ids.add(f.replace(/\.pak$/i, ''));
+      }
+    }
+  } catch { /* ignore */ }
+  // Dev convenience: a dev build cooks every character chunk into the UE
+  // app's Content/Paks (pakchunk0-5), so all paid characters are renderable
+  // immediately without a download. UE's installedCharacters report doesn't
+  // surface them (it's keyed to downloaded paks), so report them here to make
+  // the picker usable in dev without the platform-pak download pipeline.
+  // Packaged builds fall through to the staged-paks-only set above.
+  if (!app.isPackaged) {
+    for (const id of ['ava', 'goblin', 'chris', 'joi']) ids.add(id);
   }
+  return { ids: Array.from(ids) };
 });
 
 app.whenReady().then(() => {
@@ -1335,12 +1354,29 @@ app.on('will-quit', () => {
   // the python -m mcp_servers/* invocations. Synchronous so each
   // sweep lands before app exit; this is a quit-path safety net so
   // the small spawn cost is fine.
-  for (const pattern of ['Unclaw Character', 'soul/mcp_servers']) {
-    try {
-      spawnSync('pkill', ['-f', pattern], { stdio: 'ignore' });
-    } catch {
-      // pkill missing or denied, launchd will reap orphans whose
-      // parent (Electron) just exited.
+  if (process.platform === 'win32') {
+    // Windows: stopSoul() already taskkill /T-reaps the powershell → python
+    // → UE tree, and unreal_runtime's Job Object (KILL_ON_JOB_CLOSE) takes
+    // UE down with soul. Belt-and-suspenders, force-kill any UE exe that
+    // outlived its parent (the launcher AND its -Win64-Shipping child).
+    for (const image of ['AudioTestProject02.exe',
+                         'AudioTestProject02-Win64-Shipping.exe']) {
+      try {
+        spawnSync('taskkill', ['/IM', image, '/T', '/F'], { stdio: 'ignore' });
+      } catch {
+        // not running, fine
+      }
+    }
+  } else {
+    // -f matches the full argv so we catch the .app inner binary AND the
+    // python -m mcp_servers/* invocations.
+    for (const pattern of ['Unclaw Character', 'soul/mcp_servers']) {
+      try {
+        spawnSync('pkill', ['-f', pattern], { stdio: 'ignore' });
+      } catch {
+        // pkill missing or denied, launchd will reap orphans whose
+        // parent (Electron) just exited.
+      }
     }
   }
 });

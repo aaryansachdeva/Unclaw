@@ -1103,15 +1103,22 @@ function AppMain() {
   const autoDownloadedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!authToken || !ownedCharacterIds) return;
+    // Wait until UE has reported its installed set (null = not reported yet).
+    // Without this guard we race UE's ~90s boot and re-download characters
+    // that are already baked into the build's Content/Paks (every dev build,
+    // and any packaged build that ships paid chunks). On Windows that race
+    // fired every time and the download stuck at 100% (extract failed).
+    if (installedCharacterIds === null) return;
     for (const id of ownedCharacterIds) {
       if (!PAID_CHARACTER_IDS.includes(id)) continue;
-      if (localInstalledIds.includes(id)) continue;      // pak already on disk
-      if (autoDownloadedRef.current.has(id)) continue;   // already kicked off
-      if (pakProgress[id] != null) continue;             // already downloading
+      if (localInstalledIds.includes(id)) continue;        // pak already on disk
+      if (installedCharacterIds.includes(id)) continue;    // UE already has it (baked-in)
+      if (autoDownloadedRef.current.has(id)) continue;     // already kicked off
+      if (pakProgress[id] != null) continue;               // already downloading
       autoDownloadedRef.current.add(id);
       void handleDownloadPak(id);
     }
-  }, [authToken, ownedCharacterIds, localInstalledIds, pakProgress, handleDownloadPak]);
+  }, [authToken, ownedCharacterIds, installedCharacterIds, localInstalledIds, pakProgress, handleDownloadPak]);
 
   // Voice reconcile: a character can be owned + its pak already installed (bought
   // on an earlier build, or before voices were wired) yet have no cloned-voice

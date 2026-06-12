@@ -28,6 +28,12 @@ import { spawn, ChildProcess, execFile } from 'child_process';
 import path from 'path';
 import http from 'http';
 
+// Platform split. On Windows soul is launched via `powershell run_soul.ps1`
+// and the process tree is reaped with `taskkill /T /F` (no POSIX process
+// groups); on macOS/Linux it's `bash run_soul.sh` + negative-PID signals.
+const IS_WINDOWS = process.platform === 'win32';
+const SOUL_SCRIPT = IS_WINDOWS ? 'run_soul.ps1' : 'run_soul.sh';
+
 // Legacy/fallback port for external-soul probing. When the user runs
 // soul standalone in a terminal and we attach to it, we don't know
 // which port it picked; ports.json is the canonical discovery path,
@@ -345,14 +351,14 @@ function resolveSoulScript(): { script: string; cwd: string } | null {
   const fs = require('fs') as typeof import('fs');
   const override = process.env.UNCLAW_SOUL_REPO;
   if (override) {
-    return { script: path.join(override, 'run_soul.sh'), cwd: override };
+    return { script: path.join(override, SOUL_SCRIPT), cwd: override };
   }
   // Auto-updater overlay, checked FIRST so a freshly-dropped soul takes
   // precedence over the baseline. The overlay dir is only present after
   // the updater has successfully installed a soul category bump.
   if (app.isPackaged) {
     const overlayDir = path.join(getRuntimeDir(), 'soul');
-    const overlayScript = path.join(overlayDir, 'run_soul.sh');
+    const overlayScript = path.join(overlayDir, SOUL_SCRIPT);
     if (fs.existsSync(overlayScript)) {
       return { script: overlayScript, cwd: overlayDir };
     }
@@ -362,7 +368,7 @@ function resolveSoulScript(): { script: string; cwd: string } | null {
   // package.json maps `../soul → soul-src`, so this is the install path.
   if (app.isPackaged) {
     const packagedDir = path.join(process.resourcesPath, 'soul-src');
-    const script = path.join(packagedDir, 'run_soul.sh');
+    const script = path.join(packagedDir, SOUL_SCRIPT);
     if (fs.existsSync(script)) {
       return { script, cwd: packagedDir };
     }
@@ -376,8 +382,8 @@ function resolveSoulScript(): { script: string; cwd: string } | null {
   ];
   for (const dir of candidates) {
     try {
-      if (fs.existsSync(path.join(dir, 'run_soul.sh'))) {
-        return { script: path.join(dir, 'run_soul.sh'), cwd: dir };
+      if (fs.existsSync(path.join(dir, SOUL_SCRIPT))) {
+        return { script: path.join(dir, SOUL_SCRIPT), cwd: dir };
       }
     } catch { /* try next */ }
   }
@@ -417,11 +423,16 @@ function spawnSoul(window: BrowserWindow): boolean {
     // setupCoordinator.characterPaksStageDir().
     UNCLAW_CHARACTERS_SRC:
       process.env.UNCLAW_CHARACTERS_SRC ?? path.join(getRuntimeDir(), 'character-paks'),
-    PATH: [
-      '/opt/homebrew/bin',
-      '/usr/local/bin',
-      process.env.PATH ?? '',
-    ].filter(Boolean).join(':'),
+    // PATH augmentation is a macOS/Linux fix (Electron inherits an inert
+    // PATH lacking /opt/homebrew/bin). On Windows the inherited PATH already
+    // resolves powershell/python; just pass it through unchanged.
+    PATH: IS_WINDOWS
+      ? (process.env.PATH ?? '')
+      : [
+          '/opt/homebrew/bin',
+          '/usr/local/bin',
+          process.env.PATH ?? '',
+        ].filter(Boolean).join(':'),
   };
 
   // Packaged-install env. The setup wizard provisions
@@ -449,7 +460,24 @@ function spawnSoul(window: BrowserWindow): boolean {
   }
 
   try {
-    soulProc = spawn('bash', [resolved.script], {
+    soulProc = IS_WINDOWS
+      ? spawn(
+          'powershell.exe',
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', resolved.script],
+          {
+            cwd: resolved.cwd,
+            env: childEnv,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            // No console window for the spawned powershell host.
+            windowsHide: true,
+            // NB: do NOT set detached:true on Windows. Unlike Unix (where
+            // it makes a killable process group), on Windows it spawns a
+            // new detached console that makes powershell exit immediately
+            // (code 0, ~0.1s). taskkill /T in stopSoul() walks the PID
+            // tree directly, so no process group is needed.
+          },
+        )
+      : spawn('bash', [resolved.script], {
       cwd: resolved.cwd,
       env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -691,6 +719,13 @@ export async function restartSoul(window: BrowserWindow): Promise<void> {
  * A random other dev tool holding port 8765 gets logged-not-killed.
  */
 async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
+  if (IS_WINDOWS) {
+    // run_soul.ps1 frees its own HTTP port on launch
+    // (Get-NetTCPConnection → Stop-Process), so a stale soul can't block
+    // the rebind. A full tasklist/taskkill sweep of orphaned UE is a
+    // follow-up; skip cleanly rather than shell out to /bin/ps (Unix-only).
+    return;
+  }
   const psOutput = await new Promise<string>((resolve) => {
     // `ps -A -o pid=,command=`, full command line for every process the
     // user can see. We post-filter by argv pattern.
@@ -802,6 +837,19 @@ export function stopSoul(): void {
   const pid = soulProc.pid;
   soulProc = null;
   if (pid === undefined) return;
+
+  if (IS_WINDOWS) {
+    // Windows has no POSIX process groups. taskkill /T walks the child
+    // tree (powershell → python soul → UE) and /F force-terminates each.
+    // soul's own FastAPI shutdown won't run on a hard kill, but UE is a
+    // grandchild taskkill /T reaches directly, so nothing is orphaned.
+    try {
+      execFile('taskkill', ['/PID', String(pid), '/T', '/F']);
+    } catch {
+      // already exited
+    }
+    return;
+  }
 
   const killGroup = (sig: NodeJS.Signals) => {
     try {
