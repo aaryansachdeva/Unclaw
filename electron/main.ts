@@ -1258,15 +1258,12 @@ ipcMain.handle('character-store:list-installed', async () => {
       }
     }
   } catch { /* ignore */ }
-  // Dev convenience: a dev build cooks every character chunk into the UE
-  // app's Content/Paks (pakchunk0-5), so all paid characters are renderable
-  // immediately without a download. UE's installedCharacters report doesn't
-  // surface them (it's keyed to downloaded paks), so report them here to make
-  // the picker usable in dev without the platform-pak download pipeline.
-  // Packaged builds fall through to the staged-paks-only set above.
-  if (!app.isPackaged) {
-    for (const id of ['ava', 'goblin', 'chris', 'joi']) ids.add(id);
-  }
+  // NOTE: the dev convenience that reported ava/goblin/chris/joi as installed
+  // (because a dev build baked every chunk into Content/Paks) is DISABLED to
+  // exercise the real purchase→download→mount pipeline. Installed state now
+  // comes solely from the staged-paks dir, same as production. To restore the
+  // baked-in dev shortcut, re-add the !app.isPackaged block AND move the
+  // pakchunk1-4 paks back from _baked_paid_paks_backup into Content/Paks.
   return { ids: Array.from(ids) };
 });
 
