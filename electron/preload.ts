@@ -274,7 +274,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       url: string;
     }): Promise<{ ok: boolean; dir?: string; mountPath?: string | null; error?: string }> =>
       ipcRenderer.invoke('character-store:download-pak', args),
-    listInstalled: (): Promise<{ ids: string[] }> =>
+    listInstalled: (): Promise<{ ids: string[]; stale: string[] }> =>
       ipcRenderer.invoke('character-store:list-installed'),
     // Cloned-voice install. The voice files ride in the same private,
     // entitlement-gated bucket as the pak; the renderer fetches presigned URLs

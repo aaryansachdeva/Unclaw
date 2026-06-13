@@ -952,10 +952,39 @@ export interface InstalledPak {
   containerPak: string | null;
 }
 
+/** Sidecar that records which manifest version of a pak is staged, so the
+ *  provisioning pass can tell an OUTDATED pak from a current one and re-download
+ *  on drift (not just when missing). Lives next to <id>.pak in the stage dir. */
+function pakVersionFile(characterId: string): string {
+  return path.join(characterPaksStageDir(), `${characterId}.version`);
+}
+
+/** Map of staged characterId -> installed pak version (from the sidecar).
+ *  Missing sidecar => 'unknown', which never equals a real manifest version, so
+ *  a pak staged before versioning existed is treated as drifted and refreshed. */
+export function installedPakVersions(): Record<string, string> {
+  const out: Record<string, string> = {};
+  try {
+    const dir = characterPaksStageDir();
+    if (!fs.existsSync(dir)) return out;
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.toLowerCase().endsWith('.pak')) continue;
+      const id = f.replace(/\.pak$/i, '');
+      let version = 'unknown';
+      try {
+        const v = fs.readFileSync(path.join(dir, `${id}.version`), 'utf8').trim();
+        if (v) version = v;
+      } catch { /* no sidecar => unknown */ }
+      out[id] = version;
+    }
+  } catch { /* ignore */ }
+  return out;
+}
+
 export async function downloadAndExtractCharacterPak(
   window: BrowserWindow,
   characterId: string,
-  asset: { url: string; sha256: string | null; sizeBytes: number },
+  asset: { url: string; sha256: string | null; sizeBytes: number; version?: string },
   onProgress: (downloaded: number, total: number) => void,
 ): Promise<InstalledPak> {
   assertSafeCharacterId(characterId);
@@ -994,6 +1023,12 @@ export async function downloadAndExtractCharacterPak(
   fs.mkdirSync(stageDir, { recursive: true });
   const stagedPak = path.join(stageDir, stagedName);
   fs.copyFileSync(srcPak, stagedPak);
+  // Stamp the staged version so a later provisioning pass can detect drift.
+  // Written AFTER the copy so a crash mid-copy leaves no false "current" mark.
+  try {
+    if (asset.version) fs.writeFileSync(pakVersionFile(characterId), asset.version);
+    else { try { fs.unlinkSync(pakVersionFile(characterId)); } catch { /* none */ } }
+  } catch { /* non-fatal: worst case it re-downloads next launch */ }
 
   // (2) Best-effort copy into the UE sandbox container for an immediate
   // mid-session mount. Fails softly when the container doesn't exist yet (UE

@@ -183,8 +183,10 @@ interface ElectronAPI {
       characterId: string;
       url: string;
     }) => Promise<{ ok: boolean; dir?: string; mountPath?: string | null; error?: string }>;
-    /** Character ids whose pak is downloaded locally (in the staging dir). */
-    listInstalled: () => Promise<{ ids: string[] }>;
+    /** Character ids whose pak is downloaded locally (in the staging dir),
+     *  plus `stale`: those whose staged version drifted from the manifest and
+     *  should be re-downloaded. */
+    listInstalled: () => Promise<{ ids: string[]; stale: string[] }>;
     /** Which of a character's cloned voice files are already on disk. */
     hasVoices: (args: { characterId: string }) => Promise<{
       ok: boolean; present?: { supertonic: boolean; kokoro: boolean }; complete?: boolean; error?: string;

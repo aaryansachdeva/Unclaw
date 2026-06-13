@@ -19,7 +19,7 @@ import fs from 'fs';
 import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
 import { startSoul, stopSoul, getSoulSnapshot, getSoulPorts } from './soulSupervisor';
-import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent } from './setupCoordinator';
+import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent, installedPakVersions } from './setupCoordinator';
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
@@ -1189,7 +1189,7 @@ ipcMain.handle(
       const installed = await downloadAndExtractCharacterPak(
         mainWindow,
         args.characterId,
-        { url: args.url, sha256: platMeta.sha256, sizeBytes: platMeta.sizeBytes },
+        { url: args.url, sha256: platMeta.sha256, sizeBytes: platMeta.sizeBytes, version: meta.version },
         (downloaded, total) => {
           mainWindow?.webContents.send('character-store:pak-progress', {
             characterId: args.characterId,
@@ -1264,7 +1264,19 @@ ipcMain.handle('character-store:list-installed', async () => {
   // comes solely from the staged-paks dir, same as production. To restore the
   // baked-in dev shortcut, re-add the !app.isPackaged block AND move the
   // pakchunk1-4 paks back from _baked_paid_paks_backup into Content/Paks.
-  return { ids: Array.from(ids) };
+  //
+  // Drift detection: a staged pak whose recorded version differs from the
+  // manifest's current version is STALE — still usable (the old bytes mount
+  // fine) but the provisioning pass re-downloads it so an older install picks
+  // up a re-cooked pak on launch. `ids` stays the full installed set so the
+  // picker keeps showing the character as ready while the refresh runs.
+  const versions = installedPakVersions();
+  const stale: string[] = [];
+  for (const id of ids) {
+    const want = MANIFEST.characterPaks?.[id]?.version;
+    if (want && versions[id] !== want) stale.push(id);
+  }
+  return { ids: Array.from(ids), stale };
 });
 
 app.whenReady().then(() => {

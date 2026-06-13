@@ -383,6 +383,10 @@ function AppMain() {
   // paid characters — independent of UE's report, which is null until UE
   // answers and would otherwise make an un-downloaded character look ready.
   const [localInstalledIds, setLocalInstalledIds] = useState<string[]>([]);
+  // Paid characters whose staged pak drifted from the manifest version (a newer
+  // pak was cooked). Still usable from the old bytes, but provisioning
+  // re-downloads them on launch so an older install picks up the new pak.
+  const [staleInstalledIds, setStaleInstalledIds] = useState<string[]>([]);
   // Character store: which paid characters this account owns (from the store
   // Worker / Polar). null = not fetched yet. Base characters are always owned.
   const [ownedCharacterIds, setOwnedCharacterIds] = useState<string[] | null>(null);
@@ -887,6 +891,7 @@ function AppMain() {
     try {
       const res = await window.electronAPI?.characterStore?.listInstalled?.();
       if (res?.ids) setLocalInstalledIds(res.ids);
+      setStaleInstalledIds(res?.stale ?? []);
     } catch (err) {
       console.warn('[store] local installed list failed', err);
     }
@@ -1119,27 +1124,32 @@ function AppMain() {
       provisionedRef.current.add(id);
       // Present = staged on disk OR baked into the build (UE reports baked paid
       // chunks via installedCharacterIds — the case on Windows chunked builds).
-      // Same rule the + menu's readiness check uses. Only a truly-absent pak
-      // downloads; a baked-in one just gets its voice ensured.
+      // Same rule the + menu's readiness check uses. A truly-absent pak
+      // downloads; a staged pak whose version DRIFTED from the manifest (a newer
+      // pak was cooked) re-downloads; an up-to-date or baked-in one just gets
+      // its voice ensured. Baked-in paks are never in staleInstalledIds (that
+      // set is staged-only), so they refresh via the UE update, not here.
       const present = localInstalledIds.includes(id) || (installedCharacterIds?.includes(id) ?? false);
-      if (present) {
-        void ensureCharacterVoices(id);               // pak present, ensure voice
-      } else {
+      const needsPak = !present || staleInstalledIds.includes(id);
+      if (needsPak) {
         void handleDownloadPak(id);                   // pak + mount + voice
+      } else {
+        void ensureCharacterVoices(id);               // pak current, ensure voice
       }
     }
-  }, [authToken, ownedCharacterIds, installedCharacterIds, localInstalledIds, pakProgress, handleDownloadPak, ensureCharacterVoices]);
+  }, [authToken, ownedCharacterIds, installedCharacterIds, localInstalledIds, staleInstalledIds, pakProgress, handleDownloadPak, ensureCharacterVoices]);
 
-  // Owned paid characters still being fetched at startup (pak not yet on disk).
-  // Drives the non-blocking "preparing your characters" status so provisioning
-  // reads as a deliberate init step, not a silent mid-session background fetch.
+  // Owned paid characters still being fetched at startup (pak missing, or a
+  // drifted staged version being refreshed). Drives the non-blocking "preparing
+  // your characters" status so provisioning reads as a deliberate init step,
+  // not a silent mid-session background fetch.
   const provisioningIds = useMemo(
     () => (ownedCharacterIds ?? []).filter(
       (id) => PAID_CHARACTER_IDS.includes(id)
-        && !localInstalledIds.includes(id)
-        && !(installedCharacterIds?.includes(id) ?? false),  // baked-in = ready, not "preparing"
+        && ((!localInstalledIds.includes(id) && !(installedCharacterIds?.includes(id) ?? false))
+            || staleInstalledIds.includes(id)),  // missing, or refreshing a drifted pak
     ),
-    [ownedCharacterIds, localInstalledIds, installedCharacterIds],
+    [ownedCharacterIds, localInstalledIds, installedCharacterIds, staleInstalledIds],
   );
 
   // Track whether the AI is currently producing audible output. Voice
