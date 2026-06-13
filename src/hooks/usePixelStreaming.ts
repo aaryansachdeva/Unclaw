@@ -64,14 +64,24 @@ export function usePixelStreaming({
         HoveringMouse: true,
         WaitForStreamer: true,
         MatchViewportRes: true,
-        // PS 5.6 SDK defaults to UE-as-offerer (legacy Epic plugin behavior).
-        // Our PixelStreaming2NativeMac plugin (1.0.8+) is browser-as-offerer —
-        // UE awaits the browser's offer in OnRemoteOffer and answers via AddTrack.
-        // Without this flag, both sides wait silently after `subscribe` and the
-        // stream never starts. Symptom: WS connects + subscribe sent, then only
-        // pings forever; UE creates the peer + video track but never gets an
-        // SDP offer. Hit in 1.0.8 first-Mac-ship test.
-        BrowserSendOffer: true,
+        // Offerer role is PLATFORM-SPECIFIC — get this wrong and the data
+        // channel ends up half-wired (browser→UE works, UE→browser responses
+        // silently never arrive), which breaks every ack-gated init path
+        // (wardrobe / lighting / clothing-color / installedCharacters).
+        //
+        // macOS — our PixelStreaming2NativeMac plugin (1.0.8+) is
+        //   browser-as-offerer: UE awaits the browser's offer in OnRemoteOffer
+        //   and answers via AddTrack. Without BrowserSendOffer the two sides
+        //   wait silently after `subscribe` and the stream never starts (WS
+        //   connects, subscribe sent, then only pings; UE makes the peer +
+        //   video track but never gets an SDP offer). Hit in 1.0.8 first-ship.
+        // Windows — stock PixelStreaming2 is UE-as-offerer (the default, and
+        //   what the working PC reference uses). UE creates the data channel
+        //   and the browser binds it via ondatachannel, fully bidirectional.
+        //   Forcing BrowserSendOffer here makes the browser create 'cirrus'
+        //   and offer, which stock PS2 (built to be the offerer) does NOT wire
+        //   for its own send direction → UE→browser responses are dropped.
+        BrowserSendOffer: window.electronAPI?.platform === 'darwin',
         ss: signalingUrl,
       },
     });
@@ -210,13 +220,19 @@ export function usePixelStreaming({
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               (recv as any).jitterBufferTarget = 0;
             } else if (recv.track?.kind === 'audio') {
-              // Mac dual-audio: UE plays its own audio out of the Mac
-              // speakers via CoreAudio at the same time it sends the
-              // WebRTC audio track. Disable the track at the receiver so
-              // the renderer is silent and Grace is only heard once
-              // (from UE locally). track.enabled=false makes the WebRTC
-              // stack render silence regardless of any video/audio
-              // element's .muted state.
+              // Dual-audio fix (BOTH platforms): UE plays its own audio
+              // out of the local speakers (CoreAudio on Mac, WASAPI on
+              // Windows) at the same time it sends the WebRTC audio track.
+              // Disable the inbound track at the receiver so the renderer
+              // is silent and Grace is heard exactly once, from UE locally.
+              // track.enabled=false makes the WebRTC stack render silence
+              // regardless of any video/audio element's .muted state.
+              //
+              // This is the single cross-platform strategy: soul's
+              // _LocalAudioMuteMonitor (which used to mute UE's WASAPI
+              // session on Windows instead) is now disabled by default, so
+              // muting here is the ONLY mute — don't re-enable both or you
+              // get total silence.
               recv.track.enabled = false;
             }
           }

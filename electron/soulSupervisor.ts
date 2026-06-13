@@ -450,7 +450,14 @@ function spawnSoul(window: BrowserWindow): boolean {
   // instead of walking sibling repos.
   if (app.isPackaged) {
     const runtime = getRuntimeDir();
-    const ueApp = path.join(runtime, 'unreal', 'Unclaw Character.app');
+    // Per-platform UE pointer. macOS: the carved `.app` bundle. Windows: the
+    // staged build's launcher .exe at the root of the extracted unreal dir
+    // (run_soul.ps1 derives Content/Paks + Saved from this). Linux: same shape
+    // as Windows. run_soul.sh reads UNCLAW_UE_APP directly; run_soul.ps1
+    // recomputes from the runtime dir but we keep this honest either way.
+    const ueApp = IS_WINDOWS
+      ? path.join(runtime, 'unreal', 'AudioTestProject02.exe')
+      : path.join(runtime, 'unreal', 'Unclaw Character.app');
     childEnv.UNCLAW_PACKAGED = '1';
     childEnv.UNCLAW_PYTHON_ENV = path.join(runtime, 'python-env');
     childEnv.UNCLAW_ASSETS_DIR = path.join(runtime, 'assets');

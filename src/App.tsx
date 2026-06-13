@@ -788,7 +788,16 @@ function AppMain() {
     [agentStack],
   );
 
+  // Bumped on every applyInstanceWardrobe call AND every agent switch. The
+  // delayed clothing-color re-apply in applyInstanceWardrobe checks it so a
+  // newer switch (or apply) supersedes a stale re-send.
+  const wardrobeApplyGenRef = useRef(0);
   const emitAgentSwitch = useCallback((agentId: string, dir: number) => {
+    // Cancel any in-flight clothing-color re-apply tail for the PREVIOUS
+    // character before switching. Otherwise that loop keeps firing
+    // changeClothingColor descriptors for ~1s, which collide with this swap
+    // mid-flight and can drop it on Windows (fast localhost data channel).
+    wardrobeApplyGenRef.current++;
     pixelStreaming?.emitUIInteraction({ EventType: 'agentSwitch', agentId, slideDir: dir });
   }, [pixelStreaming]);
 
@@ -2127,6 +2136,7 @@ function AppMain() {
   const applyInstanceWardrobe = useCallback(async (w: WardrobeSettings | null | undefined) => {
     if (!pixelStreaming) return;
     if (!w) return;
+    const myGen = ++wardrobeApplyGenRef.current;
     // Sequential await, UE applies descriptors in order; if one is
     // racing with the prior one we'd see weird intermediate states.
     // The 1500ms-per-attempt × 3 attempts × 3 descriptors caps the
@@ -2152,13 +2162,14 @@ function AppMain() {
       'lightColor.g': c.g.toFixed(3),
       'lightColor.b': c.b.toFixed(3),
     });
-    // Per-category garment colors. Sent AFTER initializeClothing so the
-    // garments exist; UE's changeClothingColor takes both tones + the
-    // category. Each slot's effective color = its custom hex if set, else the
-    // palette preset. Best-effort — skipped categories keep the default.
-    const clothingColors = w.clothingColors;
-    if (clothingColors) {
+    // Per-category garment colors. UE's changeClothingColor takes both tones +
+    // the category. Each slot's effective color = its custom hex if set, else
+    // the palette preset. Best-effort — skipped categories keep the default.
+    const applyClothingColors = async () => {
+      const clothingColors = w.clothingColors;
+      if (!clothingColors) return;
       for (const cat of ['top', 'bottom', 'shoes'] as const) {
+        if (wardrobeApplyGenRef.current !== myGen) return; // superseded by a newer apply
         const pair = clothingColors[cat];
         if (!pair) continue;
         const c1 = pair.c1Hex ? hexToRgb01(pair.c1Hex) : (CLOTHING_COLORS[pair.c1] ?? CLOTHING_COLORS[0]);
@@ -2173,6 +2184,28 @@ function AppMain() {
           'color2.g': c2.g.toFixed(3),
           'color2.b': c2.b.toFixed(3),
         });
+      }
+    };
+    // First pass. On macOS this is the ONLY pass — the native PixelStreaming
+    // plugin's slower round-trips already land this after the garment spawn, so
+    // color is instant and Mac behavior is unchanged from before this fix.
+    await applyClothingColors();
+    // WINDOWS/LINUX ONLY: re-apply across the short garment-spawn window. On a
+    // fresh character/garment spawn (launch + agent switch) initializeClothing
+    // re-spawns garments ASYNCHRONOUSLY and UE acks on receipt — not
+    // spawn-complete — so on Windows (fast localhost round-trips) the first
+    // color pass can land before the new garment mesh exists and gets clobbered
+    // by the spawn finishing with default materials. Garments appear fast (well
+    // before the entrance anim), so re-apply a few times so the color lands the
+    // instant the garment appears. Early passes make it feel instant; the later
+    // ones are safety nets for a slower spawn. Idempotent + gen-guarded so a
+    // newer switch cancels this tail. Gated off on macOS so that platform is
+    // byte-for-byte unchanged.
+    if (window.electronAPI?.platform !== 'darwin') {
+      for (const stepMs of [180, 320, 500]) { // re-apply at ~180 / 500 / 1000ms
+        await new Promise((resolve) => setTimeout(resolve, stepMs));
+        if (wardrobeApplyGenRef.current !== myGen) return;
+        await applyClothingColors();
       }
     }
     console.log('[wardrobe] instance handshake complete');

@@ -63,6 +63,12 @@ export interface SetupManifest {
    *  runtime/assets/. */
   runtimeAssets: RemoteAsset;
 
+  /** Windows variants of the two base bundles — a separate UE target (Win64
+   *  Shipping, not a .app) and a CUDA/ONNX-flavored asset tree. Selected by
+   *  unrealAsset() / runtimeAssetsAsset() on win32; Mac/Linux ignore them. */
+  unrealWindows: RemoteAsset;
+  runtimeAssetsWindows: RemoteAsset;
+
   /** Paid character paks, keyed by stable character id (ava/goblin/chris/joi).
    *  These are NOT downloaded at setup time; they are fetched on demand after
    *  purchase (entitlement checked by the store Worker, which hands back a
@@ -107,6 +113,18 @@ export function storePlatformParam(): 'windows' | 'mac' {
   return process.platform === 'win32' ? 'windows' : 'mac';
 }
 
+/** The UE bundle for the running platform (Windows → unrealWindows, else mac). */
+export function unrealAsset(): RemoteAsset {
+  return process.platform === 'win32' ? MANIFEST.unrealWindows : MANIFEST.unreal;
+}
+
+/** The runtime-assets bundle for the running platform. */
+export function runtimeAssetsAsset(): RemoteAsset {
+  return process.platform === 'win32'
+    ? MANIFEST.runtimeAssetsWindows
+    : MANIFEST.runtimeAssets;
+}
+
 export const MANIFEST: SetupManifest = {
   releaseTag: '2026.0608.01-mac',
   pythonVersion: '3.11',
@@ -141,6 +159,34 @@ export const MANIFEST: SetupManifest = {
     // Seeds the updater ledger (see unreal above). MUST equal the `assets`
     // version in remote latest.json.
     version: '2026.0523.01',
+  },
+
+  // --- WINDOWS base bundles ---------------------------------------------
+  // unrealWindows: the 2026.0612.01 Win64 Shipping build (stock PixelStreaming2
+  // / NVENC). Carved like Mac — paid paks (goblin/joi) + Saved/ excluded; ships
+  // pakchunk0 (base+grace) + pakchunk5 (mark) only. Zip root holds
+  // AudioTestProject02.exe (extracts flat to <runtime>/unreal/). Includes the
+  // bShareMaterialShaderCode=False shader fix (grey-eyes resolved).
+  unrealWindows: {
+    url: 'https://files.fotonlabs.com/unreal/2026.0612.01.zip',
+    sha256: '48c028cced8c3f825c7c0865dc008ea0689702cf8436c61922d0055a401cabae',
+    sizeBytes: 2_523_558_279,
+    version: '2026.0612.01',
+  },
+
+  // runtimeAssetsWindows: the lipsync/T2F/express ONNX model + source tree the
+  // Windows soul expects, extracted to <runtime>/assets/ so run_soul.ps1's
+  // $Repo/Audio2Lipsync/python/src, $Repo/ExpressModelv8/checkpoints/... etc.
+  // resolve. Freshly built 2026-06-13 to match the CURRENT run_soul.ps1 layout
+  // (the old May bundle used a different _runtime/{lipsync,express} layout).
+  // Carved: only the 2 ONNX checkpoints run_soul references (v6_wavlm + v6mini)
+  // out of the 5 GB checkpoints_onnx dir, plus t2f_fp16.onnx + best_v4.pt +
+  // stats + the lipsync/express .py source. Mac-only .mlpackage excluded.
+  runtimeAssetsWindows: {
+    url: 'https://files.fotonlabs.com/assets/runtime-2026.0613.01-win.zip',
+    sha256: 'c8befe532e7d61396a2b33d08b38d4f5089f4d5560c135bdae36a2aba6ab624a',
+    sizeBytes: 729_968_549,
+    version: '2026.0613.01',
   },
 
   // Paid character paks. Cooked from AudioTestProject02 build 2026.0607.03 as

@@ -43,8 +43,10 @@
         "to": "soul-src",
         "filter": [
           "run_soul.sh",
+          "run_soul.ps1",
           "pyproject.toml",
           "requirements-mac.txt",
+          "requirements-windows.txt",
           "soul/**/*",
           "!soul/__pycache__/**",
           "!soul/**/__pycache__/**",
@@ -60,7 +62,9 @@
         "to": "uv",
         "filter": [
           "uv",
-          "uvx"
+          "uvx",
+          "uv.exe",
+          "uvx.exe"
         ]
       }
     ],

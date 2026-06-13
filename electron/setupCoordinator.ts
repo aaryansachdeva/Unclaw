@@ -26,7 +26,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import https from 'https';
-import { MANIFEST, type RemoteAsset } from './setupManifest';
+import { MANIFEST, unrealAsset, runtimeAssetsAsset, type RemoteAsset } from './setupManifest';
 import { getRuntimeDir, getSoulDataDir, startSoul } from './soulSupervisor';
 
 // ----------------------------------------------------------------------
@@ -150,8 +150,8 @@ function seedUpdaterLedger(root: string): void {
     if (cur == null || version > cur) ledger[key] = version;
   };
   seed('app', app.getVersion());
-  seed('unreal', MANIFEST.unreal.version);
-  seed('assets', MANIFEST.runtimeAssets.version);
+  seed('unreal', unrealAsset().version);
+  seed('assets', runtimeAssetsAsset().version);
   try {
     fs.writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
   } catch {
@@ -172,8 +172,11 @@ function seedUpdaterLedger(root: string): void {
  * validation entitlement covers its dynamic loads).
  */
 async function resolveUvPath(): Promise<string | null> {
+  // electron-builder bundles the platform-native binary as Resources/uv/uv
+  // (POSIX) or Resources/uv/uv.exe (Windows).
+  const uvBin = process.platform === 'win32' ? 'uv.exe' : 'uv';
   if (app.isPackaged) {
-    const bundled = path.join(process.resourcesPath, 'uv', 'uv');
+    const bundled = path.join(process.resourcesPath, 'uv', uvBin);
     if (fs.existsSync(bundled)) return bundled;
     // Fall through to system uv as a recovery path if the bundle is
     // missing for some reason (shouldn't happen).
@@ -431,6 +434,40 @@ async function runStageRuntime(
     { stream: true, extraEnv: uvEnv },
   );
 
+  // Windows-only: reconcile onnxruntime. kokoro-onnx transitively depends on
+  // the CPU `onnxruntime` package, which installs to the SAME `onnxruntime/`
+  // module dir as `onnxruntime-gpu` (last-write-wins). If CPU lands last, the
+  // CUDAExecutionProvider silently disappears and lipsync/T2F run on CPU.
+  // Force-reinstall the GPU build last (--no-deps so it doesn't drag the CPU
+  // one back in) so its files win. Mac/Linux never install onnxruntime-gpu, so
+  // this is a no-op there and is skipped.
+  if (process.platform === 'win32') {
+    setStage(window, {
+      id: 'runtime',
+      progress: null,
+      headline: 'Finalizing GPU runtime…',
+      detail: 'Pinning the CUDA ONNX provider',
+    });
+    try {
+      await runCommand(
+        window,
+        uv,
+        [
+          'pip', 'install',
+          '--python', venvPythonPath(paths.pythonEnv),
+          'onnxruntime-gpu==1.24.4',
+          '--force-reinstall', '--no-deps',
+          '--index-strategy', 'unsafe-best-match',
+        ],
+        { stream: true, extraEnv: uvEnv },
+      );
+    } catch (err) {
+      // Non-fatal: soul still runs (CPU EP) if this reconcile fails; log it.
+      pushLog(window, 'meta',
+        `[runtime] onnxruntime-gpu reconcile failed (GPU may be unavailable): ${(err as Error).message}`);
+    }
+  }
+
   setStage(window, {
     id: 'runtime',
     progress: 1,
@@ -558,7 +595,7 @@ async function runStageUnreal(
     try { return fs.readFileSync(versionFile, 'utf-8').trim(); }
     catch { return null; }
   })();
-  const wantSha = MANIFEST.unreal.sha256 ?? '';
+  const wantSha = unrealAsset().sha256 ?? '';
 
   if (fs.existsSync(installedApp) && installedSha === wantSha && wantSha) {
     pushLog(window, 'meta', `[unreal] already at ${wantSha.slice(0, 12)}, skipping`);
@@ -589,7 +626,7 @@ async function runStageUnreal(
   const zipPath = path.join(paths.root, 'unreal-download.zip');
   await downloadWithResumeAndVerify(
     window,
-    MANIFEST.unreal,
+    unrealAsset(),
     zipPath,
     (downloaded, total) => {
       setStage(window, {
@@ -648,17 +685,25 @@ async function runStageModels(
     try { return fs.readFileSync(versionFile, 'utf-8').trim(); }
     catch { return null; }
   })();
-  const wantSha = MANIFEST.runtimeAssets.sha256 ?? '';
+  const wantSha = runtimeAssetsAsset().sha256 ?? '';
 
   // We treat the assets dir as a single unit, if any required sub-tree
   // is missing OR the version stamp mismatches, we re-extract the bundle.
   // Cheap to recheck; expensive to half-install on a network blip.
-  const required = [
-    'Audio2Lipsync/python/src',
-    'ExpressModelv8/src',
-    'soul-models/lipsync_v6_fp16.mlpackage',
-    'soul-models/t2f_v8_fp16.mlpackage',
-  ];
+  // Per-platform: Windows runs the ONNX checkpoints (CUDA EP); macOS runs the
+  // Core ML .mlpackage bundles. Verify the actual model files each platform
+  // needs — checking the wrong platform's artifacts would loop the stage.
+  const required = process.platform === 'win32'
+    ? [
+        'Audio2Lipsync/python/src/checkpoints_onnx/v6_wavlm_base_last_fp16_native.onnx',
+        'ExpressModelv8/checkpoints/t2f_fp16.onnx',
+      ]
+    : [
+        'Audio2Lipsync/python/src',
+        'ExpressModelv8/src',
+        'soul-models/lipsync_v6_fp16.mlpackage',
+        'soul-models/t2f_v8_fp16.mlpackage',
+      ];
   const allPresent = required.every((rel) =>
     fs.existsSync(path.join(paths.assets, rel)),
   );
@@ -693,7 +738,7 @@ async function runStageModels(
   const zipPath = path.join(paths.root, 'assets-download.zip');
   await downloadWithResumeAndVerify(
     window,
-    MANIFEST.runtimeAssets,
+    runtimeAssetsAsset(),
     zipPath,
     (downloaded, total) => {
       setStage(window, {

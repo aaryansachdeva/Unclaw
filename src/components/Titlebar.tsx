@@ -221,7 +221,7 @@ export function Titlebar({
             middle is unaffected by the flex direction flip. */}
         <div
           className="flex items-center justify-between"
-          style={isMacPlatform ? { flexDirection: 'row-reverse' } : undefined}
+          style={(isMacPlatform || !minimalMode) ? { flexDirection: 'row-reverse' } : undefined}
         >
           {/* Left side — profile cluster (was on the right; gear was
               here previously). Bigger now so it reads as a primary
@@ -372,12 +372,11 @@ export function Titlebar({
                 </div>
               )}
 
-              {/* macOS-only: pin button rides INSIDE the profile cluster
-                  so it lives on the right edge of the chrome (next to
-                  the avatar) instead of getting orphaned on the left
-                  next to the traffic lights. On Windows/Linux the pin
-                  stays in the right-cluster buttons array below. */}
-              {isMacPlatform && (
+              {/* Pin button rides INSIDE the profile capsule on the right
+                  edge of the chrome (next to the avatar), on BOTH platforms now.
+                  macOS: opposite the native traffic lights. Windows/Linux: the
+                  left cluster carries close + minimize instead of traffic lights. */}
+              {(
                 <>
                   {/* Hairline divider between the claws balance and the pin. */}
                   {clawsBalance !== undefined && (
@@ -503,13 +502,11 @@ export function Titlebar({
                     style={{
                       position: 'absolute',
                       top: 42,
-                      // Anchor side depends on which edge the profile
-                      // cluster lives on. macOS: profile is on the right
-                      // edge (row-reverse flex) — popover anchors right:0
-                      // so it grows to the LEFT and doesn't clip off the
-                      // window edge. Windows/Linux: profile on the left —
-                      // popover anchors left:0 so it grows to the right.
-                      ...(isMacPlatform ? { right: 0 } : { left: 0 }),
+                      // The profile capsule now lives on the right edge on
+                      // both platforms (row-reverse flex), so the popover
+                      // anchors right:0 and grows to the LEFT, clear of the
+                      // window edge.
+                      right: 0,
                       minWidth: 248,
                       padding: 6,
                       borderRadius: 14,
@@ -856,7 +853,15 @@ export function Titlebar({
 
           <div
             className="flex items-center"
-            style={{ WebkitAppRegion: 'no-drag', gap: 4 } as React.CSSProperties}
+            style={{
+              WebkitAppRegion: 'no-drag',
+              gap: 4,
+              // Pin the window controls to the TOP of the bar (the row is as
+              // tall as the 44px profile capsule, so items-center would sink
+              // the 26px buttons ~9px down). flex-start lifts them to sit near
+              // the top edge, aligned with the macOS traffic-light height.
+              alignSelf: 'flex-start',
+            } as React.CSSProperties}
           >
             {/* Profile cluster moved to the LEFT (above). Right side
                 only carries OS-style window controls now. */}
@@ -864,16 +869,25 @@ export function Titlebar({
             {(() => {
               // On macOS the real NSWindow traffic lights (close + min +
               // full-screen) ride in the top-left via main.ts's
-              // titleBarStyle:'hidden' and the `pin` button moved into
-              // the profile cluster on the right. This cluster ends up
-              // empty on macOS — kept around as a no-op placeholder so
-              // the row-reverse flex's spacing math stays consistent.
-              // Windows + Linux keep the full pin/min/close trio.
+              // titleBarStyle:'hidden'; the pin lives in the profile capsule
+              // on the right. This cluster is empty on macOS.
               if (isMacPlatform) return [];
+              // Windows/Linux Customization (minimalMode): no profile capsule,
+              // so the pin rides here alongside min/close (right cluster).
+              if (minimalMode) {
+                return [
+                  { action: handlePin, label: pinned ? 'Unpin from top' : 'Pin to top', icon: 'pin' as const },
+                  { action: () => window.electronAPI?.minimize(), label: 'Minimize', icon: 'min' as const },
+                  { action: () => window.electronAPI?.close(), label: 'Close', icon: 'close' as const },
+                ];
+              }
+              // Windows/Linux normal mode: Mac-style. Close + minimize sit on
+              // the LEFT edge (where macOS traffic lights would be) via the
+              // row-reverse flex; the pin lives in the profile capsule on the
+              // right. Close first = leftmost, mirroring macOS traffic-light order.
               return [
-                { action: handlePin, label: pinned ? 'Unpin from top' : 'Pin to top', icon: 'pin' as const },
-                { action: () => window.electronAPI?.minimize(), label: 'Minimize', icon: 'min' as const },
                 { action: () => window.electronAPI?.close(), label: 'Close', icon: 'close' as const },
+                { action: () => window.electronAPI?.minimize(), label: 'Minimize', icon: 'min' as const },
               ];
             })().map(({ action, label, icon }, i) => (
               <motion.button
