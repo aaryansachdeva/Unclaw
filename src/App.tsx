@@ -1084,57 +1084,63 @@ function AppMain() {
         // and drop the auto-download guard so a later entitlement refresh can
         // re-attempt a transient failure.
         console.warn('[store] pak download failed', res?.error);
-        autoDownloadedRef.current.delete(agentId);
+        provisionedRef.current.delete(agentId);
       }
     } catch (err) {
       console.warn('[store] pak download error', err);
-      autoDownloadedRef.current.delete(agentId);
+      provisionedRef.current.delete(agentId);
     } finally {
       setPakProgress((p) => { const n = { ...p }; delete n[agentId]; return n; });
     }
   }, [authToken, pixelStreaming, ensureCharacterVoices]);
 
-  // Auto-download owned-but-not-installed paid characters. Fires after a
-  // purchase (entitlement lands -> owned grows) and on sign-in (a character
-  // owned on another device but not yet present here). Waits until UE has
-  // reported its installed set (installedCharacterIds !== null) so we don't
-  // re-download something already baked in. A per-id guard prevents repeat
-  // kicks while a download is in flight or after it finished.
-  const autoDownloadedRef = useRef<Set<string>>(new Set());
+  // Eager character provisioning — the deliberate startup step that makes sure
+  // every character the user OWNS is fully present locally before they'd reach
+  // for it, instead of lazily downloading mid-session where a half-ready
+  // character could break a switch. Runs the moment entitlements resolve (right
+  // after sign-in / app start) and again whenever ownership grows (a purchase).
+  //
+  // Per owned paid character, idempotently (a per-id guard, cleared on failure
+  // so a flaky network retries on the next entitlement refresh):
+  //   - pak present (staged on disk OR baked into the build — Windows chunked
+  //     builds ship paid chunks; UE reports those via installedCharacterIds) ->
+  //     just ensure the cloned voice is on disk, so it never falls back to F1.
+  //   - pak missing -> download it (handleDownloadPak also installs the cloned
+  //     voice and mounts the pak mid-session so it's usable now).
+  // The base character streams throughout; the + menu shows per-character
+  // download progress and won't let you switch to one that isn't ready yet.
+  const provisionedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!authToken || !ownedCharacterIds) return;
-    // Wait until UE has reported its installed set (null = not reported yet).
-    // Without this guard we race UE's ~90s boot and re-download characters
-    // that are already baked into the build's Content/Paks (every dev build,
-    // and any packaged build that ships paid chunks). On Windows that race
-    // fired every time and the download stuck at 100% (extract failed).
-    if (installedCharacterIds === null) return;
     for (const id of ownedCharacterIds) {
       if (!PAID_CHARACTER_IDS.includes(id)) continue;
-      if (localInstalledIds.includes(id)) continue;        // pak already on disk
-      if (installedCharacterIds.includes(id)) continue;    // UE already has it (baked-in)
-      if (autoDownloadedRef.current.has(id)) continue;     // already kicked off
-      if (pakProgress[id] != null) continue;               // already downloading
-      autoDownloadedRef.current.add(id);
-      void handleDownloadPak(id);
+      if (provisionedRef.current.has(id)) continue;   // already handled this session
+      if (pakProgress[id] != null) continue;          // a download is in flight
+      provisionedRef.current.add(id);
+      // Present = staged on disk OR baked into the build (UE reports baked paid
+      // chunks via installedCharacterIds — the case on Windows chunked builds).
+      // Same rule the + menu's readiness check uses. Only a truly-absent pak
+      // downloads; a baked-in one just gets its voice ensured.
+      const present = localInstalledIds.includes(id) || (installedCharacterIds?.includes(id) ?? false);
+      if (present) {
+        void ensureCharacterVoices(id);               // pak present, ensure voice
+      } else {
+        void handleDownloadPak(id);                   // pak + mount + voice
+      }
     }
-  }, [authToken, ownedCharacterIds, installedCharacterIds, localInstalledIds, pakProgress, handleDownloadPak]);
+  }, [authToken, ownedCharacterIds, installedCharacterIds, localInstalledIds, pakProgress, handleDownloadPak, ensureCharacterVoices]);
 
-  // Voice reconcile: a character can be owned + its pak already installed (bought
-  // on an earlier build, or before voices were wired) yet have no cloned-voice
-  // file on disk, so it streams the generic F1 voice. Once per session per owned
-  // paid character, make sure its voice is present. ensureCharacterVoices is a
-  // cheap disk check first, so this is a no-op when nothing's missing.
-  const voiceReconciledRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!authToken || !ownedCharacterIds) return;
-    for (const id of ownedCharacterIds) {
-      if (!PAID_CHARACTER_IDS.includes(id)) continue;
-      if (voiceReconciledRef.current.has(id)) continue;
-      voiceReconciledRef.current.add(id);
-      void ensureCharacterVoices(id);
-    }
-  }, [authToken, ownedCharacterIds, ensureCharacterVoices]);
+  // Owned paid characters still being fetched at startup (pak not yet on disk).
+  // Drives the non-blocking "preparing your characters" status so provisioning
+  // reads as a deliberate init step, not a silent mid-session background fetch.
+  const provisioningIds = useMemo(
+    () => (ownedCharacterIds ?? []).filter(
+      (id) => PAID_CHARACTER_IDS.includes(id)
+        && !localInstalledIds.includes(id)
+        && !(installedCharacterIds?.includes(id) ?? false),  // baked-in = ready, not "preparing"
+    ),
+    [ownedCharacterIds, localInstalledIds, installedCharacterIds],
+  );
 
   // Track whether the AI is currently producing audible output. Voice
   // mode uses this to gate VAD and to detect barge-in.
@@ -3442,6 +3448,66 @@ function AppMain() {
             >
               <X size={13} strokeWidth={2} />
             </button>
+          </motion.div>
+        )}
+
+        {/* Non-blocking provisioning status. Shown while owned characters are
+            still being fetched at startup so it reads as a deliberate init
+            step. The base character streams behind it; the + menu blocks
+            switching to anything not yet ready, so nothing breaks. Auto-hides
+            the instant every owned pak is on disk (the common warm relaunch
+            case never sees it). Sits just under the store toast slot. */}
+        {provisioningIds.length > 0 && hasSession && (
+          <motion.div
+            key="provisioning-status"
+            initial={{ opacity: 0, y: -12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12 }}
+            transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+            style={{
+              position: 'absolute',
+              top: 46,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              zIndex: 58,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              maxWidth: 460,
+              padding: '11px 14px',
+              borderRadius: 12,
+              background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.72))',
+              border: '1px solid var(--glass-border, rgba(255,255,255,0.10))',
+              backdropFilter: 'var(--glass-blur)',
+              WebkitBackdropFilter: 'var(--glass-blur)',
+              boxShadow: '0 12px 30px -12px rgba(0,0,0,0.62)',
+              color: 'var(--text-primary)',
+              fontSize: 12.5,
+              lineHeight: 1.35,
+            }}
+          >
+            <motion.div
+              aria-hidden
+              animate={{ rotate: 360 }}
+              transition={{ duration: 0.9, repeat: Infinity, ease: 'linear' }}
+              style={{
+                flexShrink: 0,
+                width: 13,
+                height: 13,
+                borderRadius: '50%',
+                border: '2px solid var(--text-ghost, rgba(255,255,255,0.28))',
+                borderTopColor: 'var(--accent, #c44444)',
+              }}
+            />
+            <span style={{ flex: 1 }}>
+              {(() => {
+                const names = provisioningIds.map((id) => agentById[id]?.name ?? id);
+                const lead = names.length === 1
+                  ? <><b>{names[0]}</b> is</>
+                  : <><b>{names.length} characters</b> are</>;
+                return <>Getting {lead} ready…</>;
+              })()}
+            </span>
           </motion.div>
         )}
       </AnimatePresence>

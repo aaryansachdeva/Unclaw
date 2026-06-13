@@ -246,17 +246,25 @@ function maybeParsePorts(window: BrowserWindow, line: string): void {
  * run_soul.sh applies: packaged install uses <userData>/runtime/data,
  * dev falls back to the repo's soul/data/. Both paths are computed
  * statically, no IPC, no async, so this is safe to call before soul boots.
+ * Exported so the character-voice install lands in the exact dir soul reads.
  */
-function getSoulDataDir(): string {
+export function getSoulDataDir(): string {
   if (app.isPackaged) {
     return path.join(getRuntimeDir(), 'data');
   }
   // Dev: same default run_soul.sh uses (": ${SOUL_DATA_DIR:=$REPO/soul/data}").
   const overrideDir = process.env.SOUL_DATA_DIR;
   if (overrideDir) return overrideDir;
-  // Walk up from this file: electron/soulSupervisor.ts → UnClaw/ → Unclaw-Mac/ → soul/data
-  const repoRoot = path.resolve(__dirname, '..', '..');
-  return path.join(repoRoot, 'soul', 'data');
+  // Anchor to the SAME soul checkout the supervisor launches, whose cwd is the
+  // soul dir (run_soul.sh's $REPO/soul). Deriving from resolveSoulScript() (not
+  // a fixed __dirname walk) is correct regardless of where the bundler places
+  // the compiled main: a `__dirname/../..` walk silently points at
+  // UnClaw/soul/data in the dev build (__dirname = UnClaw/out/main), a dir soul
+  // never reads — which dropped downloaded voices into a phantom folder.
+  const resolved = resolveSoulScript();
+  if (resolved) return path.join(resolved.cwd, 'data');
+  // Last-resort fallback (resolver found nothing): the old source-tree walk.
+  return path.join(path.resolve(__dirname, '..', '..'), 'soul', 'data');
 }
 
 /** Best-effort read of soul's ports.json. Returns null if missing/stale/

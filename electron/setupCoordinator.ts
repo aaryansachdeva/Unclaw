@@ -27,7 +27,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import https from 'https';
 import { MANIFEST, type RemoteAsset } from './setupManifest';
-import { getRuntimeDir, startSoul } from './soulSupervisor';
+import { getRuntimeDir, getSoulDataDir, startSoul } from './soulSupervisor';
 
 // ----------------------------------------------------------------------
 // Types + module-scope state
@@ -1025,14 +1025,12 @@ export async function downloadAndExtractCharacterPak(
 //   kokoro     -> <SOUL_DATA>/kokoro/voices/<id>_kokoro.safetensors
 // ----------------------------------------------------------------------
 function soulVoicesDir(engine: 'supertonic' | 'kokoro'): string {
-  // Must land where soul actually reads voices (SOUL_DATA_DIR/<engine>/voices).
-  // Packaged: run_soul sets SOUL_DATA_DIR = <runtime>/data. Dev: run_soul sets
-  // it to <repo>/soul/data — and that repo is whatever UNCLAW_SOUL_REPO points
-  // at (same override resolveSoulScript uses). Honor it so a dev download drops
-  // the voice next to grace.json instead of into the unused packaged runtime.
-  const devRepo = process.env.UNCLAW_SOUL_REPO;
-  const base = devRepo ? path.join(devRepo, 'data') : path.join(getRuntimeDir(), 'data');
-  return path.join(base, engine, 'voices');
+  // getSoulDataDir() resolves SOUL_DATA_DIR exactly like run_soul, so this lands
+  // where soul reads in BOTH packaged (<runtime>/data) and dev. On Windows dev,
+  // getSoulDataDir() -> resolveSoulScript().cwd/data, and resolveSoulScript
+  // honors UNCLAW_SOUL_REPO, so it resolves to E:\UnClaw\soul\data (next to
+  // grace.json) — not a runtime dir nothing reads in dev.
+  return path.join(getSoulDataDir(), engine, 'voices');
 }
 
 /** Expected on-disk voice filenames for a character, by engine. Kept in lockstep
