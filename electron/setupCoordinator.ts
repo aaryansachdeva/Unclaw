@@ -27,7 +27,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import https from 'https';
 import { MANIFEST, type RemoteAsset } from './setupManifest';
-import { getRuntimeDir, startSoul } from './soulSupervisor';
+import { getRuntimeDir, getSoulDataDir, startSoul } from './soulSupervisor';
 
 // ----------------------------------------------------------------------
 // Types + module-scope state
@@ -1033,8 +1033,10 @@ export async function downloadAndExtractCharacterPak(
 //   kokoro     -> <SOUL_DATA>/kokoro/voices/<id>_kokoro.safetensors
 // ----------------------------------------------------------------------
 function soulVoicesDir(engine: 'supertonic' | 'kokoro'): string {
-  // Mirror run_soul.sh: packaged soul reads SOUL_DATA_DIR = <runtime>/data.
-  return path.join(getRuntimeDir(), 'data', engine, 'voices');
+  // getSoulDataDir() resolves SOUL_DATA_DIR exactly like run_soul.sh, so this
+  // lands where soul reads in BOTH packaged (<runtime>/data) and dev (the
+  // sibling soul checkout's data dir) — not a runtime dir nothing reads in dev.
+  return path.join(getSoulDataDir(), engine, 'voices');
 }
 
 /** Expected on-disk voice filenames for a character, by engine. Kept in lockstep
