@@ -307,21 +307,35 @@ async function runStagePreflight(
   });
   pushLog(window, 'meta', '[preflight] starting');
 
-  // arm64 check. mlx-audio + Core ML are Apple-Silicon-only; running
-  // the Mac DMG on a 2019-era Intel iMac would fail in confusing
-  // ways during model inference. Better to fail upfront.
-  if (process.arch !== 'arm64') {
-    throw new Error(
-      `Unclaw for Mac requires Apple Silicon (M-series), but this Mac is ${process.arch}. ` +
-      `Visit https://unclaw.app for the Windows build if you have an Nvidia GPU available.`,
-    );
+  // Architecture check — platform-specific. macOS needs Apple Silicon
+  // (mlx-audio + Core ML are arm64-only); Windows/Linux need x64 (the build
+  // ships x64 + the CUDA wheels are x86_64). Fail upfront with a clear,
+  // platform-correct message rather than dying confusingly mid-install.
+  if (process.platform === 'darwin') {
+    if (process.arch !== 'arm64') {
+      throw new Error(
+        `Unclaw for Mac requires Apple Silicon (M-series), but this Mac is ${process.arch}. ` +
+        `Visit https://unclaw.app for the Windows build if you have an NVIDIA GPU available.`,
+      );
+    }
+  } else {
+    // Windows / Linux: x64 build.
+    if (process.arch !== 'x64') {
+      throw new Error(
+        `Unclaw requires a 64-bit (x64) ${process.platform === 'win32' ? 'Windows' : 'Linux'} ` +
+        `machine, but this one is ${process.arch}.`,
+      );
+    }
   }
-  pushLog(window, 'meta', `[preflight] arch=arm64 ✓`);
+  pushLog(window, 'meta', `[preflight] arch=${process.arch} ✓`);
 
   // Disk space. Cheap fs.statfsSync existed before Node 18; we use the
   // safer (Node 20+) variant via a promise to keep the main thread free.
   try {
-    const stats = await fs.promises.statfs(paths.root);
+    // statfs the userData dir (always exists) rather than paths.root
+    // (runtime/, which isn't created until later) — otherwise the check
+    // ENOENTs on first run and the disk-space guard silently no-ops.
+    const stats = await fs.promises.statfs(app.getPath('userData'));
     const freeBytes = Number(stats.bavail) * Number(stats.bsize);
     pushLog(window, 'meta',
       `[preflight] free disk: ${Math.round(freeBytes / 1e9)} GB`);
