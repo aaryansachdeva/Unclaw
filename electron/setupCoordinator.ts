@@ -922,18 +922,12 @@ export function characterPaksStageDir(): string {
   return path.join(getRuntimeDir(), 'character-paks');
 }
 
-/** UE's readable Saved/Paks dir, for a MID-SESSION mount (no relaunch): the pak
- *  is copied here, then mounted via the `mountCharacterPak` descriptor. Must
- *  match the dir run_soul stages into. Best-effort — if it doesn't resolve, the
- *  boot-mount path via UNCLAW_CHARACTERS_SRC still mounts on next launch.
- *
- *  macOS: UE is sandboxed, so this is its container Saved/Paks.
- *  Windows: UE is NOT sandboxed; it reads from the packaged build's
- *  ProjectSavedDir/Paks (the Windows UE bundle extracts under runtime/unreal/). */
+/** macOS-only: the sandboxed UE app's container Saved/Paks. A sandboxed UE can
+ *  only read paks that physically live inside its own container, so the
+ *  mid-session mount copies the pak here and the `mountCharacterPak` descriptor
+ *  points at it. Windows does NOT use this — UE there is unsandboxed and mounts
+ *  the staged pak in place (see downloadAndExtractCharacterPak). */
 export function ueContainerPaksDir(): string {
-  if (process.platform === 'win32') {
-    return path.join(getRuntimeDir(), 'unreal', 'AudioTestProject02', 'Saved', 'Paks');
-  }
   return path.join(
     app.getPath('home'),
     'Library/Containers/com.YourCompany.AudioTestProject02/Data/Library',
@@ -962,6 +956,13 @@ export async function downloadAndExtractCharacterPak(
   const root = getRuntimeDir();
   const destDir = characterPakDir(characterId);
   const zipPath = path.join(root, `char-${characterId}-download.zip`);
+
+  // Ensure the runtime root exists before the downloader writes its `.partial`
+  // there. In dev on Windows this dir is never provisioned (it's the packaged
+  // runtime), so the resumable downloader's `open(...zip.partial)` would ENOENT
+  // every attempt -> 3 retries fail -> the provisioning guard clears -> the
+  // download re-fires in a 0-100 loop. mkdir -p makes it a no-op when present.
+  fs.mkdirSync(root, { recursive: true });
 
   // Reuse the resumable, SHA-verified downloader the base bundles use.
   await downloadWithResumeAndVerify(window, asset, zipPath, onProgress);
@@ -995,18 +996,30 @@ export async function downloadAndExtractCharacterPak(
   const stagedPak = path.join(stageDir, stagedName);
   fs.copyFileSync(srcPak, stagedPak);
 
-  // (2) Best-effort copy into the UE sandbox container for an immediate
-  // mid-session mount. Fails softly when the container doesn't exist yet (UE
-  // never launched) — the boot-mount path covers that case on next launch.
+  // (2) Mid-session mount path — the renderer sends MountCharacterPak(<this>)
+  // so the character is usable without a relaunch. Platform-specific because
+  // the two OSes differ in what UE can mount:
+  //   macOS  — UE is sandboxed and can ONLY read paks inside its own container,
+  //            so copy into the container's Saved/Paks and point at that copy.
+  //   Windows/Linux — UE is NOT sandboxed and mounts any absolute path, so
+  //            point straight at the staged pak; no second copy needed.
+  // Either way the guaranteed path is the boot-mount: run_soul stages the
+  // staged-paks dir into the platform's auto-mount dir on the next launch
+  // (Windows: the build's Content/Paks; macOS: the container's Saved/Paks).
   let containerPak: string | null = null;
-  try {
-    const containerDir = ueContainerPaksDir();
-    fs.mkdirSync(containerDir, { recursive: true });
-    containerPak = path.join(containerDir, stagedName);
-    fs.copyFileSync(srcPak, containerPak);
-  } catch (err) {
-    console.warn(`[pak] container stage skipped for ${characterId}: ${(err as Error).message}`);
-    containerPak = null;
+  if (process.platform === 'darwin') {
+    try {
+      const containerDir = ueContainerPaksDir();
+      fs.mkdirSync(containerDir, { recursive: true });
+      containerPak = path.join(containerDir, stagedName);
+      fs.copyFileSync(srcPak, containerPak);
+    } catch (err) {
+      console.warn(`[pak] container stage skipped for ${characterId}: ${(err as Error).message}`);
+      containerPak = null;
+    }
+  } else {
+    // Windows/Linux: mount the staged pak in place (UE reads any absolute path).
+    containerPak = stagedPak;
   }
 
   return { extractDir: destDir, stagedPak, containerPak };
@@ -1183,9 +1196,9 @@ async function which(cmd: string): Promise<string | null> {
 
 // ----------------------------------------------------------------------
 // Cross-platform archive + filesystem helpers. macOS uses the system
-// `ditto`/`xattr`; Windows uses bundled-in OS tooling (`tar.exe`, which is
-// bsdtar on Windows 10 1803+, extracts .zip too). Centralized so every
-// extraction/quarantine site stays platform-correct.
+// `ditto`/`xattr`; Windows uses PowerShell Expand-Archive (tar.exe mishandles
+// absolute drive-letter paths). Centralized so every extraction/quarantine
+// site stays platform-correct.
 // ----------------------------------------------------------------------
 
 /** Extract a .zip into destDir, cross-platform. destDir is created if absent. */
@@ -1196,9 +1209,16 @@ export async function extractZip(
 ): Promise<void> {
   fs.mkdirSync(destDir, { recursive: true });
   if (process.platform === 'win32') {
-    // bsdtar (tar.exe) ships in Windows 10 1803+ and reads .zip. Faster and
-    // far more robust on multi-GB archives than PowerShell Expand-Archive.
-    await runCommand(window, 'tar.exe', ['-xf', zipPath, '-C', destDir], { stream: true });
+    // NOT tar.exe: bsdtar mis-parses the drive-letter colon in an absolute path
+    // ("C:\..." -> tries to connect to remote host "C:"), and --force-local then
+    // fails to auto-detect the zip format. PowerShell Expand-Archive handles
+    // Windows paths natively. Single quotes are literal in PS (backslashes are
+    // fine); double any embedded quote to escape.
+    const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+    await runCommand(window, 'powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+      `Expand-Archive -LiteralPath ${q(zipPath)} -DestinationPath ${q(destDir)} -Force`,
+    ], { stream: true });
   } else {
     await runCommand(window, '/usr/bin/ditto', ['-x', '-k', zipPath, destDir], { stream: true });
   }
