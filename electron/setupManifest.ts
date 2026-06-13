@@ -164,8 +164,8 @@ export const MANIFEST: SetupManifest = {
         sizeBytes: 176_562_562,
       },
       windows: {
-        sha256: '8938fc9255f1c0b526cb704262377be706627620049edc2cb7950083c63524a3',
-        sizeBytes: 175_127_975,
+        sha256: '77fbfdb846dff62dd9a1be8c6de44f5a1740fe1941e6a640bfcd6da78f638e33',
+        sizeBytes: 177_344_968,
       },
     },
     goblin: {
@@ -177,8 +177,8 @@ export const MANIFEST: SetupManifest = {
         sizeBytes: 88_141_739,
       },
       windows: {
-        sha256: 'd716c780850a30a85015c2a945bc9acb8936c8a086b1ae3465cc1f1ec55dbe2e',
-        sizeBytes: 85_499_550,
+        sha256: '1676aa23eb3408a74032c892ac86926c67de92c90d8e49989a4a051ea3b0d868',
+        sizeBytes: 87_279_140,
       },
     },
     chris: {
@@ -190,8 +190,8 @@ export const MANIFEST: SetupManifest = {
         sizeBytes: 129_965_551,
       },
       windows: {
-        sha256: '4c9ae76031af83ed1d1c64c2ae648eba3b59ed813078d2b6e2a0db01213b6641',
-        sizeBytes: 128_165_017,
+        sha256: '011078b17d5a345e6ddc4eb220b0a3da7524702b2c3d01563507c02f1ee8e0df',
+        sizeBytes: 129_136_215,
       },
     },
     joi: {
@@ -203,8 +203,8 @@ export const MANIFEST: SetupManifest = {
         sizeBytes: 136_502_896,
       },
       windows: {
-        sha256: 'f78f1aa6b21c61cc136fb42722b0e266ed9a86a880a63e7f1c7a9c531e8249d4',
-        sizeBytes: 134_082_740,
+        sha256: '10af1338b4543205dad983384d7e007a26020ede0925d0dd610d003b2d90fb50',
+        sizeBytes: 135_684_090,
       },
     },
   },
