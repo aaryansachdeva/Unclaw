@@ -307,6 +307,24 @@ export async function fireIdle(opts: {
 }
 
 
+/** Where soul's body-idle rotation currently is, WITHOUT advancing it.
+ *  Called on stream (re)connect: a renderer refresh/crash resets the
+ *  session to the default loop while soul still holds the real state;
+ *  re-dispatching this directive puts the body back where it was. */
+export async function fetchCurrentBodyIdle(): Promise<SoulBodyDirective[] | null> {
+  try {
+    const res = await fetch(`${getSoulBaseUrl()}/body/idle`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { body?: SoulBodyDirective[] };
+    return data.body?.length ? data.body : null;
+  } catch {
+    return null;
+  }
+}
+
+
 /** Testing helper: ask soul's body director for a fresh random body-idle
  *  loop NOW. Returns the doIdle directive(s) for the caller to dispatch
  *  over the pixel-streaming data channel, or null on any failure. */
