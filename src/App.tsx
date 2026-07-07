@@ -33,7 +33,7 @@ import { fetchCloudChat, pushCloudChat, gatherLocalChat, restoreLocalChat, delet
 import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
-import { chatViaSoul, streamChatViaSoul, fireIdle, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
+import { chatViaSoul, streamChatViaSoul, fireIdle, SoulBodyDirective, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
 import { pollNextEscalation } from './services/escalation';
 import { sendListeningEvent } from './services/listening';
 import { listReminders } from './services/reminders';
@@ -148,6 +148,25 @@ function isReminderAction(name: string | undefined): boolean {
     || name === 'update_reminder'
     || name === 'delete_reminder'
     || name === 'mark_reminder_complete';
+}
+
+/** Forward soul's body-director directives (idle rotation, conviction-
+ *  gated talk loops, explicit body tokens) to the text2body AnimBP.
+ *  Each directive already carries its UIInteraction field names
+ *  (idleNum/talkNum+talkTime/actionNum/gestureNum). */
+function dispatchBodyToUE(
+  ps: { emitUIInteraction: (descriptor: object) => void },
+  body: SoulBodyDirective[] | undefined,
+): void {
+  if (!body?.length) return;
+  for (const d of body) {
+    const { event, clip: _clip, ...fields } = d;
+    ps.emitUIInteraction({
+      EventType: event,
+      ...fields,
+      Timestamp: new Date().toISOString(),
+    });
+  }
 }
 
 /** Map a soul `action` payload to a UE descriptor and dispatch it. */
@@ -1308,6 +1327,9 @@ function AppMain() {
       if (isAnimAction && action) {
         dispatchActionToUE(pixelStreaming, action, result.response);
       }
+      if (pixelStreaming) {
+        dispatchBodyToUE(pixelStreaming, result.body);
+      }
     }
 
     if (action && isReminderAction(action.name)) {
@@ -1383,6 +1405,9 @@ function AppMain() {
       if (isReminderAction(action.name)) {
         setRefreshKey(k => k + 1);
       }
+    }
+    if (chunk.chunk_idx === 0 && pixelStreaming) {
+      dispatchBodyToUE(pixelStreaming, chunk.body);
     }
   }, [pixelStreaming]);
 
@@ -2642,7 +2667,13 @@ function AppMain() {
         && !voice.isListening
         && !escalating;
       if (ok) {
-        try { await fireIdle(); } catch { /* fireIdle soft-fails */ }
+        try {
+          const idleRes = await fireIdle();
+          // Body idle rotation rides the idle response (captured mode).
+          if (idleRes?.body && pixelStreaming) {
+            dispatchBodyToUE(pixelStreaming, idleRes.body);
+          }
+        } catch { /* fireIdle soft-fails */ }
       }
       if (cancelled) return;
       // When idle is disabled (paused or period=0) we still cycle, on a

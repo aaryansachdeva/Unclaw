@@ -109,6 +109,11 @@ export interface SoulChatResult {
    *  client should poll /escalation/{id}/next for follow-up narrations
    *  and the final response. See services/escalation.ts. */
   escalation?: { id: string; reason: string };
+  /** Body-animation directives from soul's body director (captured
+   *  mode): conviction-gated talk loops, idle rotation, and explicit
+   *  LLM body tokens. The client forwards each to UE's text2body
+   *  AnimBP via emitUIInteraction. */
+  body?: SoulBodyDirective[];
   /** Server fields we don't strongly type. */
   [key: string]: unknown;
 }
@@ -227,8 +232,22 @@ export async function chatViaSoul(
 // server-side default. We pull from `apiKeys` per call so a wizard
 // edit propagates without an app restart.
 
+/** One body-animation directive for the UE text2body AnimBP. `event`
+ *  is the UIInteraction EventType; exactly one of the *Num fields is
+ *  set (plus talkTime for doTalking). `clip` is informational. */
+export interface SoulBodyDirective {
+  event: 'doIdle' | 'doTalking' | 'doAction' | 'doGesture';
+  idleNum?: number;
+  talkNum?: number;
+  talkTime?: number;
+  actionNum?: number;
+  gestureNum?: number;
+  clip?: string;
+}
+
 export interface SoulIdleResult {
   type: 'idle' | 'idle_skipped';
+  body?: SoulBodyDirective[];
   id?: string;
   mood?: string;
   behavior?: string;
