@@ -307,6 +307,26 @@ export async function fireIdle(opts: {
 }
 
 
+/** Testing helper: ask soul's body director for a fresh random body-idle
+ *  loop NOW. Returns the doIdle directive(s) for the caller to dispatch
+ *  over the pixel-streaming data channel, or null on any failure. */
+export async function randomizeBodyIdle(): Promise<SoulBodyDirective[] | null> {
+  try {
+    const res = await fetch(`${getSoulBaseUrl()}/body/randomize_idle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { body?: SoulBodyDirective[] };
+    return data.body?.length ? data.body : null;
+  } catch {
+    return null;
+  }
+}
+
+
 // ---------------------------------------------------------------------
 // Streaming chat (Kokoro local only)
 // ---------------------------------------------------------------------
