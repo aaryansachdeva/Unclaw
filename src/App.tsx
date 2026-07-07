@@ -35,6 +35,7 @@ import { useVoiceAgent } from './voice/useVoiceAgent';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
 import { chatViaSoul, streamChatViaSoul, fireIdle, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
 import { pollNextEscalation } from './services/escalation';
+import { sendListeningEvent } from './services/listening';
 import { listReminders } from './services/reminders';
 import { expressFace } from './services/express';
 import { getStocks } from './services/stocks';
@@ -1964,6 +1965,29 @@ function AppMain() {
     },
     onError: (msg) => console.warn('[voice]', msg),
   });
+
+  // Listening reactions (backchannel): while the user speaks, ping soul so
+  // the avatar visibly attends (brow flick on start, slow nods while they
+  // keep talking, an acknowledgment nod when they stop). Soul gates all the
+  // hard cases server-side (captured mode, cooldowns, avatar-speaking), so
+  // this effect just mirrors the VAD state. The `sustained` interval only
+  // runs while speech is actually held.
+  const listeningSpokeAtRef = useRef<number>(0);
+  useEffect(() => {
+    if (!voice.isUserSpeaking) return;
+    // Barge-in has its own choreography (mute + interrupt); skip reactions.
+    if (isAISpeakingRef.current) return;
+    listeningSpokeAtRef.current = Date.now();
+    sendListeningEvent('start');
+    const iv = window.setInterval(() => sendListeningEvent('sustained'), 2500);
+    return () => {
+      window.clearInterval(iv);
+      // Acknowledge only real utterances, not VAD blips.
+      if (Date.now() - listeningSpokeAtRef.current > 1200) {
+        sendListeningEvent('end');
+      }
+    };
+  }, [voice.isUserSpeaking]);
 
   useEffect(() => {
     notifyAIFinishedRef.current = voice.notifyAIFinished;
