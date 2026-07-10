@@ -4,6 +4,13 @@ import { ConnectionState } from '../hooks/usePixelStreaming';
 import logoUrl from '../assets/logo.png';
 
 const MIN_LOADING_MS = 2000;
+// How long the stream can sit un-connected before we surface a recovery
+// affordance. When UE fails to launch, soul (and its signalling server) are
+// healthy but there's no streamer peer, so the connection stays 'connecting'
+// forever behind the logo with no feedback , the "character won't launch"
+// symptom. Generous so a normal UE cold start (a big app booting) never trips
+// it; it only appears when something is genuinely wrong.
+const STALL_HINT_MS = 40000;
 
 interface StreamViewProps {
   videoParentRef: React.RefObject<HTMLDivElement | null>;
@@ -17,6 +24,21 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
   const [canShowStream, setCanShowStream] = useState(false);
   const loadingShownAt = useRef<number>(Date.now());
   const releaseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Stalled-connection surface. Flips true after STALL_HINT_MS of continuous
+  // non-connected state; reset whenever we connect.
+  const [stalled, setStalled] = useState(false);
+  useEffect(() => {
+    if (streamReady) { setStalled(false); return; }
+    const t = setTimeout(() => setStalled(true), STALL_HINT_MS);
+    return () => clearTimeout(t);
+  }, [streamReady]);
+
+  const handleRelaunchSoul = () => {
+    setStalled(false);
+    void window.electronAPI?.soul?.restart?.();
+  };
+  const handleOpenLogs = () => { void window.electronAPI?.soul?.openLogs?.(); };
 
   useEffect(() => {
     if (streamReady) {
@@ -174,14 +196,84 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
                 textTransform: 'uppercase',
                 color: 'var(--text-ghost)',
               }}>
-                Waiting for Unclaw-Soul
+                {stalled ? 'Still waiting for your companion' : 'Waiting for Unclaw-Soul'}
               </span>
             </motion.div>
+
+            {/* Stalled-connection recovery. Appears only after a long wait
+                (UE not launching), replacing the download helper with an
+                actionable relaunch + logs pair. Non-blocking , the stream
+                keeps trying to connect underneath. */}
+            {stalled && (
+              <motion.div
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+                style={{
+                  position: 'absolute',
+                  bottom: '30px',
+                  left: 0,
+                  right: 0,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: '12px',
+                  zIndex: 2,
+                }}
+              >
+                <span style={{
+                  fontSize: '11px',
+                  color: 'var(--text-ghost)',
+                  letterSpacing: '0.02em',
+                  maxWidth: 320,
+                  textAlign: 'center',
+                  lineHeight: 1.5,
+                }}>
+                  Your companion is taking longer than usual to appear.
+                </span>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                  <button
+                    type="button"
+                    onClick={handleRelaunchSoul}
+                    style={{
+                      padding: '6px 16px',
+                      borderRadius: 999,
+                      border: '1px solid rgba(196, 68, 68, 0.45)',
+                      background: 'var(--accent-dim, rgba(196,68,68,0.14))',
+                      color: 'rgba(255,255,255,0.9)',
+                      fontSize: '11.5px',
+                      fontWeight: 600,
+                      fontFamily: 'inherit',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Relaunch soul
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleOpenLogs}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--text-ghost)',
+                      fontSize: '11px',
+                      fontFamily: 'inherit',
+                      cursor: 'pointer',
+                      textDecoration: 'underline',
+                      textUnderlineOffset: 3,
+                    }}
+                  >
+                    Open logs
+                  </button>
+                </div>
+              </motion.div>
+            )}
 
             {/* Download link — small, ghost, drifts in after a beat so it
                 doesn't compete with the logo on quick reconnects. Pinned
                 to the bottom of the loading screen, not stacked under the
                 status, so it reads as a quiet helper rather than a CTA. */}
+            {!stalled && (
             <motion.div
               initial={{ opacity: 0, y: 4 }}
               animate={{ opacity: 1, y: 0 }}
@@ -223,6 +315,7 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
                 UNCLAW.IO
               </a>
             </motion.div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
