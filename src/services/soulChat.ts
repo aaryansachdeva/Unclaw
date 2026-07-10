@@ -234,7 +234,10 @@ export async function chatViaSoul(
 
 /** One body-animation directive for the UE text2body AnimBP. `event`
  *  is the UIInteraction EventType; exactly one of the *Num fields is
- *  set (plus talkTime for doTalking). `clip` is informational. */
+ *  set (plus talkTime for doTalking). `clip` is informational.
+ *  Short idle VISITS additionally carry revertAfterS/revertIdleNum:
+ *  the renderer schedules a doIdle back to the home loop after that
+ *  many seconds (idle is the one state UE never exits on its own). */
 export interface SoulBodyDirective {
   event: 'doIdle' | 'doTalking' | 'doAction' | 'doGesture';
   idleNum?: number;
@@ -243,6 +246,9 @@ export interface SoulBodyDirective {
   actionNum?: number;
   gestureNum?: number;
   clip?: string;
+  revertAfterS?: number;
+  revertIdleNum?: number;
+  revertClip?: string;
 }
 
 export interface SoulIdleResult {
