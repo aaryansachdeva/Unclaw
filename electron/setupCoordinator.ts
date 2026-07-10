@@ -386,7 +386,9 @@ async function runStageRuntime(
     window,
     uv,
     ['python', 'install', MANIFEST.pythonVersion],
-    { stream: true, extraEnv: uvEnv },
+    // ~200 MB CPython download; 10 min is generous for a slow link but bounds
+    // a truly stalled fetch.
+    { stream: true, extraEnv: uvEnv, timeoutMs: 10 * 60_000 },
   );
 
   // 2. Create the venv (idempotent, uv venv is a no-op if it exists
@@ -397,7 +399,7 @@ async function runStageRuntime(
       window,
       uv,
       ['venv', paths.pythonEnv, '--python', MANIFEST.pythonVersion],
-      { stream: true, extraEnv: uvEnv },
+      { stream: true, extraEnv: uvEnv, timeoutMs: 3 * 60_000 },
     );
   } else {
     pushLog(window, 'meta', '[runtime] venv already exists, skipping create');
@@ -428,7 +430,9 @@ async function runStageRuntime(
       '-r', requirementsFile,
       '--index-strategy', 'unsafe-best-match',
     ],
-    { stream: true, extraEnv: uvEnv },
+    // The slowest step (multi-hundred-MB wheel set). 20 min bounds a hung
+    // PyPI socket while leaving ample headroom for a genuinely slow install.
+    { stream: true, extraEnv: uvEnv, timeoutMs: 20 * 60_000 },
   );
 
   setStage(window, {
@@ -749,6 +753,7 @@ export async function downloadWithResumeAndVerify(
     fs.unlinkSync(destPath);
   }
 
+  const partialPath = `${destPath}.partial`;
   let attempt = 0;
   let lastErr: Error | null = null;
   while (attempt < DOWNLOAD_RETRIES) {
@@ -758,6 +763,12 @@ export async function downloadWithResumeAndVerify(
       if (asset.sha256) {
         const sha = await sha256File(destPath);
         if (sha !== asset.sha256) {
+          // Known-bad bytes (CDN served a stale cached body, truncated
+          // transfer, a Range-ignored resume that slipped through). Remove
+          // the final file AND any lingering partial so the retry starts
+          // clean instead of resuming onto the corrupt tail.
+          try { fs.unlinkSync(destPath); } catch { /* ok */ }
+          try { fs.unlinkSync(partialPath); } catch { /* ok */ }
           throw new Error(
             `SHA-256 mismatch on ${path.basename(destPath)}: ` +
             `expected ${asset.sha256}, got ${sha}`,
@@ -778,6 +789,12 @@ export async function downloadWithResumeAndVerify(
       lastErr = err as Error;
       pushLog(window, 'meta',
         `[download] attempt ${attempt}/${DOWNLOAD_RETRIES} failed: ${lastErr.message}`);
+      // 4xx (bad URL, WAF block, expired presigned URL) won't heal on retry.
+      // Fail fast instead of burning the whole backoff schedule on it.
+      if ((lastErr as Error & { fatal?: boolean }).fatal) {
+        pushLog(window, 'meta', `[download] not retrying (client error): ${lastErr.message}`);
+        break;
+      }
       const backoff = Math.pow(2, attempt - 1) * 1000;
       await sleep(backoff);
     }
@@ -837,16 +854,30 @@ function downloadOnce(
         return;
       }
 
+      // Range-ignored guard. We asked to resume (sent a Range header) but the
+      // server answered 200 (full body) instead of 206 (partial content) ,
+      // common when a CDN/presigned URL ignores Range. Appending that full
+      // body onto our existing partial bytes yields a corrupt partial+full
+      // file, previously caught only by the SHA check after a fully wasted
+      // download. Detect it and restart the file from byte 0 instead.
+      let startAt = resumeFrom;
+      if (resumeFrom > 0 && res.statusCode === 200) {
+        pushLog(window, 'meta',
+          `[download] server ignored Range (200 not 206), restarting ` +
+          `${path.basename(destPath)} from the beginning`);
+        startAt = 0;
+      }
+
       const contentLength = parseInt(res.headers['content-length'] || '0', 10);
       const total = expectedSize > 0
         ? expectedSize
-        : (resumeFrom + contentLength);
+        : (startAt + contentLength);
 
       const out = fs.createWriteStream(partialPath, {
-        flags: resumeFrom > 0 ? 'a' : 'w',
+        flags: startAt > 0 ? 'a' : 'w',
       });
 
-      let received = resumeFrom;
+      let received = startAt;
       let lastEmit = 0;
       res.on('data', (chunk: Buffer) => {
         received += chunk.length;
@@ -1147,6 +1178,11 @@ export interface RunCommandOpts {
   /** Extra env vars merged into the child process env. Used to scope
    *  uv's downloaded CPython + cache under our runtime dir. */
   extraEnv?: NodeJS.ProcessEnv;
+  /** Hard wall-clock cap. If the child hasn't exited by then it's killed
+   *  and the promise rejects with a clear "timed out" error. Without this a
+   *  wedged `uv pip install` (a stalled PyPI socket) hangs the setup stage
+   *  forever behind the indeterminate progress arc. Omit for no timeout. */
+  timeoutMs?: number;
 }
 
 export function runCommand(
@@ -1178,11 +1214,29 @@ export function runCommand(
         if (line) pushLog(window, stream, line);
       }
     };
+    // Optional wall-clock watchdog. Kills a wedged child (SIGKILL after a
+    // SIGTERM grace) and rejects so the stage surfaces a real error instead
+    // of hanging behind the indeterminate progress arc forever.
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (opts.timeoutMs && opts.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        try { proc.kill('SIGTERM'); } catch { /* already gone */ }
+        setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, 3000);
+      }, opts.timeoutMs);
+    }
+    const clearTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
+
     proc.stdout?.on('data', onChunk('stdout'));
     proc.stderr?.on('data', onChunk('stderr'));
-    proc.on('error', reject);
+    proc.on('error', (err) => { clearTimer(); reject(err); });
     proc.on('exit', (code) => {
-      if (code === 0 || opts.ignoreNonZeroExit) {
+      clearTimer();
+      if (timedOut) {
+        reject(new Error(
+          `${path.basename(cmd)} timed out after ${Math.round((opts.timeoutMs ?? 0) / 1000)}s`));
+      } else if (code === 0 || opts.ignoreNonZeroExit) {
         resolve();
       } else {
         reject(new Error(`${path.basename(cmd)} exited with code ${code}`));
