@@ -27,6 +27,13 @@ import { app, BrowserWindow } from 'electron';
 import { spawn, ChildProcess, execFile } from 'child_process';
 import path from 'path';
 import http from 'http';
+// Single source of truth for "first-run setup finished". Imported statically
+// (Rollup bundles all of electron/ into one file, so a runtime require of a
+// sibling module wouldn't resolve). This is a circular import , setupCoordinator
+// imports startSoul/getRuntimeDir from here , but it's eval-safe: neither module
+// calls the other's functions at top-level, only at runtime, and both are
+// hoisted function declarations, so the live bindings resolve fine.
+import { isSetupComplete } from './setupCoordinator';
 
 // Platform split. On Windows soul is launched via `powershell run_soul.ps1`
 // and the process tree is reaped with `taskkill /T /F` (no POSIX process
@@ -187,6 +194,7 @@ function startHealthPoll(window: BrowserWindow): void {
  *  real reason + a "view logs" affordance. */
 function handleBootFailure(window: BrowserWindow, reason: string): void {
   if (soulIsReady) return; // we made it after all; ignore late failure signals
+  if (bootFailed) return;  // already surfaced; don't double-emit soul:failed
   bootFailed = true;
   clearBootTimers();
   const errTail = recentLogs
@@ -335,10 +343,22 @@ export function getRuntimeDir(): string {
 function isPackagedSetupComplete(): boolean {
   if (!app.isPackaged) return true; // dev runs always have a working repo
   try {
-    const fs = require('fs') as typeof import('fs');
-    return fs.existsSync(path.join(getRuntimeDir(), '.setup-complete'));
+    // Single source of truth: defer to the coordinator's releaseTag-aware
+    // check so this gate and the renderer's App.tsx gate can never disagree.
+    // Previously this was existence-only, so after a releaseTag bump (an
+    // app-shell update) the supervisor thought setup was done and spawned
+    // soul against the old runtime the wizard was concurrently replacing ,
+    // the documented "loading forever after setup completes" race.
+    return isSetupComplete();
   } catch {
-    return false;
+    // Coordinator unavailable (shouldn't happen): fall back to the old
+    // existence-only check rather than block boot entirely.
+    try {
+      const fs = require('fs') as typeof import('fs');
+      return fs.existsSync(path.join(getRuntimeDir(), '.setup-complete'));
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -588,6 +608,7 @@ function spawnSoul(window: BrowserWindow): boolean {
         void sweepStaleProcesses(window).finally(() => {
           if (intentionalStop) return;
           if (spawnSoul(window)) startHealthPoll(window);
+          else handleBootFailure(window, 'soul respawn could not be started');
         });
       }, backoff);
       return;
@@ -601,7 +622,16 @@ function spawnSoul(window: BrowserWindow): boolean {
     }
   });
   soulProc.on('error', (err) => {
-    log(window, 'meta', `[unclaw] soul error: ${err.message}`);
+    log(window, 'meta', `[unclaw] soul spawn error: ${err.message}`);
+    // A spawn-level error (bash/powershell ENOENT, EACCES on run_soul.sh)
+    // usually means the 'exit' handler will NOT fire, so the respawn/
+    // failure path there never runs and the user would sit out the full
+    // 150s boot watchdog. Surface it immediately. Guarded so a stray
+    // late error after a healthy boot (or during an intentional stop)
+    // doesn't flip the UI to failed.
+    if (!intentionalStop && !soulIsReady) {
+      handleBootFailure(window, `failed to launch soul: ${err.message}`);
+    }
   });
 
   // Fallback readiness path: poll /health alongside the stdout marker so a
@@ -697,7 +727,14 @@ export async function startSoul(window: BrowserWindow): Promise<void> {
     }
   }, SOUL_BOOT_TIMEOUT_MS);
 
-  spawnSoul(window);
+  // Fast-fail if the spawn itself couldn't start (missing run_soul.sh, a
+  // spawn() throw). Previously this return value was ignored, so a missing
+  // script surfaced only after the full 150s watchdog , a 2.5 minute
+  // spinner before any error. Surface it now.
+  if (!spawnSoul(window)) {
+    handleBootFailure(window,
+      'could not start soul (run_soul.sh not found or failed to spawn)');
+  }
 }
 
 /**

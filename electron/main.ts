@@ -18,7 +18,7 @@ import path from 'path';
 import fs from 'fs';
 import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
-import { startSoul, stopSoul, getSoulSnapshot, getSoulPorts } from './soulSupervisor';
+import { startSoul, stopSoul, restartSoul, getSoulSnapshot, getSoulPorts } from './soulSupervisor';
 import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent, installedPakVersions } from './setupCoordinator';
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
@@ -614,6 +614,24 @@ ipcMain.handle('soul:restart', async () => {
   if (!mainWindow) return false;
   await restartSoul(mainWindow);
   return true;
+});
+
+// Reveal the logs folder in Finder/Explorer. Surfaced from the boot +
+// setup failure screens (and usable for support) so a user hitting a
+// stuck launch can grab logs without hand-navigating ~/Library. Opens
+// <userData>/logs, which holds the daily soul-*.log tee; the UE
+// game.log lives under runtime/data/unreal but the soul log is the
+// right first stop and links onward.
+ipcMain.handle('system:open-logs', async () => {
+  try {
+    const logsDir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
+    await shell.openPath(logsDir);
+    return true;
+  } catch (err) {
+    console.warn('[unclaw] open-logs failed:', err);
+    return false;
+  }
 });
 
 // First-run setup pipeline. SetupWizard subscribes to 'setup:log' +
