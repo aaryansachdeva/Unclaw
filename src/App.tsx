@@ -33,7 +33,7 @@ import { fetchCloudChat, pushCloudChat, gatherLocalChat, restoreLocalChat, delet
 import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
-import { chatViaSoul, streamChatViaSoul, fireIdle, SoulBodyDirective, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
+import { chatViaSoul, streamChatViaSoul, fireIdle, fetchCurrentBodyIdle, SoulBodyDirective, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
 import { pollNextEscalation } from './services/escalation';
 import { sendListeningEvent } from './services/listening';
 import { listReminders } from './services/reminders';
@@ -153,19 +153,44 @@ function isReminderAction(name: string | undefined): boolean {
 /** Forward soul's body-director directives (idle rotation, conviction-
  *  gated talk loops, explicit body tokens) to the text2body AnimBP.
  *  Each directive already carries its UIInteraction field names
- *  (idleNum/talkNum+talkTime/actionNum/gestureNum). */
+ *  (idleNum/talkNum+talkTime/actionNum/gestureNum). Fire-and-forget:
+ *  the AnimBP owns its own exits (ShouldPlay* bools are consume-flags
+ *  cleared on state entry; Action leaves via the automatic rule,
+ *  Talking via the TalkingTime timer, gestures via montage consume).
+ *  Only doIdle persists, which is the point of idle rotation. */
+let idleRevertTimer: number | null = null;
 function dispatchBodyToUE(
   ps: { emitUIInteraction: (descriptor: object) => void },
   body: SoulBodyDirective[] | undefined,
 ): void {
   if (!body?.length) return;
   for (const d of body) {
-    const { event, clip: _clip, ...fields } = d;
+    const { event, clip, revertAfterS, revertIdleNum, ...fields } = d;
+    if (event === 'doIdle' && idleRevertTimer !== null) {
+      // A fresh idle pick supersedes any scheduled return-home.
+      window.clearTimeout(idleRevertTimer);
+      idleRevertTimer = null;
+    }
     ps.emitUIInteraction({
       EventType: event,
       ...fields,
       Timestamp: new Date().toISOString(),
     });
+    // Short idle VISITS carry a revert: after revertAfterS the body
+    // returns to the home loop (idle is the one state UE never exits
+    // on its own, and 5-10s is far finer than the idle-beat period).
+    if (event === 'doIdle'
+        && typeof revertAfterS === 'number' && revertAfterS > 0
+        && typeof revertIdleNum === 'number') {
+      idleRevertTimer = window.setTimeout(() => {
+        idleRevertTimer = null;
+        ps.emitUIInteraction({
+          EventType: 'doIdle',
+          idleNum: revertIdleNum,
+          Timestamp: new Date().toISOString(),
+        });
+      }, revertAfterS * 1000);
+    }
   }
 }
 
@@ -502,6 +527,18 @@ function AppMain() {
   // typing while reading history. Toggled from the InputBar's expand
   // button. Closed by default; the pane is opt-in.
   const [chatPaneOpen, setChatPaneOpen] = useState(false);
+
+  // TEMP(revert): Cmd+H toggles hiding ALL chrome (everything but the stream)
+  // for clean capture / debugging. Driven by main's globalShortcut -> IPC so it
+  // wins over the OS "Hide app" accelerator. Remove this state + effect + the
+  // `unclaw-ui-hidden` class on the root div + the CSS rule in styles.css.
+  const [uiHidden, setUiHidden] = useState(false);
+  useEffect(() => {
+    const off = window.electronAPI?.onTempToggleUi?.(() =>
+      setUiHidden((v) => !v),
+    );
+    return () => { off?.(); };
+  }, []);
 
   // Window width, drives the InputBar wrapper's animated left anchor
   // (it slides between the workspace bottom and the chat-pane bottom
@@ -1756,6 +1793,20 @@ function AppMain() {
       // Only emitted once a real chunk actually arrives (an escalation-only
       // turn never opens an utterance). One-shot providers never enter this.
       let utteranceBegun = false;
+      // endUtterance must reach UE AFTER the final chunk's PlayWithAudio (the data
+      // channel is ordered), so the plugin winds down on real queue-drain instead
+      // of a timer that can fire mid-reply and dip the face to idle. We close the
+      // utterance from the final chunk's dispatch callback; the speakMs timer and
+      // catch/finally are idempotent backstops. endUtteranceOnce guards re-entry.
+      let utteranceEnded = false;
+      let finalChunkIdx = -1;
+      let lastSeenChunkIdx = -1;
+      const endUtteranceOnce = () => {
+        if (utteranceBegun && !utteranceEnded) {
+          utteranceEnded = true;
+          pixelStreaming?.emitUIInteraction({ EventType: 'endUtterance' });
+        }
+      };
       try {
         for await (const chunk of streamChatViaSoul(trimmed, {
           systemExtension: systemExt,
@@ -1770,6 +1821,10 @@ function AppMain() {
           if (chunk.is_final) {
             totalDuration = chunk.total_duration ?? totalDuration;
             totalChunks = chunk.n_chunks ?? totalChunks;
+            // Index of the last content chunk, so its dispatch callback can close
+            // the utterance the instant it ships (falls back to the highest idx
+            // actually seen if n_chunks is absent).
+            finalChunkIdx = (chunk.n_chunks ?? (lastSeenChunkIdx + 1)) - 1;
             continue;
           }
           // First non-final chunk anchors the timeline. Add memory
@@ -1778,6 +1833,7 @@ function AppMain() {
           // memory the first time so the chat pane doesn't get N
           // duplicated entries).
           const now = performance.now();
+          lastSeenChunkIdx = Math.max(lastSeenChunkIdx, chunk.chunk_idx);
           if (firstChunkArrivedAt === 0) {
             firstChunkArrivedAt = now;
             // Open the utterance the moment the first chunk lands, before it
@@ -1806,6 +1862,10 @@ function AppMain() {
           const tid = window.setTimeout(() => {
             pendingChunkTimeoutsRef.current.delete(tid);
             dispatchChatChunk(chunk);
+            // Final chunk just shipped — close the utterance right behind it. The
+            // ordered data channel guarantees UE sees endUtterance after this
+            // chunk's PlayWithAudio, so it winds down on real drain, never mid-reply.
+            if (chunk.chunk_idx === finalChunkIdx) endUtteranceOnce();
           }, delay);
           pendingChunkTimeoutsRef.current.add(tid);
         }
@@ -1834,11 +1894,10 @@ function AppMain() {
           const speakMs = (totalDuration > 0 ? totalDuration * 1000 : 4000) + gapsMs;
           const timerId = window.setTimeout(() => {
             pendingChunkTimeoutsRef.current.delete(timerId);
-            // Last chunk's audio has finished — close the utterance so the
-            // plugin does its single, clean wind-down back to idle.
-            if (utteranceBegun) {
-              pixelStreaming?.emitUIInteraction({ EventType: 'endUtterance' });
-            }
+            // Backstop only: the final chunk's dispatch normally closes the
+            // utterance already. This covers a missing is_final / dropped final
+            // chunk so the plugin never holds the speaking pose. Idempotent.
+            endUtteranceOnce();
             isAISpeakingRef.current = false;
             notifyAIFinishedRef.current();
           }, Math.round(speakMs));
@@ -1855,9 +1914,7 @@ function AppMain() {
         }
         // Balance any open utterance so the plugin doesn't hold the speaking
         // pose (the plugin also self-heals after MaxHoldSeconds, but be tidy).
-        if (utteranceBegun) {
-          pixelStreaming?.emitUIInteraction({ EventType: 'endUtterance' });
-        }
+        endUtteranceOnce();
         isAISpeakingRef.current = false;
       } finally {
         if (streamAbortRef.current === ac) streamAbortRef.current = null;
@@ -2616,6 +2673,24 @@ function AppMain() {
 
   const isConnected = connectionState === 'connected';
 
+  // Body-idle resync. A renderer refresh/crash tears down the stream
+  // session and the fresh one starts on the default body-idle loop,
+  // while soul still holds the real rotation state ("we lose the
+  // context of where we were"). On every (re)connect, ask soul where
+  // the rotation is and re-dispatch it. GET /body/idle never advances
+  // the rotation, so reconnect storms are harmless.
+  useEffect(() => {
+    if (!isConnected || !pixelStreaming) return undefined;
+    let cancelled = false;
+    void (async () => {
+      const body = await fetchCurrentBodyIdle();
+      if (!cancelled && body) {
+        dispatchBodyToUE(pixelStreaming, body);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isConnected, pixelStreaming]);
+
   // Idle micro-expression driver. Fires POST /idle on a jittered
   // timer (~30-50s mean) to keep Grace alive when the user isn't
   // talking. UnClaw is the canonical idle driver, soul refuses /idle
@@ -2930,7 +3005,7 @@ function AppMain() {
   const handleNextPersona = useCallback(() => stepAgent(1), [stepAgent]);
 
   return (
-    <div className="relative flex-1 min-h-0 overflow-hidden">
+    <div className={`relative flex-1 min-h-0 overflow-hidden${uiHidden ? ' unclaw-ui-hidden' : ''}`}>
       {/* Workspace, everything that should physically shrink when the
           chat pane opens. The `right` value animates from 0 →
           chatPaneWidth so StreamView, the input bar, and every

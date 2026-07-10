@@ -19,6 +19,9 @@ interface ElectronAPI {
    *  `claude setup-token` in a fresh tab. */
   openTerminalWithCommand: (command: string) => Promise<{ ok: boolean; error?: string }>;
 
+  /** TEMP(revert): Cmd+H all-chrome hide toggle. Returns an unsubscribe fn. */
+  onTempToggleUi?: (cb: () => void) => () => void;
+
   /** Trigger the screenshot region selector. Same effect as the
    *  global Ctrl+Shift+G shortcut. */
   triggerScreenshot: () => void;

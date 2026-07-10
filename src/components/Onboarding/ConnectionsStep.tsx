@@ -28,18 +28,21 @@ import {
   LLM_PROVIDERS,
   getProvider,
   missingRequiredKeyFields,
-  modelSupportsThinking,
   modelSupportsTools,
   modelSupportsVision,
   isOptimizedLocalModel,
   validateKeys,
   filterChatModels,
+  thinkingCapabilityFor,
+  thinkingOptionsFor,
+  normalizeThinkingValue,
   type ApiKeysProfile,
   type AgenticProvider,
   type KeyValidationResult,
   type LLMProviderId,
   type KokoroMode,
   type ThinkingEffort,
+  type ThinkingCapability,
   type TtsProviderId,
 } from '../../services/apiKeys';
 import { fetchOllamaModels, type SoulProviderModel } from '../../services/providers';
@@ -168,6 +171,22 @@ export function ConnectionsStep({
   // (AgenticSection). Independent of `check.result` so the card stays
   // current even after the user opens the step without pressing Check.
   const [liveValidation, setLiveValidation] = useState<KeyValidationResult | null>(null);
+  // Accumulated per-model thinking capabilities, merged from every
+  // validation's `thinking_caps` (chat + agentic). Keyed by bare model id.
+  // Drives the capability-gated thinking selectors below without the
+  // frontend hardcoding any model lists. See soul/providers/_thinking.py.
+  const [thinkingCapsByModel, setThinkingCapsByModel] = useState<
+    Record<string, ThinkingCapability>
+  >({});
+  const mergeThinkingCaps = (res: KeyValidationResult) => {
+    const add = {
+      ...(res.llm?.thinking_caps ?? {}),
+      ...(res.agentic?.thinking_caps ?? {}),
+    };
+    if (Object.keys(add).length) {
+      setThinkingCapsByModel((prev) => ({ ...prev, ...add }));
+    }
+  };
   // True while ANY auto-probe is in flight (chat-side OR agentic-side).
   // The card shows "Checking for X" during this window so the user sees
   // motion instead of a stale state when switching providers.
@@ -194,6 +213,7 @@ export function ConnectionsStep({
     const t = setTimeout(() => {
       setIsAutoProbing(true);
       void validateKeys(values).then((res) => {
+        mergeThinkingCaps(res);
         if (res.llm.ok && res.llm.models && res.llm.models.length) {
           setLiveModelsByProvider((prev) => ({
             ...prev,
@@ -230,6 +250,7 @@ export function ConnectionsStep({
     const t = setTimeout(() => {
       setIsAutoProbing(true);
       void validateKeys(values).then((res) => {
+        mergeThinkingCaps(res);
         // When the agentic response carries a model list (CLI providers
         // return their model catalog here), stash it under the agentic
         // provider's slot so the Agentic Model dropdown populates from
@@ -478,6 +499,7 @@ export function ConnectionsStep({
     setCheck({ state: 'checking', result: null, networkError: null });
     try {
       const result = await validateKeys(values);
+      mergeThinkingCaps(result);
       setCheck({ state: 'done', result, networkError: null });
       // Compute scope-relevant ok. The /validate_keys call always
       // probes everything (cheap; one round trip), but each page's
@@ -606,22 +628,28 @@ export function ConnectionsStep({
           </FieldLabel>
         )}
 
-        {/* Chat thinking lever, only shown for models that support it.
-            Default 'none' for snappy conversational chat; the agentic
-            tier has its own lever (defaults to 'medium') inside
-            AgenticSection. */}
-        {modelSupportsThinking(values.llm_model) && (
-          <FieldLabel text="Chat thinking">
-            <Dropdown
-              value={values.chat_thinking_effort}
-              onChange={(v) => onChange({
-                ...values,
-                chat_thinking_effort: (v as ThinkingEffort) || 'none',
-              })}
-              options={THINKING_LEVEL_OPTIONS}
-            />
-          </FieldLabel>
-        )}
+        {/* Chat thinking lever, capability-gated by the selected model
+            (graded -> Off/Low/Medium/High, binary -> Off/On, none ->
+            hidden). Caps come from soul's _thinking resolver via
+            /validate_keys, so no model lists are hardcoded here. Default
+            'none' keeps conversational chat snappy; the agentic tier has
+            its own lever inside AgenticSection. */}
+        {(() => {
+          const cap = thinkingCapabilityFor(values.llm_model, thinkingCapsByModel);
+          if (!cap) return null;
+          return (
+            <FieldLabel text="Chat thinking">
+              <Dropdown
+                value={normalizeThinkingValue(cap, values.chat_thinking_effort)}
+                onChange={(v) => onChange({
+                  ...values,
+                  chat_thinking_effort: (v as ThinkingEffort) || 'none',
+                })}
+                options={thinkingOptionsFor(cap)}
+              />
+            </FieldLabel>
+          );
+        })()}
 
         <AgenticSection
           values={values}
@@ -629,6 +657,7 @@ export function ConnectionsStep({
           liveModelsByProvider={liveModelsByProvider}
           liveValidation={liveValidation}
           isAutoProbing={isAutoProbing}
+          thinkingCapsByModel={thinkingCapsByModel}
         />
 
         {/* Gemini Search key, sits alongside the chat provider since
@@ -1598,25 +1627,20 @@ const AGENTIC_OPENAI_MODELS: ReadonlyArray<{ id: string; label: string; hint?: s
   { id: 'openai:gpt-5.4-nano',  label: 'GPT-5.4 Nano',  hint: 'cheapest' },
 ];
 
-const THINKING_LEVEL_OPTIONS: ReadonlyArray<{ id: ThinkingEffort; label: string; hint?: string }> = [
-  { id: 'none',   label: 'Off',    hint: 'snappiest' },
-  { id: 'low',    label: 'Low',    hint: 'quick'     },
-  { id: 'medium', label: 'Medium', hint: 'balanced'  },
-  { id: 'high',   label: 'High',   hint: 'thorough'  },
-];
-
 function AgenticSection({
   values,
   onChange,
   liveModelsByProvider,
   liveValidation,
   isAutoProbing,
+  thinkingCapsByModel,
 }: {
   values: ApiKeysProfile;
   onChange: (next: ApiKeysProfile) => void;
   liveModelsByProvider: Partial<Record<LLMProviderId, string[]>>;
   liveValidation: KeyValidationResult | null;
   isAutoProbing: boolean;
+  thinkingCapsByModel: Record<string, ThinkingCapability>;
 }) {
   const [showKey, setShowKey] = useState(false);
 
@@ -1693,6 +1717,7 @@ function AgenticSection({
                 { id: 'anthropic',   label: 'Anthropic Claude', hint: 'Messages API' },
                 { id: 'gemini',      label: 'Google Gemini',    hint: 'functionDeclarations' },
                 { id: 'deepseek',    label: 'DeepSeek',         hint: 'OpenAI-compat tool loop' },
+                { id: 'glm',         label: 'GLM (Zhipu)',      hint: 'OpenAI-compat tool loop' },
                 { id: 'claude-code', label: 'Claude Code CLI',  hint: 'Pro/Max subscription' },
                 { id: 'gemini-cli',  label: 'Gemini CLI',       hint: 'Free tier or Pro' },
                 { id: 'codex',       label: 'Codex CLI',        hint: 'ChatGPT subscription' },
@@ -1826,25 +1851,28 @@ function AgenticSection({
             );
           })()}
 
-          {/* Agentic thinking lever, shown when the effective agentic
-              model supports reasoning. On the local path, that means
-              the chat-tier Ollama model supports thinking. On the
-              cloud path, soul's _run_escalation honors this for
-              gpt-5.4-* / o1 / o3 families via reasoning.effort. */}
-          {((isLocal && modelSupportsThinking(values.llm_model))
-            || (!isLocal && values.agentic_model
-                && /(?:gpt-5|o1|o3)/i.test(values.agentic_model))) && (
-            <FieldLabel text="Agentic thinking">
-              <Dropdown
-                value={values.agentic_thinking_effort}
-                onChange={(v) => onChange({
-                  ...values,
-                  agentic_thinking_effort: (v as ThinkingEffort) || 'medium',
-                })}
-                options={THINKING_LEVEL_OPTIONS}
-              />
-            </FieldLabel>
-          )}
+          {/* Agentic thinking lever, capability-gated by the effective
+              agentic model (the chat model when reusing/local, else the
+              picked agentic model). Caps come from soul's _thinking
+              resolver via /validate_keys — no hardcoded model lists. */}
+          {(() => {
+            const agModel = (isLocal || effectiveReuse)
+              ? values.llm_model : values.agentic_model;
+            const cap = thinkingCapabilityFor(agModel, thinkingCapsByModel);
+            if (!cap) return null;
+            return (
+              <FieldLabel text="Agentic thinking">
+                <Dropdown
+                  value={normalizeThinkingValue(cap, values.agentic_thinking_effort)}
+                  onChange={(v) => onChange({
+                    ...values,
+                    agentic_thinking_effort: (v as ThinkingEffort) || 'medium',
+                  })}
+                  options={thinkingOptionsFor(cap)}
+                />
+              </FieldLabel>
+            );
+          })()}
         </>
       )}
     </div>

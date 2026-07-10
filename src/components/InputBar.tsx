@@ -7,6 +7,7 @@
 // this bar, and `/news`, `/weather`, `/stocks`, `/reminders`, `/dance`,
 // `/kiss`, `/hello`, `/celebrate`, `/clear` all work from the input.
 
+import Strands from './Strands';
 import {
   forwardRef,
   KeyboardEvent as ReactKeyboardEvent,
@@ -1176,6 +1177,20 @@ function VoiceButton({
       ? 'live'
       : 'idle';
 
+  // When voice mode is active the orb fills with reactive Strands instead of
+  // the EQ bars. Energy drives the strands' amplitude/speed/brightness so they
+  // physically ripple with the user's voice (mic VAD level). While the AI is
+  // transcribing there's no mic signal, so hold a steady lively baseline.
+  const strandEnergy = Math.max(
+    0,
+    Math.min(1, voice.isTranscribing ? 0.7 : voice.vadLevel),
+  );
+  // Palette tracks the existing state semantics: warm ember while the AI speaks,
+  // green while the mic is listening (matches --live / --accent usage).
+  const strandColors = voice.isTranscribing
+    ? ['#c44444', '#ff7a5c', '#ffc24d']
+    : ['#22c55e', '#5eead4', '#c44444'];
+
   // Plain button — visibility is owned by the parent wrapper div's
   // opacity transition. Mixing framer-motion's initial/animate/exit
   // here was causing a flicker on every re-render of the parent
@@ -1194,7 +1209,10 @@ function VoiceButton({
         width: 36,
         height: 36,
         borderRadius: '50%',
-        background: voice.active ? '#ffffff' : 'rgba(255,255,255,0.92)',
+        position: 'relative',
+        // Active = dark orb so the glowing strands read; inactive = white pill.
+        overflow: 'hidden',
+        background: voice.active ? 'rgba(14, 11, 13, 0.95)' : 'rgba(255,255,255,0.92)',
         border: `1px solid ${voice.active ? ringColor : 'rgba(255,255,255,0)'}`,
         boxShadow: voice.active
           ? `0 0 0 2px color-mix(in srgb, ${ringColor} 35%, transparent), 0 2px 8px rgba(0,0,0,0.25)`
@@ -1212,11 +1230,30 @@ function VoiceButton({
           'background 0.25s var(--ease-out-quart), box-shadow 0.25s var(--ease-out-quart), border-color 0.25s var(--ease-out-quart)',
       }}
     >
-      <MiniBars
-        mode={mode}
-        vadLevel={voice.vadLevel}
-        color={barColor}
-      />
+      {voice.active ? (
+        <Strands
+          style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+          colors={strandColors}
+          count={4}
+          speed={0.45 + strandEnergy * 1.1}
+          amplitude={0.9 + strandEnergy * 2.6}
+          waviness={1.15}
+          thickness={1.1}
+          glow={3.0}
+          taper={2.2}
+          spread={1}
+          intensity={0.5 + strandEnergy * 0.5}
+          saturation={1.3}
+          opacity={1}
+          scale={1.4}
+        />
+      ) : (
+        <MiniBars
+          mode={mode}
+          vadLevel={voice.vadLevel}
+          color={barColor}
+        />
+      )}
     </button>
   );
 }

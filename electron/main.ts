@@ -1329,6 +1329,17 @@ app.whenReady().then(() => {
     );
   }
 
+  // TEMP(revert): Cmd+H hides all chrome (debug/clean-capture). Registered as a
+  // globalShortcut so it wins over the default app menu's "Hide" role (which
+  // also owns Cmd+H and would otherwise hide the whole app). Remove this block
+  // + the preload onToggleUi bridge + the App.tsx uiHidden handling to revert.
+  const tempUiToggle = globalShortcut.register('CommandOrControl+H', () => {
+    mainWindow?.webContents.send('temp:toggle-ui');
+  });
+  if (!tempUiToggle) {
+    console.warn('[temp] failed to register Cmd+H UI toggle');
+  }
+
   createWindow();
   createTray();
 

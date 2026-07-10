@@ -131,7 +131,9 @@ export function usePixelStreaming({
     // emitting the Resolution command. Wire format is identical to the SDK's
     // own path: emitCommand() -> streamMessageController 'Command' handler,
     // same as onMatchViewportResolutionCallback's default body.
-    const MAX_RENDER_DIM = 1920; // cap longest side so the HW encoder + bitrate cap stay sane
+    // TEMP(revert): resolution cap lifted for testing. Restore `= 1920` to re-cap
+    // the longest side for the HW encoder + bitrate sanity.
+    const MAX_RENDER_DIM = Number.MAX_SAFE_INTEGER; // TEMP: no cap
     const installDprResolutionOverride = (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vp: any,

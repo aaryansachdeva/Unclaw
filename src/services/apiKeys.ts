@@ -14,6 +14,7 @@ export type LLMProviderId =
   | 'ollama'      // Local Ollama daemon — any locally-pulled model
   | 'deepseek'    // DeepSeek API (OpenAI-compatible) — deepseek-chat, -reasoner
   | 'xai'         // xAI Grok (OpenAI-compatible) — grok-2-latest, grok-beta
+  | 'glm'         // GLM / Zhipu z.ai (OpenAI-compatible) — glm-4.6, glm-4.5 family
   | 'anthropic'   // Anthropic Claude (OpenAI-compat shim) — claude-3.x family
   | 'gemini'      // Google Gemini (OpenAI-compat shim) — gemini-2.x family
   | 'claude-code' // Anthropic Claude via Pro/Max subscription (CLI OAuth, keyless)
@@ -147,10 +148,73 @@ export function modelSupportsTools(modelId: string | null | undefined): boolean 
 
 /** Family supports a `<think>` block. Drives the wizard's
  *  thinking-effort dropdown. Local Ollama only — cloud reasoning is
- *  handled separately by the escalation backend. */
+ *  handled separately by the escalation backend. Retained as the local
+ *  fallback used by `thinkingCapabilityFor`. */
 export function modelSupportsThinking(modelId: string | null | undefined): boolean {
   if (!modelId || !modelId.startsWith('ollama:')) return false;
   return !!_identifyLocalFamily(modelId)?.thinks;
+}
+
+/** Thinking-control tier for a model, mirrored from soul's `_thinking`
+ *  capability resolver (the single source of truth — see
+ *  soul/providers/_thinking.py). `graded` = off + low/medium/high are
+ *  distinct; `binary` = off + on; `none` = no thinking control. */
+export type ThinkingLevelKind = 'graded' | 'binary' | 'none';
+export interface ThinkingCapability {
+  level: ThinkingLevelKind;
+  can_disable: boolean;
+}
+
+/** Resolve a model's thinking capability from the caps map returned by
+ *  `/validate_keys` (`thinking_caps`, keyed by bare model id). Falls back
+ *  to the local Ollama family heuristic when caps aren't loaded yet (e.g.
+ *  before the first validation). Returns null when the model has no
+ *  thinking control, so callers hide the selector. */
+export function thinkingCapabilityFor(
+  modelId: string | null | undefined,
+  caps?: Record<string, ThinkingCapability>,
+): ThinkingCapability | null {
+  if (!modelId) return null;
+  // `llm_model` carries a `provider:` prefix; caps keys are bare ids.
+  const bare = modelId.includes(':') ? modelId.split(':').slice(1).join(':') : modelId;
+  const cap = caps?.[bare] ?? caps?.[modelId];
+  if (cap) return cap.level === 'none' ? null : cap;
+  // Local fallback for Ollama before a validation populates caps.
+  if (modelId.startsWith('ollama:') && modelSupportsThinking(modelId)) {
+    return { level: 'binary', can_disable: true };
+  }
+  return null;
+}
+
+/** Dropdown options for a thinking capability. Binary collapses to
+ *  Off/On (On stored as 'medium' since soul treats any on-level as
+ *  enabled); graded shows Low/Medium/High, with Off only when the model
+ *  can actually disable thinking. */
+export function thinkingOptionsFor(
+  cap: ThinkingCapability,
+): Array<{ id: ThinkingEffort; label: string }> {
+  if (cap.level === 'binary') {
+    return [{ id: 'none', label: 'Off' }, { id: 'medium', label: 'On' }];
+  }
+  const opts: Array<{ id: ThinkingEffort; label: string }> = [
+    { id: 'low', label: 'Low' },
+    { id: 'medium', label: 'Medium' },
+    { id: 'high', label: 'High' },
+  ];
+  if (cap.can_disable) opts.unshift({ id: 'none', label: 'Off' });
+  return opts;
+}
+
+/** Coerce a stored effort to a value the capability's option set can
+ *  display: binary maps any on-level to 'medium'; a non-disable-able
+ *  graded model maps 'none' up to 'low'. */
+export function normalizeThinkingValue(
+  cap: ThinkingCapability,
+  value: ThinkingEffort,
+): ThinkingEffort {
+  if (cap.level === 'binary') return value === 'none' ? 'none' : 'medium';
+  if (!cap.can_disable && value === 'none') return 'low';
+  return value;
 }
 
 /** Family has a soul-side validated implementation. Drives the
@@ -255,6 +319,13 @@ export const LLM_PROVIDERS: ProviderInfo[] = [
     id: 'xai',
     label: 'xAI Grok',
     signupUrl: 'https://console.x.ai/',
+    requiresApiKey: true,
+    models: [],
+  },
+  {
+    id: 'glm',
+    label: 'GLM (Zhipu)',
+    signupUrl: 'https://z.ai/manage-apikey/apikey-list',
     requiresApiKey: true,
     models: [],
   },
@@ -410,6 +481,11 @@ export function filterChatModels(
         // xAI's lineup is the Grok family. /v1/models lists
         // `grok-2-latest`, `grok-2-1212`, `grok-vision-beta`, etc.
         return lower.startsWith('grok-');
+
+      case 'glm':
+        // GLM / Zhipu z.ai. /models lists `glm-4.6`, `glm-4.5`,
+        // `glm-4.5-air`, `glm-4-flash`, etc. All chat-capable.
+        return lower.startsWith('glm-');
 
       case 'ollama':
         // Local Ollama tags vary wildly. Anything the user pulled
@@ -767,6 +843,8 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
           ap === 'anthropic' ? 'Anthropic'
           : ap === 'gemini' ? 'Gemini'
           : ap === 'deepseek' ? 'DeepSeek'
+          : ap === 'xai' ? 'xAI'
+          : ap === 'glm' ? 'GLM'
           : 'OpenAI';
         missing.push(`${providerLabel} key for agentic`);
       }
@@ -810,6 +888,11 @@ export interface KeyValidationOutcome {
   needs_setup_token?: boolean;
   binary_path?: string;
   version?: string;
+  /** Per-model thinking capability, keyed by bare model id. Computed
+   *  soul-side from the single-source `_thinking` resolver so the
+   *  frontend can gate the thinking selector without hardcoding model
+   *  lists. Present on the `llm` and `agentic` outcomes. */
+  thinking_caps?: Record<string, ThinkingCapability>;
 }
 
 export interface KeyValidationResult {

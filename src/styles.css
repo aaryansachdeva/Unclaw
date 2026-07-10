@@ -425,3 +425,10 @@ textarea::placeholder {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* TEMP(revert): Cmd+H all-chrome hide. The root's first child is the workspace
+   wrapper, whose first child is StreamView (the avatar). Hide every other
+   sibling at both levels so only the stream remains. Remove this block + the
+   `unclaw-ui-hidden` class + the App.tsx/preload/main wiring to revert. */
+.unclaw-ui-hidden > *:not(:first-child) { display: none !important; }
+.unclaw-ui-hidden > *:first-child > *:not(:first-child) { display: none !important; }
