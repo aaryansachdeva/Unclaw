@@ -463,6 +463,23 @@ function spawnSoul(window: BrowserWindow): boolean {
         ].filter(Boolean).join(':'),
   };
 
+  // BYOK keychain identity. Electron's safeStorage stores the OSCrypt master
+  // key on macOS under keychain service "<app.getName()> Safe Storage" with
+  // account "<app.getName()> Key" (and application="<app.getName()>" in the
+  // Linux secret service). soul's byok.py defaulted to the productName
+  // "Unclaw", which mismatches the ACTUAL app.getName() ("unclaw", lowercase,
+  // from package.json `name` since there's no top-level productName) on BOTH
+  // the service-name case AND the " Key" account suffix. Result: soul's
+  // `security find-generic-password` returned errSecItemNotFound (rc=44) and
+  // EVERY user's API keys silently failed to decrypt on Mac. Pass the
+  // authoritative names: this Electron process is the same one whose
+  // safeStorage created the item, so app.getName() is exactly the string it
+  // used. soul reads these override env vars ahead of its own defaults.
+  const keychainAppName = app.getName();
+  childEnv.SOUL_BYOK_KEYCHAIN_SERVICE = `${keychainAppName} Safe Storage`;
+  childEnv.SOUL_BYOK_KEYCHAIN_ACCOUNT = `${keychainAppName} Key`;
+  childEnv.SOUL_BYOK_KEYRING_APP = keychainAppName;
+
   // Packaged-install env. The setup wizard provisions
   //   <userData>/runtime/{python-env, assets, unreal, data}/
   // on first launch and writes <userData>/runtime/.setup-complete when
