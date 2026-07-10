@@ -248,10 +248,24 @@ export function App() {
     const api = window.electronAPI?.setup;
     if (!api) { setSetupComplete(true); return; }
     let cancelled = false;
-    api.getStatus().then((snap) => {
-      if (cancelled) return;
-      setSetupComplete(snap?.isComplete ?? false);
-    }).catch(() => { if (!cancelled) setSetupComplete(true); });
+    // Bounded retry. getStatus is a synchronous main-process snapshot so it
+    // effectively never rejects, but if the IPC bridge isn't wired yet we
+    // retry rather than guess. On give-up we default to FALSE (show the
+    // wizard), NOT true: the wizard self-completes when setup is actually
+    // done (its own getStatus reports isComplete and calls onComplete),
+    // whereas assuming "complete" on a never-provisioned machine would
+    // strand the user on the boot screen forever with no soul to wait on.
+    const attempt = (retries: number) => {
+      api.getStatus().then((snap) => {
+        if (cancelled) return;
+        setSetupComplete(snap?.isComplete ?? false);
+      }).catch(() => {
+        if (cancelled) return;
+        if (retries > 0) setTimeout(() => attempt(retries - 1), 300);
+        else setSetupComplete(false);
+      });
+    };
+    attempt(3);
     return () => { cancelled = true; };
   }, [setupComplete]);
 

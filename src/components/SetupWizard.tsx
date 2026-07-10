@@ -131,6 +131,19 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
     requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
   }, [logs]);
 
+  // Retry after a failed setup. The coordinator pipeline is idempotent
+  // (completed stages skip via their on-disk markers), so this re-runs and
+  // resumes rather than starting from scratch. Previously the only recovery
+  // was to quit and relaunch the app.
+  const handleRetrySetup = () => {
+    const api = window.electronAPI?.setup;
+    if (!api) return;
+    startedRef.current = true;
+    setStage({ id: 'preflight', progress: 0, headline: 'Retrying setup…' });
+    api.start().catch(() => { /* terminal state surfaces via setup:stage */ });
+  };
+  const handleOpenLogs = () => { void window.electronAPI?.soul?.openLogs?.(); };
+
   const overall = useMemo(() => computeOverallProgress(stage), [stage]);
 
   const mm = Math.floor(elapsed / 60);
@@ -329,6 +342,55 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
           >
             {timeStr}
           </div>
+
+          {/* Failed-setup recovery. The pipeline is idempotent so Retry
+              resumes; Open logs surfaces the setup log for support. */}
+          {isFailed && (
+            <div
+              style={{
+                display: 'flex',
+                gap: 12,
+                alignItems: 'center',
+                marginTop: 16,
+                WebkitAppRegion: 'no-drag',
+              } as React.CSSProperties}
+            >
+              <button
+                type="button"
+                onClick={handleRetrySetup}
+                style={{
+                  padding: '9px 24px',
+                  borderRadius: 999,
+                  border: '1px solid rgba(196, 68, 68, 0.5)',
+                  background: 'var(--accent-dim, rgba(196,68,68,0.16))',
+                  color: 'rgba(255,255,255,0.95)',
+                  fontSize: 13,
+                  fontWeight: 600,
+                  fontFamily: 'inherit',
+                  cursor: 'pointer',
+                }}
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                onClick={handleOpenLogs}
+                style={{
+                  padding: '9px 18px',
+                  borderRadius: 999,
+                  border: '1px solid rgba(255, 255, 255, 0.16)',
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  color: 'rgba(255, 255, 255, 0.7)',
+                  fontSize: 12.5,
+                  fontWeight: 500,
+                  fontFamily: 'inherit',
+                  cursor: 'pointer',
+                }}
+              >
+                Open logs
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

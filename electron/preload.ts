@@ -133,6 +133,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     /** User-initiated retry from the boot-failure screen. Tears down any
      *  half-started soul and runs a fresh boot episode. */
     restart: (): Promise<boolean> => ipcRenderer.invoke('soul:restart'),
+    /** Reveal the logs folder in Finder/Explorer. Surfaced from the boot
+     *  screen so a user hitting a stuck launch can grab logs for support. */
+    openLogs: (): Promise<boolean> => ipcRenderer.invoke('system:open-logs'),
     /** Latest discovered ports, or null while soul is still booting.
      *  Renderer code that constructs URLs should prefer onPorts() +
      *  the snapshot's ports field over hardcoded 8765/8080/8888. */

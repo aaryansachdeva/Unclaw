@@ -87,6 +87,8 @@ interface ElectronAPI {
     }>;
     /** User-initiated retry from the boot-failure screen. */
     restart: () => Promise<boolean>;
+    /** Reveal the logs folder in Finder/Explorer (support affordance). */
+    openLogs: () => Promise<boolean>;
     /** Latest known port mapping, or null while soul is still booting.
      *  Renderer-side URL builders (services/soulBase.ts) call this
      *  during init so they don't construct stale URLs. */

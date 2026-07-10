@@ -94,9 +94,19 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
     void window.electronAPI?.soul?.restart?.();
   };
 
+  // Reveal the logs folder for support / self-debugging.
+  const handleOpenLogs = () => { void window.electronAPI?.soul?.openLogs?.(); };
+
   // After ~25s of a normal boot, reassure the user this is expected on a
   // cold first run (model loads) rather than a hang.
   const showSlowHint = status === 'booting' && elapsed >= 25;
+
+  // QoL: give the user an explicit "relaunch soul" out on the waiting
+  // screen once boot has run a little while, so a stuck-but-not-yet-failed
+  // boot (soul healthy-but-silent, a wedged model load) doesn't force a
+  // full app restart. Held back ~8s so a normal fast boot never flashes it.
+  const showRelaunch =
+    (status === 'booting' || status === 'retrying') && elapsed >= 8;
 
   // Clock tick.
   useEffect(() => {
@@ -419,6 +429,62 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
         </div>
       )}
 
+      {/* Waiting-screen escape hatch. Whisper-quiet, appears only after a
+          few seconds so a normal boot never shows it, but a stuck boot
+          gives the user a relaunch + logs out without quitting the app. */}
+      {showRelaunch && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 22,
+            left: 0,
+            right: 0,
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            gap: 18,
+            zIndex: 70,
+            WebkitAppRegion: 'no-drag',
+          } as React.CSSProperties}
+        >
+          <button
+            type="button"
+            onClick={handleRetry}
+            style={{
+              padding: '6px 16px',
+              borderRadius: 999,
+              border: '1px solid rgba(255, 255, 255, 0.14)',
+              background: 'rgba(255, 255, 255, 0.05)',
+              color: 'rgba(255, 255, 255, 0.62)',
+              fontSize: 11.5,
+              fontWeight: 500,
+              fontFamily: 'inherit',
+              letterSpacing: '0.02em',
+              cursor: 'pointer',
+            }}
+          >
+            Relaunch soul
+          </button>
+          <button
+            type="button"
+            onClick={handleOpenLogs}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'rgba(255, 255, 255, 0.34)',
+              fontSize: 11,
+              fontFamily: 'inherit',
+              letterSpacing: '0.02em',
+              cursor: 'pointer',
+              textDecoration: 'underline',
+              textUnderlineOffset: 3,
+            }}
+          >
+            Open logs
+          </button>
+        </div>
+      )}
+
       {/* Unrecoverable boot failure: a real reason + Retry, never an
           infinite spinner. Covers the whole void so it's unmissable. */}
       {status === 'failed' && (
@@ -473,24 +539,42 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
               </pre>
             </details>
           )}
-          <button
-            type="button"
-            onClick={handleRetry}
-            style={{
-              marginTop: 4,
-              padding: '10px 26px',
-              borderRadius: 999,
-              border: '1px solid rgba(196, 68, 68, 0.5)',
-              background: 'var(--accent-dim, rgba(196,68,68,0.16))',
-              color: 'rgba(255,255,255,0.95)',
-              fontSize: 13.5,
-              fontWeight: 600,
-              fontFamily: 'inherit',
-              cursor: 'pointer',
-            }}
-          >
-            Retry
-          </button>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 4 }}>
+            <button
+              type="button"
+              onClick={handleRetry}
+              style={{
+                padding: '10px 26px',
+                borderRadius: 999,
+                border: '1px solid rgba(196, 68, 68, 0.5)',
+                background: 'var(--accent-dim, rgba(196,68,68,0.16))',
+                color: 'rgba(255,255,255,0.95)',
+                fontSize: 13.5,
+                fontWeight: 600,
+                fontFamily: 'inherit',
+                cursor: 'pointer',
+              }}
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenLogs}
+              style={{
+                padding: '10px 20px',
+                borderRadius: 999,
+                border: '1px solid rgba(255, 255, 255, 0.16)',
+                background: 'rgba(255, 255, 255, 0.05)',
+                color: 'rgba(255, 255, 255, 0.7)',
+                fontSize: 13,
+                fontWeight: 500,
+                fontFamily: 'inherit',
+                cursor: 'pointer',
+              }}
+            >
+              Open logs
+            </button>
+          </div>
         </div>
       )}
 
