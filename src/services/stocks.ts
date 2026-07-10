@@ -53,6 +53,7 @@ export async function getStocks(symbols?: string[]): Promise<StocksResult> {
     res = await fetch(`${getSoulBaseUrl()}/stocks${qs}`, {
       method: 'GET',
       headers: { 'X-Gemini-Key': keys.gemini_search_api_key },
+      signal: AbortSignal.timeout(15000),
     });
   } catch (err) {
     return { available: false, error: `network: ${(err as Error).message}` };

@@ -1374,6 +1374,12 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  // A second instance that lost the single-instance lock is quitting
+  // immediately (line ~1156) and never owned the soul/UE stack. It MUST NOT
+  // run the teardown below: the system-wide `pkill -f 'Unclaw Character'`
+  // would kill the PRIMARY instance's live UE + MCP children out from under
+  // a perfectly healthy session. Only the lock owner tears down the stack.
+  if (!gotSingleInstanceLock) return;
   // SIGTERM the soul subprocess. Soul's shutdown hooks (UE SIGTERM,
   // MCP subprocess teardown) run cleanly. No-op if soul was attached
   // externally (the user owns that process and we don't kill it).

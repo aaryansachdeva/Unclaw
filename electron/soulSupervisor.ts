@@ -664,7 +664,10 @@ function spawnSoul(window: BrowserWindow): boolean {
  * "external soul running" path (attach + immediate ready) and the
  * "no soul yet" path (spawn + wait for the READY marker).
  */
-export async function startSoul(window: BrowserWindow): Promise<void> {
+export async function startSoul(
+  window: BrowserWindow,
+  opts: { skipProbe?: boolean } = {},
+): Promise<void> {
   alreadyReadyFired = false;
   soulIsReady = false;
   // Reset livePorts so a respawn doesn't surface the dead session's
@@ -693,7 +696,12 @@ export async function startSoul(window: BrowserWindow): Promise<void> {
     return;
   }
 
-  const existing = await probeExistingSoul();
+  // A manual restart (restartSoul) just SIGTERM'd the old soul, which may
+  // still answer /health for a moment while it winds down. Probing here would
+  // "attach" to that dying corpse, mark ready, skip the fresh spawn+sweep, and
+  // then strand the boot when it finishes dying. Skip the probe on a forced
+  // restart so we always spawn a clean instance.
+  const existing = opts.skipProbe ? false : await probeExistingSoul();
   if (existing) {
     log(window, 'meta', '[unclaw] soul already running externally, attaching');
     alreadyReadyFired = true;
@@ -767,7 +775,12 @@ export async function restartSoul(window: BrowserWindow): Promise<void> {
     soulProc = null;
   }
   clearBootTimers();
-  await startSoul(window);
+  // Brief grace so the SIGTERM'd group actually releases its ports and stops
+  // answering /health before we spawn again. startSoul(skipProbe) then does a
+  // fresh spawn + sweep (which SIGKILLs any survivor), so this is belt +
+  // suspenders against binding contention on the immediate relaunch.
+  await new Promise((r) => setTimeout(r, 600));
+  await startSoul(window, { skipProbe: true });
 }
 
 /**
