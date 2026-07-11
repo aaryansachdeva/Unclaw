@@ -203,6 +203,11 @@ function handleBootFailure(window: BrowserWindow, reason: string): void {
     .map((l) => l.line);
   log(window, 'meta', `[unclaw] soul boot FAILED: ${reason}`);
   emit(window, 'soul:failed', { reason, recentErrors: errTail });
+  // Terminal failure with the app still open: a hard soul death (crash/SIGKILL)
+  // skips soul's graceful _on_shutdown, so the UE child it spawned in its own
+  // session is orphaned and keeps holding the GPU video encoder. Reap any such
+  // orphan now (the sweep is ancestry-guarded, so it won't touch a live tree).
+  void sweepStaleProcesses(window).catch(() => { /* best effort */ });
 }
 
 /** Live ports soul is bound to. Null until the [ports] banner has been
@@ -873,9 +878,10 @@ async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
     return;
   }
   const psOutput = await new Promise<string>((resolve) => {
-    // `ps -A -o pid=,command=`, full command line for every process the
-    // user can see. We post-filter by argv pattern.
-    execFile('/bin/ps', ['-A', '-o', 'pid=,command='], (err, stdout) => {
+    // `ps -A -o pid=,ppid=,command=`: pid, PARENT pid, and full command line
+    // for every process the user can see. ppid lets us trace ancestry so we
+    // only sweep genuine orphans (see below), never a live tree.
+    execFile('/bin/ps', ['-A', '-o', 'pid=,ppid=,command='], (err, stdout) => {
       if (err) {
         log(window, 'meta', `[unclaw] stale-process sweep skipped: ps failed (${err.message})`);
         resolve('');
@@ -895,24 +901,75 @@ async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
     /\bwilbur\b/,
     new RegExp(`${ueAppName}\\.app`),
   ];
-  const stale: Array<{ pid: number; cmd: string }> = [];
 
+  // Full process table so we can walk ancestry.
+  const procs = new Map<number, { ppid: number; cmd: string }>();
   for (const line of psOutput.split('\n')) {
-    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
     if (!m) continue;
-    const pid = parseInt(m[1], 10);
-    const cmd = m[2];
+    procs.set(parseInt(m[1], 10), { ppid: parseInt(m[2], 10), cmd: m[3] });
+  }
+
+  // An Electron MAIN process (not a --type= helper) whose binary is dev-Electron
+  // or the packaged Unclaw shell (NOT "Unclaw Character", which is UE).
+  const isElectronMain = (cmd: string) =>
+    !cmd.includes('--type=') &&
+    (/Electron\.app\/Contents\/MacOS\/Electron(?:\s|$)/.test(cmd) ||
+      /\.app\/Contents\/MacOS\/Unclaw(?:\s|$)/.test(cmd));
+  // A login/interactive shell or terminal (leading-dash argv, `login`, Terminal/
+  // iTerm). Marks a process a human is running by hand (e.g. a dev's soul).
+  const isLoginShell = (cmd: string) =>
+    /(?:^|\/)-\w*sh(?:\s|$)/.test(cmd) ||
+    /(?:^|\/)login(?:\s|$)/.test(cmd) ||
+    /\/(?:Terminal|iTerm2?)\b/.test(cmd);
+
+  // Is there a LIVE foreign Unclaw instance? Its UE child is detached
+  // (start_new_session -> ppid 1), so it's indistinguishable from a dead-session
+  // orphan by metadata alone. When a sibling is live we must not sweep UE at all
+  // or we'd blank a healthy parallel instance's stream (the documented "dev
+  // launch kills the packaged app" hazard).
+  let foreignInstanceLive = false;
+  for (const [pid, { cmd }] of procs) {
+    if (pid !== myPid && isElectronMain(cmd)) { foreignInstanceLive = true; break; }
+  }
+
+  // Walk a candidate's ancestry to its root. A tree rooted at launchd (or a
+  // vanished parent) with no live Electron-main / login-shell ancestor is a
+  // genuine orphan from a dead session -> safe to sweep. A tree that passes
+  // through a live foreign Electron main or a terminal belongs to something
+  // still running -> leave it alone. (Orphaned trees keep their INTERNAL parent
+  // links alive, so "immediate parent alive" is not enough; we must reach the
+  // root.)
+  const isOrphanTree = (startPid: number): boolean => {
+    let cur = startPid;
+    const seen = new Set<number>();
+    while (true) {
+      const info = procs.get(cur);
+      if (!info) return true;              // ancestor gone -> reparented -> orphan
+      if (cur !== startPid) {
+        if (cur === myPid) return false;   // descends from THIS Electron
+        if (isElectronMain(info.cmd)) return false; // live foreign instance owns it
+        if (isLoginShell(info.cmd)) return false;   // a terminal owns it
+      }
+      if (info.ppid <= 1) return true;     // reached launchd, no live owner found
+      if (seen.has(cur)) return true;      // cycle guard
+      seen.add(cur);
+      cur = info.ppid;
+    }
+  };
+
+  const stale: Array<{ pid: number; cmd: string }> = [];
+  for (const [pid, { cmd }] of procs) {
     // Never touch our own process tree (Electron main, helper procs,
     // current soul if it's already mid-spawn).
     if (pid === myPid) continue;
     if (soulProc && pid === soulProc.pid) continue;
     if (!ourPatterns.some((re) => re.test(cmd))) continue;
-    // Filter out the .app path matching our DMG-bundled UE, we only
-    // care about orphans that haven't been reaped. A still-living
-    // Electron-main owner means the process belongs to a parallel
-    // Unclaw instance and we shouldn't touch it. Conservative: only
-    // count it as orphan if we can confirm the parent PID is launchd
-    // (PID 1) or otherwise dead.
+    // A live sibling's detached UE can't be told apart from an orphan, so skip
+    // ALL UE matches while any foreign instance is up.
+    if (foreignInstanceLive && new RegExp(`${ueAppName}\\.app`).test(cmd)) continue;
+    // Only sweep genuine orphans; spare anything owned by a live tree.
+    if (!isOrphanTree(pid)) continue;
     stale.push({ pid, cmd: cmd.slice(0, 120) });
   }
 
