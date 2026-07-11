@@ -18,7 +18,7 @@ import path from 'path';
 import fs from 'fs';
 import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
-import { startSoul, stopSoul, restartSoul, getSoulSnapshot, getSoulPorts } from './soulSupervisor';
+import { startSoul, stopSoul, restartSoul, getSoulSnapshot, getSoulPorts, writeSoulKeysBridge, clearSoulKeysBridge } from './soulSupervisor';
 import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent, installedPakVersions } from './setupCoordinator';
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
@@ -1102,6 +1102,9 @@ ipcMain.handle('apiKeys:set', (_event, payload: string) => {
     } else {
       fs.writeFileSync(apiKeysFilePath(), payload, 'utf-8');
     }
+    // Refresh the plaintext bridge so a running soul picks up new keys on its
+    // next mtime-check (no Keychain prompt, no soul restart needed).
+    writeSoulKeysBridge();
     return true;
   } catch (err) {
     console.warn('[apiKeys] set failed', err);
@@ -1113,6 +1116,7 @@ ipcMain.handle('apiKeys:clear', () => {
   const p = apiKeysFilePath();
   try {
     if (fs.existsSync(p)) fs.unlinkSync(p);
+    clearSoulKeysBridge();
     return true;
   } catch (err) {
     console.warn('[apiKeys] clear failed', err);
@@ -1380,6 +1384,8 @@ app.on('will-quit', () => {
   // would kill the PRIMARY instance's live UE + MCP children out from under
   // a perfectly healthy session. Only the lock owner tears down the stack.
   if (!gotSingleInstanceLock) return;
+  // Wipe the decrypted BYOK bridge so plaintext keys never outlive the app.
+  clearSoulKeysBridge();
   // SIGTERM the soul subprocess. Soul's shutdown hooks (UE SIGTERM,
   // MCP subprocess teardown) run cleanly. No-op if soul was attached
   // externally (the user owns that process and we don't kill it).

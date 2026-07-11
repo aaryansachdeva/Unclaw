@@ -23,7 +23,7 @@
 // lives at `../soul/run_soul.sh` relative to that. In packaged builds
 // (later) we'll bundle a wrapper; for now this is dev-only.
 
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, safeStorage } from 'electron';
 import { spawn, ChildProcess, execFile } from 'child_process';
 import path from 'path';
 import http from 'http';
@@ -340,6 +340,69 @@ export function getRuntimeDir(): string {
   return path.join(app.getPath('userData'), 'runtime');
 }
 
+// ---------------------------------------------------------------------------
+// BYOK plaintext bridge for soul.
+//
+// soul (a separate Python binary) cannot read the safeStorage master key from
+// the macOS login Keychain: the item's ACL trusts only the Electron app that
+// created it, so soul's `security find-generic-password` shell-out triggers an
+// interactive "allow access" prompt that a headless process can never answer
+// (it just times out after 30s). This Electron process IS the trusted app, so
+// `safeStorage.decryptString()` here succeeds with no prompt. We decrypt the
+// user's apiKeys.bin and hand soul the plaintext through a 0600 file it reads
+// directly (env SOUL_BYOK_KEYS_FILE), bypassing the Keychain entirely.
+//
+// The file holds unencrypted API keys, so: mode 0600 (owner-only), it lives in
+// userData (never cloud-synced, keys stay device-local), and it's unlinked on
+// clear + on app quit so plaintext never outlives the running app.
+const API_KEYS_BIN = 'apiKeys.bin';
+const SOUL_KEYS_BRIDGE = 'apiKeys.plain.json';
+
+export function soulKeysBridgePath(): string {
+  return path.join(app.getPath('userData'), SOUL_KEYS_BRIDGE);
+}
+
+/** Decrypt apiKeys.bin and (re)write the plaintext bridge soul reads. Removes
+ *  the bridge when there are no keys or decryption fails, so soul never sees a
+ *  stale profile. Safe to call repeatedly (spawn, key-save). Never throws. */
+export function writeSoulKeysBridge(): void {
+  const fs = require('fs') as typeof import('fs');
+  const bridge = soulKeysBridgePath();
+  const bin = path.join(app.getPath('userData'), API_KEYS_BIN);
+  try {
+    if (!fs.existsSync(bin)) {
+      clearSoulKeysBridge();
+      return;
+    }
+    let plaintext: string;
+    if (safeStorage.isEncryptionAvailable()) {
+      plaintext = safeStorage.decryptString(fs.readFileSync(bin));
+    } else {
+      // No OS crypto (rare) , apiKeys.bin was written as raw utf-8.
+      plaintext = fs.readFileSync(bin, 'utf-8');
+    }
+    fs.writeFileSync(bridge, plaintext, { mode: 0o600 });
+    // writeFileSync only applies mode on creation; force it if the file
+    // already existed with looser perms.
+    try { fs.chmodSync(bridge, 0o600); } catch { /* best effort */ }
+  } catch (err) {
+    console.warn('[soul] keys bridge write failed', err);
+    clearSoulKeysBridge();
+  }
+}
+
+/** Remove the plaintext bridge. Called on apiKeys:clear and app quit so
+ *  unencrypted keys never persist past the running app. Never throws. */
+export function clearSoulKeysBridge(): void {
+  const fs = require('fs') as typeof import('fs');
+  try {
+    const bridge = soulKeysBridgePath();
+    if (fs.existsSync(bridge)) fs.unlinkSync(bridge);
+  } catch (err) {
+    console.warn('[soul] keys bridge clear failed', err);
+  }
+}
+
 function isPackagedSetupComplete(): boolean {
   if (!app.isPackaged) return true; // dev runs always have a working repo
   try {
@@ -479,6 +542,14 @@ function spawnSoul(window: BrowserWindow): boolean {
   childEnv.SOUL_BYOK_KEYCHAIN_SERVICE = `${keychainAppName} Safe Storage`;
   childEnv.SOUL_BYOK_KEYCHAIN_ACCOUNT = `${keychainAppName} Key`;
   childEnv.SOUL_BYOK_KEYRING_APP = keychainAppName;
+
+  // Primary BYOK path on macOS: hand soul the already-decrypted keys via a
+  // 0600 plaintext bridge, because soul's own Keychain read triggers an
+  // un-answerable GUI prompt (see writeSoulKeysBridge). Refresh it from the
+  // latest apiKeys.bin right before spawn so a booting soul reads current
+  // keys. byok.py prefers SOUL_BYOK_KEYS_FILE over its Keychain fallback.
+  writeSoulKeysBridge();
+  childEnv.SOUL_BYOK_KEYS_FILE = soulKeysBridgePath();
 
   // Packaged-install env. The setup wizard provisions
   //   <userData>/runtime/{python-env, assets, unreal, data}/
