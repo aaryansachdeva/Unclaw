@@ -406,6 +406,13 @@ export async function reconcileForAccount(
   localOwnerId: string | null,
 ): Promise<ReconcileResult> {
   const sameOwner = localOwnerId === accountId;
+  // ownerChanged (which gates the caller's IRREVERSIBLE wipe of the prior
+  // owner's BYOK keys) must fire ONLY when we can POSITIVELY prove a different
+  // account held the machine , i.e. we have a non-null prior owner id that
+  // differs. A null/absent marker means "unknown", NOT "different": treating it
+  // as different is exactly the bug that nuked a user's own keys after their
+  // localStorage marker was lost. When in doubt, adopt, never scrub.
+  const knownDifferentOwner = localOwnerId !== null && localOwnerId !== accountId;
   let cloud: CloudSettingsRecord | null;
   try {
     cloud = await fetchCloudSettings(token);
@@ -425,11 +432,14 @@ export async function reconcileForAccount(
     // (it may be a different account's stale profile).
     try { await saveSettings(cloud.settings); }
     catch (err) { console.warn('[settings] mirror cloud→soul failed', err); }
-    return { profile: cloud.settings, ownerChanged: !sameOwner };
+    return { profile: cloud.settings, ownerChanged: knownDifferentOwner };
   }
 
   // Cloud has nothing for this account.
-  if (sameOwner) {
+  if (!knownDifferentOwner) {
+    // Same account, OR an unknown prior owner (null marker). Either way we can't
+    // prove a different owner, so adopt the machine's local state rather than
+    // scrubbing it (scrubbing on a guess would destroy this user's own keys).
     const local = await fetchSettings().catch(() => null);
     if (local) {
       // This account's own local-only settings (e.g. wizard finished offline).
@@ -440,8 +450,9 @@ export async function reconcileForAccount(
     return { profile: null, ownerChanged: false };
   }
 
-  // Different account / guest machine + no cloud profile: do not inherit the
-  // stale local profile — wipe it and start clean for this account.
+  // A KNOWN different account previously owned this machine + no cloud profile:
+  // do not inherit the prior owner's stale local profile — wipe it and start
+  // clean for this account.
   try { await deleteSettings(); }
   catch (err) { console.warn('[settings] wipe stale local profile failed', err); }
   return { profile: null, ownerChanged: true };

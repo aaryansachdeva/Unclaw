@@ -2190,7 +2190,9 @@ function AppMain() {
     } catch (err) {
       console.warn('[reset] some steps failed', err);
     }
-    // Unclaim the machine so the next sign-in starts from a clean owner.
+    // Unclaim the machine so the next sign-in starts from a clean owner. Clear
+    // BOTH the durable main-process marker and the localStorage mirror.
+    try { await window.electronAPI?.clearLocalOwner?.(); } catch { /* ignore */ }
     try { localStorage.removeItem(LOCAL_ACCOUNT_KEY); } catch { /* ignore */ }
     clearLocalChatHistory();
     resetStack();
@@ -2519,7 +2521,15 @@ function AppMain() {
     let cancelled = false;
     void (async () => {
       try {
-        const localOwner = (() => {
+        // Prefer the durable main-process marker (survives a localStorage wipe
+        // that would otherwise look like an owner change and nuke the user's
+        // BYOK keys); fall back to the legacy localStorage marker so existing
+        // installs migrate cleanly on their first post-update sign-in.
+        const localOwner = await (async () => {
+          try {
+            const durable = await window.electronAPI?.getLocalOwner?.();
+            if (durable) return durable;
+          } catch { /* fall through to localStorage */ }
           try { return localStorage.getItem(LOCAL_ACCOUNT_KEY); } catch { return null; }
         })();
         const { profile: p, ownerChanged, cloudUnavailable } = await reconcileForAccount(accountId, authToken, localOwner);
@@ -2570,6 +2580,10 @@ function AppMain() {
           resetStack();
         }
 
+        // Record ownership in BOTH the durable main-process store (authoritative)
+        // and localStorage (legacy mirror) so the marker can't desync from the
+        // keys it guards.
+        try { await window.electronAPI?.setLocalOwner?.(accountId); } catch { /* ignore */ }
         try { localStorage.setItem(LOCAL_ACCOUNT_KEY, accountId); } catch { /* ignore */ }
 
         // Seed the cloud with this account's local roster when the cloud

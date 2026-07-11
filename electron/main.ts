@@ -1124,6 +1124,53 @@ ipcMain.handle('apiKeys:clear', () => {
   }
 });
 
+// Durable "which account owns this machine's local state" marker. This used to
+// live only in the renderer's localStorage, but that can be cleared or
+// corrupted independently of the API keys it guards , and when the marker
+// vanished the reconciler mistook the SAME user for a new owner and WIPED their
+// unrecoverable BYOK keys. Persisting it here (a userData file, colocated with
+// apiKeys.bin) makes the marker share fate with the keys: if the keys survive,
+// the owner id survives, so a lost localStorage entry can never trigger a wipe.
+// The owner id is not a secret, so it's stored in plaintext.
+const LOCAL_OWNER_FILE = 'localOwner.txt';
+function localOwnerFilePath(): string {
+  return path.join(app.getPath('userData'), LOCAL_OWNER_FILE);
+}
+
+ipcMain.handle('localOwner:get', () => {
+  try {
+    const p = localOwnerFilePath();
+    if (!fs.existsSync(p)) return null;
+    const v = fs.readFileSync(p, 'utf-8').trim();
+    return v || null;
+  } catch (err) {
+    console.warn('[localOwner] get failed', err);
+    return null;
+  }
+});
+
+ipcMain.handle('localOwner:set', (_event, ownerId: string) => {
+  if (typeof ownerId !== 'string' || !ownerId) return false;
+  try {
+    fs.writeFileSync(localOwnerFilePath(), ownerId, 'utf-8');
+    return true;
+  } catch (err) {
+    console.warn('[localOwner] set failed', err);
+    return false;
+  }
+});
+
+ipcMain.handle('localOwner:clear', () => {
+  try {
+    const p = localOwnerFilePath();
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+    return true;
+  } catch (err) {
+    console.warn('[localOwner] clear failed', err);
+    return false;
+  }
+});
+
 // IPC: renderer can also kick off a screenshot manually (e.g. a button).
 ipcMain.on('screenshot:trigger', () => {
   void triggerScreenshot();

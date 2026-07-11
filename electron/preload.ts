@@ -110,6 +110,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('apiKeys:set', payload),
   apiKeysClear: (): Promise<boolean> =>
     ipcRenderer.invoke('apiKeys:clear'),
+  getLocalOwner: (): Promise<string | null> =>
+    ipcRenderer.invoke('localOwner:get'),
+  setLocalOwner: (ownerId: string): Promise<boolean> =>
+    ipcRenderer.invoke('localOwner:set', ownerId),
+  clearLocalOwner: (): Promise<boolean> =>
+    ipcRenderer.invoke('localOwner:clear'),
 
   // ----------------------------------------------------------------------
   // Soul lifecycle, main spawns (or attaches to) soul on app start and

@@ -68,6 +68,13 @@ interface ElectronAPI {
   /** Wipe the persisted blob. */
   apiKeysClear: () => Promise<boolean>;
 
+  /** Durable "which account owns this machine's local state" marker, persisted
+   *  in userData next to the API keys so it can't desync from them the way the
+   *  old localStorage-only marker could (a lost marker used to wipe keys). */
+  getLocalOwner: () => Promise<string | null>;
+  setLocalOwner: (ownerId: string) => Promise<boolean>;
+  clearLocalOwner: () => Promise<boolean>;
+
   // Soul subprocess lifecycle, main spawns (or attaches to) soul on
   // app start. The LoadingScreen subscribes to `onLog` to render boot
   // progress; the App subscribes to `onReady` to dismiss the loader
