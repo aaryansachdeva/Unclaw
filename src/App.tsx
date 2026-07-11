@@ -388,17 +388,24 @@ function AppMain() {
   // arrives. Doesn't tear down the pixel-streaming hook (the user-
   // visible reconnect is owned by usePixelStreaming + UE itself); just
   // keeps the cache fresh so service fetches resolve correctly.
+  // The signalling WS URL drives usePixelStreaming's connection. Hold it in
+  // state so a soul respawn on a DIFFERENT port re-renders AppMain with the new
+  // URL, which re-runs the PS effect against the live port. Without this the URL
+  // was frozen at first render and ps.reconnect() redialled the dead old port
+  // forever after any respawn (dynamic ports change every boot).
+  const [sigUrl, setSigUrl] = useState<string>(() => signalingUrl());
   useEffect(() => {
     return subscribeSoulPorts(() => {
-      // Cache mutation is handled inside subscribeSoulPorts; we just
-      // need to subscribe so the side effect runs. No state update
-      // needed here, getSoulBaseUrl() reads the fresh cache on the
-      // next fetch automatically.
+      // A fresh [ports] banner landed (soul respawn). subscribeSoulPorts already
+      // refreshed the soulBase cache; push the new signalling URL into state so
+      // the pixel-streaming hook redials the LIVE port. Same string => React
+      // bails the re-render, so an unchanged-port banner is a no-op.
+      setSigUrl(signalingUrl());
     });
   }, []);
 
   const { videoParentRef, connectionState, pixelStreaming, sendAndAwaitAck } = usePixelStreaming({
-    signalingUrl: signalingUrl(),
+    signalingUrl: sigUrl,
   });
 
   // Publishes the streamed <video>'s screen geometry to UE so the
