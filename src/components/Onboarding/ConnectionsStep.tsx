@@ -16,7 +16,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Eye, EyeOff, Search, ExternalLink, Zap,
-  AlertCircle, CheckCircle2, ShieldCheck, Loader2, Download,
+  AlertCircle, CheckCircle2, Loader2, Download,
 } from 'lucide-react';
 import { StepHeader } from './StepHeader';
 import { Dropdown } from './Dropdown';
@@ -141,18 +141,12 @@ export function ConnectionsStep({
   const [ollamaModels, setOllamaModels] = useState<SoulProviderModel[] | null>(null);
   const [ollamaLoading, setOllamaLoading] = useState(false);
 
-  // "Check keys" state machine. `result` is the latest server response;
-  // `state` distinguishes idle (button shown) / checking (spinner) /
-  // done (per-key icons rendered). When the user edits any key field,
-  // result gets cleared and the Wizard's `validated` flips back to
-  // false, they have to re-check before they can finish.
-  const [check, setCheck] = useState<{
-    state: 'idle' | 'checking' | 'done';
-    result: KeyValidationResult | null;
-    /** Surfaces transport-level failures (soul offline, etc.) above
-     *  the per-key results. */
-    networkError: string | null;
-  }>({ state: 'idle', result: null, networkError: null });
+  // Transport-level probe failure (soul offline, etc.), surfaced in the
+  // status rail. Distinct from a provider rejecting a key.
+  const [probeError, setProbeError] = useState<string | null>(null);
+  // Fire the "keys look wrong" voice line at most once per visit; the
+  // passive probe would otherwise nag on every keystroke of a bad key.
+  const failLatchRef = useRef(false);
 
   // Live model lists per provider, populated from soul's /validate_keys
   // probe (which now returns the provider's /v1/models output). Lets the
@@ -194,85 +188,64 @@ export function ConnectionsStep({
 
   const provider = getProvider(values.llm_provider);
 
-  // Debounced live key-probe, same pattern as SettingsPanel. Fires
-  // /validate_keys 800 ms after the user stops typing the key, so the
-  // model dropdown re-populates with the live list without needing the
-  // explicit "Check keys" button. Errors are swallowed (the button still
-  // surfaces them on demand).
+  // THE probe. Verification here is ambient: there is no Verify button.
+  // Any setup-relevant edit schedules one debounced /validate_keys call
+  // (the endpoint probes every scope in one round trip anyway), and the
+  // status rail + the Wizard's finish gate derive from the result. This
+  // replaced two scoped auto-probes plus two per-page "Verify" buttons
+  // that all hit the same endpoint; the user was pressing a button to
+  // learn something the app already knew.
   //
-  // Claude Code is keyless (subscription auth via the local CLI's stored
-  // OAuth token), probe on provider selection alone, no key needed.
-  useEffect(() => {
-    const pid = values.llm_provider;
-    if (!pid || pid === 'ollama') return;
-    const key = (values.llm_api_key || '').trim();
-    // Keyless CLI providers (claude-code, gemini-cli, codex) probe on
-    // selection alone, the rest need a key in hand first.
-    if (!KEYLESS_CLI_PROVIDERS.has(pid) && !key) return;
-    if (liveModelsByProvider[pid]?.length) return;
-    const t = setTimeout(() => {
-      setIsAutoProbing(true);
-      void validateKeys(values).then((res) => {
-        mergeThinkingCaps(res);
-        if (res.llm.ok && res.llm.models && res.llm.models.length) {
-          setLiveModelsByProvider((prev) => ({
-            ...prev,
-            [pid]: res.llm.models,
-          }));
-        }
-        // Always update liveValidation so the CLI status card sees the
-        // latest probe result (install / setup-token / ready) even when
-        // no models came back.
-        setLiveValidation((prev) => ({
-          ...(prev ?? { ok: false } as KeyValidationResult),
-          llm: res.llm,
-          ...(res.agentic ? { agentic: res.agentic } : {}),
-        } as KeyValidationResult));
-      }).catch(() => { /* surfaced on Check */ })
-        .finally(() => setIsAutoProbing(false));
-    }, 800);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [values.llm_provider, values.llm_api_key]);
+  // Keyless CLI providers (claude-code, gemini-cli, codex) probe on
+  // selection alone; keyed providers wait for a key; Ollama is probed
+  // separately via fetchOllamaModels (a local daemon scan, not a key).
+  const llmConfigured =
+    !!values.llm_provider && values.llm_provider !== 'ollama'
+    && (KEYLESS_CLI_PROVIDERS.has(values.llm_provider) || !!(values.llm_api_key || '').trim());
+  const agenticConfigured =
+    values.agentic_enabled
+    && !!values.agentic_provider && values.agentic_provider !== 'ollama'
+    && (KEYLESS_CLI_PROVIDERS.has(values.agentic_provider) || !!(values.agentic_api_key || '').trim());
+  const voiceConfigured =
+    values.tts_provider === 'elevenlabs'
+      ? !!(values.elevenlabs_api_key || '').trim()
+      : !!values.tts_provider;
+  const shouldProbe =
+    (showLlm && (llmConfigured || agenticConfigured)) || (showVoice && voiceConfigured);
 
-  // Agentic-side auto-probe. Mirror of the chat-side probe above. Fires
-  // validateKeys when the user picks an agentic provider that needs
-  // validation (CLI providers, or any non-Ollama backend with a key
-  // entered). Without this, the agentic CliProviderStatusCard would sit
-  // at "probing" forever because nothing else fires validateKeys for it.
   useEffect(() => {
-    if (!values.agentic_enabled) return;
-    const aprov = values.agentic_provider;
-    if (!aprov || aprov === 'ollama') return;
-    const akey = (values.agentic_api_key || '').trim();
-    if (!KEYLESS_CLI_PROVIDERS.has(aprov) && !akey) return;
-    if (liveValidation?.agentic?.ok) return;
+    if (!shouldProbe) return;
     const t = setTimeout(() => {
       setIsAutoProbing(true);
       void validateKeys(values).then((res) => {
         mergeThinkingCaps(res);
-        // When the agentic response carries a model list (CLI providers
-        // return their model catalog here), stash it under the agentic
-        // provider's slot so the Agentic Model dropdown populates from
-        // the live source.
+        setProbeError(null);
+        // Live model lists for whichever providers answered with one.
+        const pid = values.llm_provider;
+        if (pid && res.llm.ok && res.llm.models?.length) {
+          setLiveModelsByProvider((prev) => ({ ...prev, [pid]: res.llm.models }));
+        }
+        const aprov = values.agentic_provider;
         const agenticModels = (res.agentic as { models?: string[] } | undefined)?.models;
         if (aprov && res.agentic?.ok && agenticModels?.length) {
-          setLiveModelsByProvider((prev) => ({
-            ...prev,
-            [aprov]: agenticModels,
-          }));
+          setLiveModelsByProvider((prev) => ({ ...prev, [aprov]: agenticModels }));
         }
-        setLiveValidation((prev) => ({
-          ...(prev ?? { ok: false } as KeyValidationResult),
-          ...(res.llm ? { llm: res.llm } : {}),
-          ...(res.agentic ? { agentic: res.agentic } : {}),
-        } as KeyValidationResult));
-      }).catch(() => { /* surfaced on Check */ })
-        .finally(() => setIsAutoProbing(false));
-    }, 600);
+        setLiveValidation(res);
+      }).catch((err) => {
+        setProbeError(err instanceof Error ? err.message : 'Could not reach the local engine');
+      }).finally(() => setIsAutoProbing(false));
+    }, 700);
     return () => clearTimeout(t);
+    // The union of setup-relevant fields for both pages; on a given page
+    // the other page's fields never change, so no spurious fires.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [values.agentic_enabled, values.agentic_provider, values.agentic_api_key]);
+  }, [
+    values.llm_provider, values.llm_api_key,
+    values.agentic_enabled, values.agentic_provider, values.agentic_api_key,
+    values.grounding_search_enabled, values.gemini_search_api_key,
+    values.tts_provider, values.elevenlabs_api_key,
+    values.kokoro_mode, values.kokoro_endpoint,
+  ]);
 
   // Fetch Ollama models when the user picks the Ollama provider. If
   // the first attempt returns nothing (race with soul's reachable
@@ -448,21 +421,11 @@ export function ConnectionsStep({
     return mode === 'llm' ? isLlmField : !isLlmField;
   });
 
-  // Reset check-result + invalidate the Wizard's "validated" flag any
-  // time a setup-relevant field changes. Without this, the user could
-  // pass Verify, then change a key, then Finish with stale validation.
-  // Each page invalidates only when ITS OWN scope's fields change , 
-  // editing the voice provider doesn't invalidate the LLM verify.
-  useEffect(() => {
-    setCheck((prev) =>
-      prev.state === 'idle' && prev.result === null
-        ? prev
-        : { state: 'idle', result: null, networkError: null });
-    if (validated) onValidatedChange(false);
-    // Watch only the fields THIS scope cares about. The full union
-    // is still listed for `mode === 'all'` (legacy single-page).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, mode === 'llm' ? [
+  // Any setup-relevant edit makes the last probe stale: drop it (the rail
+  // falls back to "checking") so a half-typed key can never ride a green
+  // state into Finish during the debounce window. The probe effect above
+  // repopulates within ~a second.
+  const scopeFields = mode === 'llm' ? [
     values.llm_provider,
     values.llm_model,
     values.llm_api_key,
@@ -493,34 +456,35 @@ export function ConnectionsStep({
     values.agentic_api_key,
     values.grounding_search_enabled,
     values.gemini_search_api_key,
-  ]);
+  ];
+  useEffect(() => {
+    setLiveValidation(null);
+    setProbeError(null);
+    if (validated) onValidatedChange(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, scopeFields);
 
-  const handleCheckKeys = async () => {
-    setCheck({ state: 'checking', result: null, networkError: null });
-    try {
-      const result = await validateKeys(values);
-      mergeThinkingCaps(result);
-      setCheck({ state: 'done', result, networkError: null });
-      // Compute scope-relevant ok. The /validate_keys call always
-      // probes everything (cheap; one round trip), but each page's
-      // pass criterion is local: LLM page passes when LLM probes
-      // (and agentic, when enabled) succeed; voice page passes
-      // when TTS readiness succeeds.
-      const llmOk = result.llm.ok
-        && (!values.agentic_enabled || (result.agentic?.ok ?? true))
-        && (!values.grounding_search_enabled || (result.gemini_search?.ok ?? true));
-      const voiceOk = result.tts?.ok ?? result.elevenlabs?.ok ?? false;
-      const scopeOk = mode === 'llm' ? llmOk
-                    : mode === 'voice' ? voiceOk
-                    : (llmOk && voiceOk);
-      onValidatedChange(scopeOk);
-      if (!scopeOk) onCheckFailed?.();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'check failed';
-      setCheck({ state: 'done', result: null, networkError: message });
-      onValidatedChange(false);
+  // The finish gate, derived continuously from the latest probe. Same
+  // pass criteria the old Verify button used; the only change is WHO
+  // presses the button (nobody).
+  const llmOk = !!liveValidation?.llm?.ok
+    && (!values.agentic_enabled || (liveValidation?.agentic?.ok ?? false))
+    && (!values.grounding_search_enabled || (liveValidation?.gemini_search?.ok ?? false));
+  const voiceOk = liveValidation?.tts?.ok ?? liveValidation?.elevenlabs?.ok ?? false;
+  const scopeOk = mode === 'llm' ? llmOk
+                : mode === 'voice' ? voiceOk
+                : (llmOk && voiceOk);
+  useEffect(() => {
+    if (scopeOk !== validated) onValidatedChange(scopeOk);
+    // A definitive failure (probe answered, scope fully configured, not
+    // ok) gets the spoken nudge once per visit.
+    if (!scopeOk && liveValidation && shouldProbe && !failLatchRef.current) {
+      failLatchRef.current = true;
+      onCheckFailed?.();
     }
-  };
+    if (scopeOk) failLatchRef.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeOk, liveValidation]);
 
   // Header copy keyed off mode, same panel reused on both wizard
   // pages, with whatever's relevant to that page.
@@ -784,14 +748,17 @@ export function ConnectionsStep({
             </span>
           </div>
         ) : (
-          <CheckKeysBar
-            check={check}
-            providerLabel={provider?.label ?? 'LLM'}
-            onCheck={handleCheckKeys}
+          <StatusRail
             scope={mode}
+            probing={isAutoProbing}
+            probeError={probeError}
+            result={liveValidation}
+            providerLabel={provider?.label ?? 'Chat'}
             agenticEnabled={values.agentic_enabled}
             agenticProvider={values.agentic_provider}
             groundingEnabled={values.grounding_search_enabled}
+            ttsProvider={values.tts_provider}
+            anythingConfigured={shouldProbe}
           />
         ))}
       </div>
@@ -800,293 +767,141 @@ export function ConnectionsStep({
 }
 
 // ---------------------------------------------------------------------
-// Check-keys bar, orchestrates the three render states (idle / checking
-// / done) for the validation block. Pulled out as a sub-component so the
-// main step body stays focused on the form fields.
+// Status rail. The passive replacement for the old per-page "Verify"
+// buttons: one quiet row per configured connection, each going green as
+// the background probe confirms it. Nothing here is clickable because
+// nothing here needs the user; the probe runs itself on every edit.
 // ---------------------------------------------------------------------
 
-function CheckKeysBar({
-  check,
-  providerLabel,
-  onCheck,
-  scope = 'all',
-  agenticEnabled = false,
-  agenticProvider = 'openai',
-  groundingEnabled = false,
+type RailState = 'checking' | 'ok' | 'fail' | 'idle';
+
+function StatusRail({
+  scope, probing, probeError, result, providerLabel,
+  agenticEnabled, agenticProvider, groundingEnabled, ttsProvider,
+  anythingConfigured,
 }: {
-  check: {
-    state: 'idle' | 'checking' | 'done';
-    result: KeyValidationResult | null;
-    networkError: string | null;
-  };
+  scope: 'llm' | 'voice' | 'all';
+  probing: boolean;
+  probeError: string | null;
+  result: KeyValidationResult | null;
   providerLabel: string;
-  onCheck: () => void | Promise<void>;
-  /** Which result rows to render. `'llm'` shows the LLM provider
-   *  (and Agentic when enabled); `'voice'` shows the TTS row;
-   *  `'all'` shows both. Pass-through from ConnectionsStep's mode. */
-  scope?: 'llm' | 'voice' | 'all';
-  /** When true AND scope includes LLM, render an Agentic row from
-   *  result.agentic. When the soul-side probe lands, this row will
-   *  show the backend's check outcome. */
-  agenticEnabled?: boolean;
-  /** Drives the Agentic row label, was hardcoded "Agentic (OpenAI)"
-   *  even when the user picked Local Ollama. */
-  agenticProvider?: AgenticProvider;
-  /** When true AND scope includes LLM, render a Web-search (Gemini)
-   *  row from result.gemini_search. */
-  groundingEnabled?: boolean;
+  agenticEnabled: boolean;
+  agenticProvider: AgenticProvider;
+  groundingEnabled: boolean;
+  ttsProvider?: string;
+  anythingConfigured: boolean;
 }) {
-  const checking = check.state === 'checking';
-  const result = check.result;
-  // "Pending" = the user hasn't done the gating action yet. Drives
-  // the panel's accent halo + the button's white-primary CTA styling
-  // so this row reads as "you need to do this next" instead of as a
-  // quiet utility bar tucked under the form.
-  const pending = check.state === 'idle' && !result;
+  type Row = { label: string; state: RailState; detail?: string };
+  const rowFor = (
+    label: string,
+    outcome: { ok: boolean; error?: string } | undefined | null,
+  ): Row => {
+    if (outcome) {
+      return outcome.ok
+        ? { label, state: 'ok' }
+        : { label, state: 'fail', detail: outcome.error ?? 'not working yet' };
+    }
+    return probing
+      ? { label, state: 'checking' }
+      : { label, state: 'idle' };
+  };
+
+  const rows: Row[] = [];
+  if (scope !== 'voice') {
+    rows.push(rowFor(providerLabel, result?.llm));
+    if (agenticEnabled) {
+      rows.push(rowFor(
+        agenticProvider === 'ollama' ? 'Agentic (Ollama)' : 'Agentic',
+        result?.agentic,
+      ));
+    }
+    if (groundingEnabled) {
+      rows.push(rowFor('Web search (Gemini)', result?.gemini_search));
+    }
+  }
+  if (scope !== 'llm') {
+    const voiceLabel =
+      ttsProvider === 'kokoro' ? 'Kokoro'
+      : ttsProvider === 'supertonic' ? 'Supertonic'
+      : ttsProvider === 'qwen3' ? 'Qwen3'
+      : 'ElevenLabs';
+    rows.push(rowFor(voiceLabel, result?.tts ?? result?.elevenlabs));
+  }
+
+  const allOk = rows.length > 0 && rows.every((r) => r.state === 'ok');
+  const anyFail = !!probeError || rows.some((r) => r.state === 'fail');
 
   return (
     <div
+      role="status"
+      aria-live="polite"
       style={{
         display: 'flex',
         flexDirection: 'column',
-        gap: 8,
-        padding: '14px',
-        background: result?.ok
+        gap: 2,
+        padding: '10px 14px',
+        background: allOk
           ? 'rgba(96, 178, 96, 0.06)'
-          : pending
-            ? 'rgba(196, 68, 68, 0.06)'
-            : 'rgba(255, 255, 255, 0.025)',
-        border: result?.ok
-          ? '1px solid rgba(96, 178, 96, 0.32)'
-          : pending
-            ? '1px solid var(--accent-strong)'
+          : 'rgba(255, 255, 255, 0.025)',
+        border: allOk
+          ? '1px solid rgba(96, 178, 96, 0.30)'
+          : anyFail
+            ? '1px solid rgba(196, 68, 68, 0.30)'
             : '1px solid var(--glass-border)',
         borderRadius: 10,
-        // Soft accent glow in pending state, pulls the eye to the
-        // gating action without going full-blown attention-grabbing
-        // (no animation, no flashing colors). Disappears once the
-        // user has either verified or failed a check.
-        boxShadow: pending
-          ? '0 0 18px -6px rgba(196, 68, 68, 0.45)'
-          : 'none',
-        transition: 'background 0.18s var(--ease-out-quart), border-color 0.18s var(--ease-out-quart), box-shadow 0.18s var(--ease-out-quart)',
+        transition: 'background 0.18s var(--ease-out-quart), border-color 0.18s var(--ease-out-quart)',
       }}
     >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 12,
-        }}
-      >
-        <span
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            fontSize: 13,
-            color: 'var(--text-primary)',
-            fontWeight: 500,
-          }}
-        >
-          <ShieldCheck
-            size={15}
-            strokeWidth={2}
-            aria-hidden
-            color={
-              result?.ok
-                ? '#7fc97f'
-                : pending
-                  ? 'var(--accent)'
-                  : 'var(--text-secondary)'
-            }
-          />
-          {result?.ok
-            ? 'Verified'
-            : check.state === 'done'
-              ? 'Couldn’t verify all'
-              : 'Verify to finish'}
-        </span>
-        <button
-          type="button"
-          onClick={() => { void onCheck(); }}
-          disabled={checking}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 6,
-            // Two presentations:
-            //   * Pending → white primary CTA matching the Finish
-            //     button's weight, with an accent shadow so it reads
-            //     as "do this next, then you can finish".
-            //   * Done (re-check) → quieter glass pill, since the
-            //     gating action has already happened once.
-            padding: pending ? '9px 18px' : '7px 14px',
-            borderRadius: 10,
-            border: pending
-              ? 'none'
-              : '1px solid var(--glass-border-focus)',
-            background: pending
-              ? '#ffffff'
-              : checking
-                ? 'rgba(255, 255, 255, 0.04)'
-                : 'rgba(255, 255, 255, 0.08)',
-            color: pending
-              ? 'rgba(20, 20, 20, 0.92)'
-              : 'var(--text-primary)',
-            fontFamily: 'inherit',
-            fontSize: pending ? 13 : 12,
-            fontWeight: pending ? 600 : 500,
-            letterSpacing: '0.005em',
-            cursor: checking ? 'wait' : 'pointer',
-            opacity: checking ? 0.7 : 1,
-            boxShadow: pending
-              ? '0 4px 14px -4px rgba(196, 68, 68, 0.45), 0 2px 6px rgba(0, 0, 0, 0.25)'
-              : 'none',
-            transition: 'background 0.15s var(--ease-out-quart), border-color 0.15s var(--ease-out-quart), transform 0.12s var(--ease-out-quart)',
-          }}
-          onMouseEnter={(e) => {
-            if (checking) return;
-            if (pending) {
-              e.currentTarget.style.transform = 'translateY(-1px)';
-              e.currentTarget.style.boxShadow =
-                '0 6px 18px -4px rgba(196, 68, 68, 0.55), 0 2px 6px rgba(0, 0, 0, 0.30)';
-            } else {
-              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.12)';
-            }
-          }}
-          onMouseLeave={(e) => {
-            if (checking) return;
-            if (pending) {
-              e.currentTarget.style.transform = 'translateY(0)';
-              e.currentTarget.style.boxShadow =
-                '0 4px 14px -4px rgba(196, 68, 68, 0.45), 0 2px 6px rgba(0, 0, 0, 0.25)';
-            } else {
-              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)';
-            }
-          }}
-        >
-          {checking ? (
-            <Loader2
-              size={13}
-              strokeWidth={2.2}
-              aria-hidden
-              style={{ animation: 'spin 0.8s linear infinite' }}
-            />
-          ) : null}
-          {checking
-            ? 'Verifying…'
-            : check.state === 'done'
-              ? 'Verify again'
-              : 'Verify'}
-        </button>
-      </div>
-
-      {/* Network/transport error, distinct from per-key validation
-          failures. Shown above the row results so the user can tell
-          "soul is offline" apart from "ElevenLabs rejected this key". */}
-      {check.networkError && (
-        <div
-          style={{
-            fontSize: 11.5,
-            color: 'var(--accent)',
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 6,
-            paddingTop: 2,
-          }}
-        >
-          <AlertCircle size={12} strokeWidth={2} aria-hidden style={{ flexShrink: 0, marginTop: 1 }} />
-          <span>{check.networkError}</span>
+      {probeError && (
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: 8,
+          fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.4, padding: '4px 0',
+        }}>
+          <AlertCircle size={13} strokeWidth={2} aria-hidden
+            style={{ flexShrink: 0, marginTop: 1, color: 'var(--accent)' }} />
+          <span>{probeError}</span>
         </div>
       )}
-
-      {/* Per-key result rows. Only rendered after a check completes,
-          and only the rows relevant to the current scope. */}
-      {result && (
+      {!anythingConfigured && rows.every((r) => r.state === 'idle') ? (
+        <div style={{ fontSize: 12, color: 'var(--text-secondary)', padding: '2px 0' }}>
+          Connections check themselves as you fill this in.
+        </div>
+      ) : rows.map((r) => (
         <div
+          key={r.label}
           style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 4,
-            paddingTop: 4,
-            borderTop: '1px solid rgba(255, 255, 255, 0.06)',
-            marginTop: 4,
+            display: 'flex', alignItems: 'flex-start', gap: 8,
+            fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.4, padding: '4px 0',
           }}
         >
-          {(scope === 'all' || scope === 'llm') && (
-            <KeyResultRow
-              label={providerLabel}
-              outcome={result.llm}
-            />
+          {r.state === 'ok' ? (
+            <CheckCircle2 size={13} strokeWidth={2} aria-hidden
+              style={{ flexShrink: 0, marginTop: 1, color: '#7fc97f' }} />
+          ) : r.state === 'fail' ? (
+            <AlertCircle size={13} strokeWidth={2} aria-hidden
+              style={{ flexShrink: 0, marginTop: 1, color: 'var(--accent)' }} />
+          ) : r.state === 'checking' ? (
+            <Loader2 size={13} strokeWidth={2.2} aria-hidden
+              style={{ flexShrink: 0, marginTop: 1, color: 'var(--text-secondary)', animation: 'spin 0.8s linear infinite' }} />
+          ) : (
+            <span aria-hidden style={{
+              flexShrink: 0, width: 13, height: 13, marginTop: 1,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'rgba(255,255,255,0.22)' }} />
+            </span>
           )}
-          {(scope === 'all' || scope === 'llm') && agenticEnabled && (
-            <KeyResultRow
-              label={
-                agenticProvider === 'ollama'
-                  ? 'Agentic (Ollama)'
-                  : 'Agentic (OpenAI)'
-              }
-              outcome={result.agentic ?? { ok: false, error: 'not probed yet' }}
-            />
-          )}
-          {(scope === 'all' || scope === 'llm') && groundingEnabled && (
-            <KeyResultRow
-              label="Web search (Gemini)"
-              outcome={result.gemini_search ?? { ok: false, error: 'not probed yet' }}
-            />
-          )}
-          {(scope === 'all' || scope === 'voice') && (
-            <KeyResultRow
-              label={
-                result.tts?.provider === 'kokoro' ? 'Kokoro'
-                : result.tts?.provider === 'qwen3' ? 'Qwen3-TTS'
-                : 'ElevenLabs'
-              }
-              outcome={result.tts ?? result.elevenlabs}
-            />
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function KeyResultRow({
-  label,
-  outcome,
-}: {
-  label: string;
-  outcome: { ok: boolean; error?: string };
-}) {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: 8,
-        fontSize: 12,
-        color: 'var(--text-primary)',
-        lineHeight: 1.4,
-        padding: '4px 0',
-      }}
-    >
-      {outcome.ok ? (
-        <CheckCircle2 size={13} strokeWidth={2} aria-hidden style={{ flexShrink: 0, marginTop: 1, color: '#7fc97f' }} />
-      ) : (
-        <AlertCircle size={13} strokeWidth={2} aria-hidden style={{ flexShrink: 0, marginTop: 1, color: 'var(--accent)' }} />
-      )}
-      <span style={{ minWidth: 0 }}>
-        <strong style={{ fontWeight: 600 }}>{label}</strong>
-        {outcome.ok ? (
-          <span style={{ color: 'var(--text-secondary)', marginLeft: 6 }}>working</span>
-        ) : (
-          <span style={{ color: 'var(--text-secondary)', marginLeft: 6 }}>
-            {outcome.error ?? 'failed'}
+          <span style={{ minWidth: 0 }}>
+            <strong style={{ fontWeight: 600 }}>{r.label}</strong>
+            <span style={{ color: 'var(--text-secondary)', marginLeft: 6 }}>
+              {r.state === 'ok' ? 'connected'
+                : r.state === 'fail' ? (r.detail ?? 'not working yet')
+                : r.state === 'checking' ? 'checking\u2026'
+                : 'waiting for details'}
+            </span>
           </span>
-        )}
-      </span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1230,6 +1045,7 @@ function VoiceSection({
             { id: 'elevenlabs', label: 'ElevenLabs' },
             { id: 'supertonic', label: 'Supertonic-3' },
             { id: 'kokoro',     label: 'Kokoro' },
+            { id: 'qwen3',      label: 'Qwen3 (local)' },
           ]}
         />
       </FieldLabel>

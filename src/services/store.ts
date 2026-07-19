@@ -17,7 +17,11 @@ const STORE_URL = 'https://store.unclaw.io';
 // (fetchEntitlements); these are display defaults + the sku/price map so the
 // picker can render Buy pills without a round trip. The base characters are
 // free and always owned.
-export const BASE_CHARACTER_IDS = ['grace', 'mark'];
+// The `*_custom` trio are cooked into the UE .app alongside grace/mark, so they
+// are owned + installed with no entitlement round trip. If they ever become
+// paid DLC, move them to PAID_CHARACTER_IDS + STORE_PRICING — leaving them here
+// would hand them out free.
+export const BASE_CHARACTER_IDS = ['grace', 'mark', 'grace_custom', 'kevin_custom', 'syd_custom'];
 export const PAID_CHARACTER_IDS = ['ava', 'goblin', 'chris', 'joi'];
 export const STORE_PRICING: Record<string, number> = { ava: 4.99, goblin: 4.99, chris: 4.99, joi: 4.99 };
 export const BUNDLE_SKU = 'all-access';

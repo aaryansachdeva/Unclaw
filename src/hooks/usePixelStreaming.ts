@@ -24,18 +24,14 @@ interface UsePixelStreamingReturn {
   connectionState: ConnectionState;
   pixelStreaming: PixelStreaming | null;
   /**
-   * Send a descriptor to UE and resolve when UE acks it back with
-   * `{EventType, status: "received"}`. Rejects on timeout (default 1500 ms).
-   * Caller can retry on rejection. Used for descriptors that MUST be
-   * acknowledged (the wardrobe init handshake on stream connect — UE is
-   * sometimes not ready to process descriptors the instant the stream
-   * is technically "connected", so we need confirm-or-retry rather than
-   * fire-and-forget).
+   * Arm a waiter for UE's `{EventType, status: "received"}` echo without
+   * sending anything. Resolves true when the ack lands, false on timeout
+   * (default 1500 ms). The dressing chain fires its descriptors over the
+   * ordered data channel and probes liveness with ONE of these per run
+   * instead of blocking on an ack per descriptor (un-acked EventTypes used
+   * to burn a full timeout each, stacking seconds of visible delay).
    */
-  sendAndAwaitAck: (
-    payload: Record<string, unknown> & { EventType: string },
-    opts?: { timeoutMs?: number }
-  ) => Promise<void>;
+  waitForAck: (eventType: string, timeoutMs?: number) => Promise<boolean>;
 }
 
 export function usePixelStreaming({
@@ -48,7 +44,7 @@ export function usePixelStreaming({
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
 
   // Per-EventType promise resolvers waiting on a `status: "received"`
-  // response from UE. Set when sendAndAwaitAck is called, cleared by
+  // response from UE. Set when waitForAck arms a waiter, cleared by
   // the response listener below when the matching EventType arrives.
   // Map (not object) so we can iterate cleanly on cleanup.
   const pendingAcksRef = useRef<Map<string, (err?: Error) => void>>(new Map());
@@ -85,7 +81,7 @@ export function usePixelStreaming({
     // Listen for UE → browser response messages. The SDK fires this
     // for EVERY response, regardless of "name" — that's just a handle
     // for removal. We parse the message as JSON; if it has the shape
-    // `{EventType, status: "received"}` it's an ack for a sendAndAwaitAck
+    // `{EventType, status: "received"}` it's an ack a waitForAck waiter
     // call and we resolve the matching pending promise. Late acks
     // (after a timeout) are silently discarded.
     ps.addResponseEventListener('unclaw-ack-router', (raw: string) => {
@@ -95,12 +91,24 @@ export function usePixelStreaming({
       if (!parsed || typeof parsed !== 'object') return;
       const msg = parsed as { EventType?: unknown; status?: unknown };
       if (typeof msg.EventType !== 'string') return;
-      if (msg.status !== 'received') return;
-      const resolver = pendingAcksRef.current.get(msg.EventType);
+      // UE acks a completed function in one of two conventions:
+      //   1. {EventType:"<sent>", status:"received"}  (clothing/init/color)
+      //   2. {EventType:"<sent>Success"}              (bg/light/blends/strands/
+      //      camera/animations) — strip the suffix to recover the key the
+      //      waiter was armed under.
+      // Normalise both to the sent EventType so a waitForAck on the descriptor
+      // we emitted resolves regardless of which convention UE used.
+      let key: string | null = null;
+      if (msg.status === 'received') {
+        key = msg.EventType;
+      } else if (msg.EventType.endsWith('Success')) {
+        key = msg.EventType.slice(0, -'Success'.length);
+      }
+      if (!key) return;
+      const resolver = pendingAcksRef.current.get(key);
       if (resolver) {
-        pendingAcksRef.current.delete(msg.EventType);
+        pendingAcksRef.current.delete(key);
         resolver();
-        console.log('[ps-ack] ←', msg.EventType);
       }
     });
 
@@ -280,39 +288,38 @@ export function usePixelStreaming({
     };
   }, [signalingUrl, retryDelay]);
 
-  const sendAndAwaitAck = useCallback<UsePixelStreamingReturn['sendAndAwaitAck']>(
-    (payload, opts) => {
-      const ps = psRef.current;
-      if (!ps) return Promise.reject(new Error('pixelStreaming not ready'));
-
-      const timeoutMs = opts?.timeoutMs ?? 1500;
-      const evt = payload.EventType;
-
-      return new Promise<void>((resolve, reject) => {
-        // If a previous ack for this EventType is still pending, the
-        // newer send supersedes it — drop the old resolver. (UE only
-        // tracks the latest state; we don't need both acks.)
-        const existing = pendingAcksRef.current.get(evt);
-        if (existing) existing(new Error('superseded by newer send'));
+  // Arm a waiter for UE's `{EventType, status:"received"}` echo WITHOUT
+  // sending anything. The dressing chain pipelines its descriptors over the
+  // ordered data channel and only needs ONE liveness signal per run, so the
+  // old sendAndAwaitAck (send + block per descriptor) became waitForAck
+  // (observe only). Resolves true on ack, false on timeout / supersede /
+  // unmount; never rejects, callers treat false as "UE stayed silent".
+  //
+  // Registration must happen BEFORE the send it observes, or a same-tick ack
+  // could race past an unarmed waiter.
+  const waitForAck = useCallback<UsePixelStreamingReturn['waitForAck']>(
+    (eventType, timeoutMs = 1500) => {
+      if (!psRef.current) return Promise.resolve(false);
+      return new Promise<boolean>((resolve) => {
+        // A previous waiter for this EventType is superseded: the router
+        // only routes the LATEST ack per type, and the epoch system already
+        // guarantees only one dressing chain is live at a time.
+        const existing = pendingAcksRef.current.get(eventType);
+        if (existing) existing(new Error('superseded by newer waiter'));
 
         const timer = setTimeout(() => {
-          if (pendingAcksRef.current.get(evt) === wrappedResolve) {
-            pendingAcksRef.current.delete(evt);
-            reject(new Error(`ack timeout: ${evt} (${timeoutMs}ms)`));
+          if (pendingAcksRef.current.get(eventType) === wrappedResolve) {
+            pendingAcksRef.current.delete(eventType);
+            resolve(false);
           }
         }, timeoutMs);
 
         const wrappedResolve = (err?: Error) => {
           clearTimeout(timer);
-          if (err) reject(err); else resolve();
+          resolve(!err);
         };
 
-        pendingAcksRef.current.set(evt, wrappedResolve);
-
-        ps.emitUIInteraction({
-          ...payload,
-          Timestamp: new Date().toISOString(),
-        });
+        pendingAcksRef.current.set(eventType, wrappedResolve);
       });
     },
     []
@@ -322,6 +329,6 @@ export function usePixelStreaming({
     videoParentRef,
     connectionState,
     pixelStreaming: psRef.current,
-    sendAndAwaitAck,
+    waitForAck,
   };
 }

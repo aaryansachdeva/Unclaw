@@ -7,7 +7,7 @@
 // useVoiceAgent. Both call this hook to drive the same low-level
 // transcriber.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   StreamingTranscriber,
   type StreamingEvent,
@@ -122,18 +122,15 @@ export function useStreamingTranscriber() {
     setState((s) => ({ ...s, committed: '', tentative: '', error: null }));
   }, []);
 
-  /** Combined display string — committed + tentative joined with a space.
-   *  Convenience for components that don't need to render them differently. */
-  const display = useMemo(() => {
-    const c = state.committed.trim();
-    const t = state.tentative.trim();
-    if (c && t) return `${c} ${t}`;
-    return c || t;
-  }, [state.committed, state.tentative]);
+  // NOTE: there is deliberately no `display` (committed + tentative) helper.
+  // It existed, and the InputBar was fed it as its "tentative" overlay while the
+  // textarea already held `committed` , so every committed word was painted
+  // twice. The UI renders `committed` and nothing else. If you need the unstable
+  // tail, read `tentative` explicitly and be sure you are not also rendering
+  // `committed` underneath it.
 
   return {
     ...state,
-    display,
     start,
     startFeed,
     pushFrame,

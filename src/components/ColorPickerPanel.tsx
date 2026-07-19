@@ -49,6 +49,11 @@ export function hexToHsv(hex: string) { const { r, g, b } = hexToRgb(hex); retur
 export function hsvToHex(h: number, s: number, v: number) { const { r, g, b } = hsvToRgb(h, s, v); return rgbToHex(r, g, b); }
 /** Hex -> {r,g,b} in 0..1, for the UE changeClothingColor / changeLightColor descriptors. */
 export function hexToRgb01(hex: string) { const { r, g, b } = hexToRgb(hex); return { r: r / 255, g: g / 255, b: b / 255 }; }
+/** Round to 3dp and stay a NUMBER. changeLightColor's Blueprint reads its fields
+ *  with `Get Number Field`, which returns 0 for a JSON string — so `toFixed(3)`
+ *  (a string) silently blacks the light out. Use this instead of toFixed for any
+ *  descriptor field UE parses as a number. */
+export function round3(n: number): number { return Math.round(n * 1000) / 1000; }
 const HEX_RE = /^#?[0-9a-fA-F]{6}$/;
 
 // ---- component ------------------------------------------------------------

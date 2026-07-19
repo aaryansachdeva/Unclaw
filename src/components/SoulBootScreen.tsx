@@ -101,13 +101,6 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
   // cold first run (model loads) rather than a hang.
   const showSlowHint = status === 'booting' && elapsed >= 25;
 
-  // QoL: give the user an explicit "relaunch soul" out on the waiting
-  // screen once boot has run a little while, so a stuck-but-not-yet-failed
-  // boot (soul healthy-but-silent, a wedged model load) doesn't force a
-  // full app restart. Held back ~8s so a normal fast boot never flashes it.
-  const showRelaunch =
-    (status === 'booting' || status === 'retrying') && elapsed >= 8;
-
   // Clock tick.
   useEffect(() => {
     const anchor = spawnedAt ?? Date.now();
@@ -429,61 +422,12 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
         </div>
       )}
 
-      {/* Waiting-screen escape hatch. Whisper-quiet, appears only after a
-          few seconds so a normal boot never shows it, but a stuck boot
-          gives the user a relaunch + logs out without quitting the app. */}
-      {showRelaunch && (
-        <div
-          style={{
-            position: 'absolute',
-            bottom: 22,
-            left: 0,
-            right: 0,
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            gap: 18,
-            zIndex: 70,
-            WebkitAppRegion: 'no-drag',
-          } as React.CSSProperties}
-        >
-          <button
-            type="button"
-            onClick={handleRetry}
-            style={{
-              padding: '6px 16px',
-              borderRadius: 999,
-              border: '1px solid rgba(255, 255, 255, 0.14)',
-              background: 'rgba(255, 255, 255, 0.05)',
-              color: 'rgba(255, 255, 255, 0.62)',
-              fontSize: 11.5,
-              fontWeight: 500,
-              fontFamily: 'inherit',
-              letterSpacing: '0.02em',
-              cursor: 'pointer',
-            }}
-          >
-            Relaunch soul
-          </button>
-          <button
-            type="button"
-            onClick={handleOpenLogs}
-            style={{
-              background: 'none',
-              border: 'none',
-              color: 'rgba(255, 255, 255, 0.34)',
-              fontSize: 11,
-              fontFamily: 'inherit',
-              letterSpacing: '0.02em',
-              cursor: 'pointer',
-              textDecoration: 'underline',
-              textUnderlineOffset: 3,
-            }}
-          >
-            Open logs
-          </button>
-        </div>
-      )}
+      {/* NOTE: no relaunch/logs affordance during a healthy boot. This screen
+          is the brand moment — lobster, orbit, breath, nothing else. A boot
+          that is merely slow is not actionable, and buttons here read as an
+          error the user should respond to. The recovery pair lives on the two
+          screens where a stall IS real: the `failed` overlay below (boot gave
+          up) and StreamView's stalled state (soul up, stream never arrives). */}
 
       {/* Unrecoverable boot failure: a real reason + Retry, never an
           infinite spinner. Covers the whole void so it's unmissable. */}

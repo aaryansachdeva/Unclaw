@@ -685,6 +685,31 @@ export function Wizard({
           )}
         </div>
 
+        {/* Blocked-finish hint. Verification is passive now (no Verify
+            button), so when Finish is disabled the user needs to know what
+            the app is still waiting on. One quiet line, only on the final
+            step, only while blocked. */}
+        {isLastStep && !canFinish && (
+          <div
+            role="status"
+            style={{
+              flexShrink: 0,
+              padding: '6px 18px 0',
+              fontSize: 11,
+              color: 'var(--text-secondary)',
+              lineHeight: 1.4,
+            }}
+          >
+            {!hasName
+              ? 'Waiting on: your name (back on the first step).'
+              : missingKeyFields.length > 0
+                ? `Waiting on: ${missingKeyFields.join(' · ')}.`
+                : !llmValidated
+                  ? 'Waiting on: the chat connection to check out (previous step).'
+                  : 'Waiting on: the voice connection to check out above.'}
+          </div>
+        )}
+
         {/* Footer */}
         <div
           style={{

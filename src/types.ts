@@ -7,12 +7,22 @@ export interface Agent {
    * the UE DA_Character card (grace/mark/ava/goblin/chris/joi).
    */
   agentId: string;
+  /** Built through the custom-character pipeline rather than authored by hand.
+   *  Drives the C badge in the picker. */
+  custom?: boolean;
+  /** Ships the optimized render path. Drives the O badge in the picker. */
+  optimized?: boolean;
 }
 
 // The selectable characters. Grace ships baked into the base game; Mark is a
 // free download; the rest are paid DLC paks. In dev every pak is baked into
 // the UE .app so all are switchable. Availability gating (driven by UE's
 // `installedCharacters` reply) lands when the DLC download flow ships.
+//
+// The `*_custom` trio are the custom-pipeline builds. They're separate agentIds
+// (not variants of the originals) because UE resolves the DA_Character card by
+// this exact string — grace_custom is a different character to UE than grace,
+// and their chat memory + wardrobe hang off the id too.
 export const AGENTS: Agent[] = [
   { id: 0, name: 'Grace', agentId: 'grace' },
   { id: 1, name: 'Mark', agentId: 'mark' },
@@ -20,4 +30,7 @@ export const AGENTS: Agent[] = [
   { id: 3, name: 'Goblin', agentId: 'goblin' },
   { id: 4, name: 'Chris', agentId: 'chris' },
   { id: 5, name: 'Joi', agentId: 'joi' },
+  { id: 6, name: 'Grace', agentId: 'grace_custom', custom: true, optimized: true },
+  { id: 7, name: 'Kevin', agentId: 'kevin_custom', custom: true, optimized: true },
+  { id: 8, name: 'Syd',   agentId: 'syd_custom',   custom: true, optimized: true },
 ];

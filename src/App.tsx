@@ -12,9 +12,14 @@ import { RemindersPanel } from './components/Reminders';
 import { StocksPanel } from './components/Stocks';
 import { NewsPanel } from './components/News';
 import { WeatherPanel } from './components/Weather';
-import { CustomizationOverlay, ACCENT_COLORS, CLOTHING_COLORS } from './components/CustomizationOverlay';
+import { CustomizationOverlay, ACCENT_COLORS, BG_COLORS, BG_GLOW_DEFAULT, LIGHT_INTENSITY_DEFAULT } from './components/CustomizationOverlay';
+import { CustomWardrobe } from './components/CustomWardrobe';
+import { StreamEffects } from './components/StreamEffects';
+import { isCustomCharacter } from './wardrobe/catalog';
+import { dressCharacter, type DressScope } from './wardrobe/dressCharacter';
 import { PulseGrid } from './components/PulseGrid';
-import { hexToRgb01 } from './components/ColorPickerPanel';
+import { hexToRgb01, round3 } from './components/ColorPickerPanel';
+import { useEnvironment } from './hooks/useEnvironment';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SoulBootScreen } from './components/SoulBootScreen';
 import { SetupWizard } from './components/SetupWizard';
@@ -159,6 +164,16 @@ function isReminderAction(name: string | undefined): boolean {
  *  Talking via the TalkingTime timer, gestures via montage consume).
  *  Only doIdle persists, which is the point of idle rotation. */
 let idleRevertTimer: number | null = null;
+/** Drop a scheduled idle-revert. Called on character switch / reset so a
+ *  timer armed for the PREVIOUS character can't fire a doIdle onto the next
+ *  one (the revert idle number is character-agnostic in shape but was chosen
+ *  for the body that scheduled it). */
+function cancelScheduledIdleRevert(): void {
+  if (idleRevertTimer !== null) {
+    window.clearTimeout(idleRevertTimer);
+    idleRevertTimer = null;
+  }
+}
 function dispatchBodyToUE(
   ps: { emitUIInteraction: (descriptor: object) => void },
   body: SoulBodyDirective[] | undefined,
@@ -404,7 +419,7 @@ function AppMain() {
     });
   }, []);
 
-  const { videoParentRef, connectionState, pixelStreaming, sendAndAwaitAck } = usePixelStreaming({
+  const { videoParentRef, connectionState, pixelStreaming, waitForAck } = usePixelStreaming({
     signalingUrl: sigUrl,
   });
 
@@ -435,6 +450,10 @@ function AppMain() {
   // ADD_SLOT opens the picker over a blank stage. `selectedInstanceId` holds a
   // real roster instance id or ADD_SLOT.
   const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, resetStack, hydrateStack } = useAgentStack();
+  // Global environment — backdrop + key light + post effect (persists across
+  // agents, NOT per-instance). See src/hooks/useEnvironment.ts. Applied on every
+  // switch + whenever it changes.
+  const { environment, setEnvironment } = useEnvironment();
   // Selected carousel slot: a roster instance id, or ADD_SLOT for the picker.
   const [selectedInstanceId, setSelectedInstanceId] = useState<string>(BASE_INSTANCE_ID);
   const [addPickerOpen, setAddPickerOpen] = useState(false);
@@ -536,6 +555,11 @@ function AppMain() {
   // Full-screen customization mode, orthogonal to the rail sheets.
   // The wardrobe rail icon flips this; everything else stays.
   const [customizationActive, setCustomizationActive] = useState(false);
+  // Live post-effect preview while customizing. Effects never reach UE (they're
+  // composited over the <video> here), so they can't ride the descriptor path
+  // like everything else. null = show whatever the instance has saved.
+  const [effectPreview, setEffectPreview] =
+    useState<{ effectId: string; effectStrength: number } | null>(null);
   // Settings modal, opened from Titlebar profile dropdown. Distinct
   // overlay from CustomizationOverlay so the two can't collide.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -870,9 +894,101 @@ function AppMain() {
     [agentStack],
   );
 
+  // Dressing-chain generation counter. Every dress run claims a fresh epoch;
+  // switches / resets / disconnects bump it too, so an in-flight chain aborts
+  // at its next send instead of dressing a character it no longer owns. This
+  // is what stops "old instance's outfit lands on the character I just
+  // switched to" — the chain used to keep running through the swap.
+  const dressEpochRef = useRef(0);
+  // Ref twin of `ueActiveAgentId` (declared with its listeners further down)
+  // so switch-time callbacks can read "what is UE showing right now" without
+  // re-subscribing on every answer. null = unknown / mid-transition.
+  const ueActiveAgentRef = useRef<string | null>(null);
+  // Ref to applyInstanceWardrobe (defined after the send plumbing below);
+  // assigned right after its definition, same pattern as agentStackRef.
+  const applyInstanceWardrobeRef = useRef<
+    ((
+      w: WardrobeSettings | null | undefined,
+      agentId?: string | null,
+      opts?: { scope?: DressScope; epoch?: number },
+    ) => Promise<void>) | null
+  >(null);
+  // The cross-class swap in flight: set when we emit agentSwitch (the scene
+  // half of the wardrobe fires immediately under this epoch), consumed by the
+  // characterReady listener (which finishes with the outfit half under the
+  // SAME epoch, so it can't cancel a scene re-fire still in the air). A stale
+  // entry is harmless: the epoch check rejects it.
+  const pendingSwitchRef = useRef<{ agentId: string; epoch: number } | null>(null);
+  // Retry state for UE's `agentSwitchFailed` (the C++ subsystem now broadcasts
+  // it when a swap's cast fails / resolves to blank instead of stalling
+  // silently). Holds the last switch we asked for so we can replay it, plus a
+  // bounded retry counter. Reset to 0 on a genuinely new target and on
+  // characterReady success; cleared when we give up (then reconcile).
+  const lastSwitchTargetRef = useRef<
+    { agentId: string; dir: number; wardrobe: WardrobeSettings | null } | null
+  >(null);
+  const switchRetryRef = useRef(0);
+  const SWITCH_MAX_RETRIES = 3;
+  // The agentId (lowercased) whose swap UE confirmed DISPATCHED via
+  // `agentSwitchSuccess` (Swap to Character ran with a valid, latched id).
+  // Distinguishes a genuine cast failure (dispatch succeeded, then the incoming
+  // class wasn't a BP_CharacterBase / resolved blank -> replaying the identical
+  // id just loops -> reconcile) from a swap that never dispatched (keep the
+  // bounded retry). Cleared on characterReady success + when consumed by a
+  // failure.
+  const switchDispatchedRef = useRef<string | null>(null);
+
   const emitAgentSwitch = useCallback((agentId: string, dir: number) => {
+    // Leaving a character obsoletes anything still being applied to it.
+    dressEpochRef.current += 1;
+    cancelScheduledIdleRevert();
     pixelStreaming?.emitUIInteraction({ EventType: 'agentSwitch', agentId, slideDir: dir });
   }, [pixelStreaming]);
+
+  // Switch UE to an agent, handling the same-class case: UE's SwapCharacter
+  // no-ops when the target class is already live (two roster instances of one
+  // character), so no characterReady will ever fire — dress the incoming
+  // instance directly instead of waiting on a signal that never comes.
+  //
+  // For a genuine cross-character swap, the wardrobe splits in two:
+  //   scene (key light + backdrop) fires NOW, in parallel with UE's
+  //     destroy/GC/async-load. Those are persistent-level actors; by the time
+  //     the new character fades in, the room is already lit correctly.
+  //   outfit waits for characterReady (the clothes need a body to hang on).
+  // Also mark UE "in transition" so the fast path can't misfire off a stale
+  // reading until characterReady lands.
+  const switchUeToAgent = useCallback((
+    agentId: string, dir: number, wardrobe?: WardrobeSettings | null,
+  ) => {
+    const alreadyLive =
+      ueActiveAgentRef.current != null &&
+      ueActiveAgentRef.current === agentId.toLowerCase();
+    emitAgentSwitch(agentId, dir);
+    if (alreadyLive) {
+      void applyInstanceWardrobeRef.current?.(wardrobe, agentId);
+    } else {
+      ueActiveAgentRef.current = null;
+      const lc = agentId.toLowerCase();
+      // Remember the target so `agentSwitchFailed` can replay it. Reset the
+      // retry counter only on a genuinely new target (a retry re-enters with
+      // the same agentId and must keep counting).
+      if (lastSwitchTargetRef.current?.agentId.toLowerCase() !== lc) {
+        switchRetryRef.current = 0;
+      }
+      lastSwitchTargetRef.current = { agentId, dir, wardrobe: wardrobe ?? null };
+      const epoch = ++dressEpochRef.current;
+      pendingSwitchRef.current = { agentId: lc, epoch };
+      // The environment (key light + backdrop) is GLOBAL now, applied by
+      // applyEnvironment (re-asserted at characterReady), so there is no per-
+      // character "scene half" to fire at switch time — agentSwitch goes out
+      // alone, and the per-character OUTFIT (clothing/colors/blends) is dressed
+      // at characterReady once the body exists, under this switch's epoch.
+    }
+  }, [emitAgentSwitch]);
+  // Live ref to switchUeToAgent so the agentSwitchFailed retry (and headless
+  // drivers) can call the current fn without re-subscribing.
+  const switchUeToAgentRef = useRef(switchUeToAgent);
+  switchUeToAgentRef.current = switchUeToAgent;
 
   // Select a carousel target by INSTANCE id (or ADD_SLOT). ADD_SLOT clears the
   // stage (an unknown id makes UE blank the scene) and opens the picker; a real
@@ -885,13 +1001,14 @@ function AppMain() {
       setSelectedInstanceId(ADD_SLOT);
       setAddPickerOpen(true);
       emitAgentSwitch('blank', dir); // "blank" card (empty class) -> UE clears the stage. NOT "none" (reserved FName == NAME_None, hits SwapToCharacter's IsNone guard)
+      ueActiveAgentRef.current = null; // stage is clearing; nothing is live
     } else {
       const inst = agentStack.find((i) => i.id === targetId);
       setSelectedInstanceId(targetId);
       setAddPickerOpen(false);
-      if (inst) emitAgentSwitch(inst.agentId, dir);
+      if (inst) switchUeToAgent(inst.agentId, dir, inst.wardrobe);
     }
-  }, [onAddSlot, agentStack, selectedInstanceId, emitAgentSwitch]);
+  }, [onAddSlot, agentStack, selectedInstanceId, emitAgentSwitch, switchUeToAgent]);
 
   const stepAgent = useCallback((delta: 1 | -1) => {
     if (agentCarousel.length === 0) return;
@@ -905,8 +1022,11 @@ function AppMain() {
     const id = addInstance(agentId);
     setSelectedInstanceId(id);
     setAddPickerOpen(false);
-    emitAgentSwitch(agentId, 1);
-  }, [addInstance, emitAgentSwitch]);
+    // A brand-new instance has no saved wardrobe; the same-class fast path
+    // in switchUeToAgent just no-ops the dress, which is correct (authored
+    // defaults, or whatever the stage already shows for this class).
+    switchUeToAgent(agentId, 1, null);
+  }, [addInstance, switchUeToAgent]);
 
   const handleCancelAdd = useCallback(() => {
     const back = addReturnRef.current || BASE_INSTANCE_ID;
@@ -930,9 +1050,12 @@ function AppMain() {
     try { localStorage.removeItem(`unclaw.chat.${instanceId}`); } catch { /* ignore */ }
     if (selectedInstanceId === instanceId) {
       setSelectedInstanceId(BASE_INSTANCE_ID);
-      emitAgentSwitch(BASE_AGENT, -1);
+      // Falling back to base: if the removed instance shared base's character
+      // class (a second Grace), UE won't re-spawn — dress base's look directly.
+      const base = agentStack.find((i) => i.id === BASE_INSTANCE_ID);
+      switchUeToAgent(BASE_AGENT, -1, base?.wardrobe);
     }
-  }, [removeInstance, selectedInstanceId, emitAgentSwitch]);
+  }, [removeInstance, selectedInstanceId, switchUeToAgent, agentStack]);
 
   // Listen for UE's `installedCharacters` report (sent on connect, on request,
   // and after each pak mount) and narrow the addable set to it. Shares the PS
@@ -2012,13 +2135,10 @@ function AppMain() {
       // textarea content is just a momentary mirror anyway.
       window.setTimeout(() => {
         inputBarRef.current?.setText('');
-        // Continuous mode keeps `voice.isListening` true between
-        // utterances, so `voiceActive` stays on and the InputBar
-        // overlay would otherwise keep rendering streaming.display
-        // (which still carries the just-finalized committed text
-        // until the next startFeed). Resetting the transcriber state
-        // here clears that ghost transcript so the bar goes back to
-        // its empty visual between utterances.
+        // Continuous mode keeps `voice.isListening` true between utterances, so
+        // the transcriber still holds the just-finalized `committed` text until
+        // the next startFeed. Reset it here or the setText effect above would
+        // immediately re-populate the bar with the utterance we just sent.
         streaming.reset();
       }, 0);
     },
@@ -2221,115 +2341,123 @@ function AppMain() {
     profileSyncedRef.current = false;
   }, [authToken, resetStack, pixelStreaming]);
 
-  // Re-apply the user's saved wardrobe + lighting to UE. Fired on:
-  //   * stream connect (so a fresh UE session loads the user's outfit
-  //     before they ever see Grace),
-  //   * session reset (UE returns to neutral; we restore the look),
-  //   * any other place that needs to bring UE back to the saved
-  //     configuration without going through customization mode.
-  //
-  // Sends three descriptors:
-  //   1. initializeClothing, 4 int fields (top/bottom/shoes/hair)
-  //   2. changeLightAngle, string `lightAngle` 0-360
-  //   3. changeLightColor, flat dot-named string fields lightColor.r/.g/.b
-  //
-  // No-op when the stream isn't connected or the profile hasn't loaded
-  // a wardrobe yet.
-  // sendAndAwaitAck wrapped with retry, used by applyInstanceWardrobe so
-  // the stream-connect init handshake survives the "UE technically
-  // connected but not yet ready to process descriptors" race window.
-  // Sends → waits up to 1500ms for `{EventType, status: "received"}`
-  // back from UE → on timeout, retries (max 3 attempts). If all retries
-  // fail, logs an error but does NOT throw, so a missing ack for one
-  // descriptor never blocks the rest of the init chain or the UI.
-  const sendWithRetry = useCallback(async (
-    payload: Record<string, unknown> & { EventType: string },
-    maxAttempts = 3,
-  ) => {
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        console.log(`[wardrobe] → ${payload.EventType} (attempt ${attempt}/${maxAttempts})`, payload);
-        await sendAndAwaitAck(payload, { timeoutMs: 1500 });
-        return true;
-      } catch (err) {
-        console.warn(`[wardrobe] ${payload.EventType} attempt ${attempt} failed:`, err);
-      }
-    }
-    console.error(`[wardrobe] ${payload.EventType} GAVE UP after ${maxAttempts} attempts, UE never ack'd`);
-    return false;
-  }, [sendAndAwaitAck]);
-
   // Apply ONE instance's saved outfit to whatever character is currently live
-  // in UE. Called after a `characterReady` signal (post-swap) and on session
-  // reset. No-op when the instance has no saved wardrobe -> the freshly-spawned
-  // character keeps its authored UE defaults.
-  const applyInstanceWardrobe = useCallback(async (w: WardrobeSettings | null | undefined) => {
+  // in UE. Called at switch time (scope 'scene': the key light + backdrop are
+  // persistent-level actors, they apply while UE is still swapping classes),
+  // after a `characterReady` signal (scope 'outfit'), and with scope 'full'
+  // on the paths where the character is already live (same-class fast path,
+  // connect reconcile on-target). No-op when the instance has no saved
+  // wardrobe -> the character keeps its authored UE defaults.
+  //
+  // The chain itself (sparse sends, ordering, pipelined fire + single ack
+  // probe, the full descriptor contract) lives in
+  // src/wardrobe/dressCharacter.ts. This wrapper owns the React-side
+  // concerns: single-flight + cancellation. A run claims a fresh epoch unless
+  // the caller passes one (the scene run at switch time and the outfit run at
+  // characterReady share an epoch, so the outfit run doesn't cancel a scene
+  // probe/re-fire still in flight). emitAgentSwitch / reset / disconnect bump
+  // the epoch, so a superseded run stops at its next send instead of dressing
+  // a character it no longer owns.
+  //
+  // `agentIdForWardrobe` is the instance being dressed, passed explicitly
+  // rather than read off the active instance: this runs right after a swap,
+  // when "active" may still be the character we just left.
+  const applyInstanceWardrobe = useCallback(async (
+    w: WardrobeSettings | null | undefined,
+    agentIdForWardrobe?: string | null,
+    opts?: { scope?: DressScope; epoch?: number },
+  ) => {
     if (!pixelStreaming) return;
     if (!w) return;
-    // Sequential await, UE applies descriptors in order; if one is
-    // racing with the prior one we'd see weird intermediate states.
-    // The 1500ms-per-attempt × 3 attempts × 3 descriptors caps the
-    // whole handshake at ~13.5s worst case (vs hanging forever).
-    await sendWithRetry({
-      EventType: 'initializeClothing',
-      top:    w.topIndex    ?? 0,
-      bottom: w.bottomIndex ?? 0,
-      shoes:  w.shoesIndex  ?? 0,
-      hair:   w.hairIndex   ?? 0,
-    });
-    await sendWithRetry({
-      EventType: 'changeLightAngle',
-      lightAngle: String(w.lightingAngle ?? 0),
-    });
-    // Accent/lighting color: freeform hex override wins over the palette index.
-    const c = w.accentColorHex
-      ? hexToRgb01(w.accentColorHex)
-      : (ACCENT_COLORS[w.accentColorIndex ?? 0] ?? ACCENT_COLORS[0]);
-    await sendWithRetry({
-      EventType: 'changeLightColor',
-      'lightColor.r': c.r.toFixed(3),
-      'lightColor.g': c.g.toFixed(3),
-      'lightColor.b': c.b.toFixed(3),
-    });
-    // Per-category garment colors. Sent AFTER initializeClothing so the
-    // garments exist; UE's changeClothingColor takes both tones + the
-    // category. Each slot's effective color = its custom hex if set, else the
-    // palette preset. Best-effort — skipped categories keep the default.
-    const clothingColors = w.clothingColors;
-    if (clothingColors) {
-      for (const cat of ['top', 'bottom', 'shoes'] as const) {
-        const pair = clothingColors[cat];
-        if (!pair) continue;
-        const c1 = pair.c1Hex ? hexToRgb01(pair.c1Hex) : (CLOTHING_COLORS[pair.c1] ?? CLOTHING_COLORS[0]);
-        const c2 = pair.c2Hex ? hexToRgb01(pair.c2Hex) : (CLOTHING_COLORS[pair.c2] ?? CLOTHING_COLORS[0]);
-        await sendWithRetry({
-          EventType: 'changeClothingColor',
-          wardrobeCategory: cat,
-          'color1.r': c1.r.toFixed(3),
-          'color1.g': c1.g.toFixed(3),
-          'color1.b': c1.b.toFixed(3),
-          'color2.r': c2.r.toFixed(3),
-          'color2.g': c2.g.toFixed(3),
-          'color2.b': c2.b.toFixed(3),
+    const epoch = opts?.epoch ?? ++dressEpochRef.current;
+    const isAlive = () => dressEpochRef.current === epoch;
+    await dressCharacter({
+      wardrobe: w,
+      agentId: agentIdForWardrobe,
+      scope: opts?.scope ?? 'full',
+      emit: (payload) => {
+        pixelStreaming.emitUIInteraction({
+          ...payload,
+          Timestamp: new Date().toISOString(),
         });
-      }
-    }
-    console.log('[wardrobe] instance handshake complete');
-  }, [pixelStreaming, sendWithRetry]);
+      },
+      waitForAck,
+      isAlive,
+    });
+  }, [pixelStreaming, waitForAck]);
+  applyInstanceWardrobeRef.current = applyInstanceWardrobe;
 
-  // Mood-accent bleed. The wardrobe lighting color the user picks for
-  // the character also seeps into the UI via two CSS vars (`--mood-accent`
+  // GLOBAL environment apply. The backdrop (changeBGColor + changeBGMaterial)
+  // AND the key light (changeLightAngle + changeLightColor) are persistent-level
+  // actors, not character-owned, so they're set once globally and re-asserted on
+  // every switch (via the characterReady listener) + immediately whenever the
+  // user changes them — the room + grade stay put across agents. Light fields
+  // are emitted only when the user has actually configured them, so an unset
+  // environment leaves UE's authored studio light alone (same guard the dress
+  // chain used to use).
+  const applyEnvironment = useCallback(() => {
+    if (!pixelStreaming) return;
+    const e = environment;
+    // Backdrop.
+    const bgRgb = e.bgColorHex
+      ? hexToRgb01(e.bgColorHex)
+      : (BG_COLORS[e.bgColorIndex ?? 0] ?? BG_COLORS[0]);
+    pixelStreaming.emitUIInteraction({
+      EventType: 'changeBGColor',
+      'bgcolor.r': round3(bgRgb.r),
+      'bgcolor.g': round3(bgRgb.g),
+      'bgcolor.b': round3(bgRgb.b),
+      value: round3(e.bgGlow ?? BG_GLOW_DEFAULT),
+      Timestamp: new Date().toISOString(),
+    });
+    if (e.bgmode != null) {
+      pixelStreaming.emitUIInteraction({
+        EventType: 'changeBGMaterial',
+        bgmode: e.bgmode,
+        Timestamp: new Date().toISOString(),
+      });
+    }
+    // Key light.
+    if (e.lightingAngle != null) {
+      pixelStreaming.emitUIInteraction({
+        EventType: 'changeLightAngle',
+        lightAngle: String(e.lightingAngle),
+        Timestamp: new Date().toISOString(),
+      });
+    }
+    if (e.accentColorHex != null || e.accentColorIndex != null || e.lightIntensity != null) {
+      const lc = e.accentColorHex
+        ? hexToRgb01(e.accentColorHex)
+        : (ACCENT_COLORS[e.accentColorIndex ?? 0] ?? ACCENT_COLORS[0]);
+      pixelStreaming.emitUIInteraction({
+        EventType: 'changeLightColor',
+        'lightColor.r': round3(lc.r),
+        'lightColor.g': round3(lc.g),
+        'lightColor.b': round3(lc.b),
+        lightIntensity: round3(e.lightIntensity ?? LIGHT_INTENSITY_DEFAULT),
+        Timestamp: new Date().toISOString(),
+      });
+    }
+  }, [pixelStreaming, environment]);
+  const applyEnvironmentRef = useRef(applyEnvironment);
+  applyEnvironmentRef.current = applyEnvironment;
+  // Re-apply the moment any environment setting changes (and once the stream is up).
+  useEffect(() => {
+    if (pixelStreaming) applyEnvironment();
+  }, [environment, pixelStreaming, applyEnvironment]);
+
+  // Mood-accent bleed. The GLOBAL key-light color the user picks
+  // also seeps into the UI via two CSS vars (`--mood-accent`
   // for solid spots, `--mood-tint-faint` for the hairline-top gradient).
   // Very subtle: only the chrome edges and a single decorative period
   // in the Greeting pick this up. The system `--accent` (focus, save,
   // error) stays ember red regardless so meaning never shifts with mood.
-  // Fires on profile load and every wardrobe save; falls back to the
-  // ember-red default if no wardrobe is configured.
+  // Fires whenever the global light color changes; falls back to the
+  // ember-red default if no light is configured.
   useEffect(() => {
-    const w = currentInstance?.wardrobe;
-    const c = w?.accentColorHex
-      ? { hex: w.accentColorHex, ...hexToRgb01(w.accentColorHex) }
-      : (ACCENT_COLORS[w?.accentColorIndex ?? 0] ?? ACCENT_COLORS[0]);
+    const c = environment.accentColorHex
+      ? { hex: environment.accentColorHex, ...hexToRgb01(environment.accentColorHex) }
+      : (ACCENT_COLORS[environment.accentColorIndex ?? 0] ?? ACCENT_COLORS[0]);
     const r = Math.round(c.r * 255);
     const g = Math.round(c.g * 255);
     const b = Math.round(c.b * 255);
@@ -2345,7 +2473,7 @@ function AppMain() {
       `rgba(${r}, ${g}, ${b}, 0.22)`);
     root.setProperty('--mood-tint-soft',
       `rgba(${r}, ${g}, ${b}, 0.14)`);
-  }, [currentInstance?.wardrobe]);
+  }, [environment.accentColorHex, environment.accentColorIndex]);
 
   // Live mirrors so the characterReady listener (subscribed once per stream)
   // reads the current roster + the instance we're switching INTO without
@@ -2392,23 +2520,120 @@ function AppMain() {
       const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current);
       // Record which character UE actually spawned. Fall back to the instance we
       // switched into when the signal omits agentId.
-      setUeActiveAgentId(
+      const spawned =
         (typeof msg.agentId === 'string' && msg.agentId)
           ? msg.agentId.toLowerCase()
-          : (inst?.agentId?.toLowerCase() ?? null),
-      );
+          : (inst?.agentId?.toLowerCase() ?? null);
+      // Swap succeeded: clear the agentSwitchFailed retry + dispatch state.
+      lastSwitchTargetRef.current = null;
+      switchRetryRef.current = 0;
+      switchDispatchedRef.current = null;
+      ueActiveAgentRef.current = spawned;
+      setUeActiveAgentId(spawned);
+      // Re-assert the GLOBAL environment (backdrop + key light) on every spawn so
+      // it stays across agents.
+      applyEnvironmentRef.current?.();
       // Stale/racing-signal guard: only dress when the character UE actually
       // spawned (msg.agentId) matches the instance we're targeting.
       if (inst && typeof msg.agentId === 'string' && msg.agentId && inst.agentId !== msg.agentId) {
         return;
       }
-      void applyInstanceWardrobe(inst?.wardrobe);
+      // If this ready signal completes the swap we initiated, the scene half
+      // (light + backdrop) already fired at switch time: finish with the
+      // outfit half under the SAME epoch. Any other arrival (a swap driven
+      // from outside switchUeToAgent, a stale pending entry) dresses in full
+      // under a fresh epoch.
+      const pending = pendingSwitchRef.current;
+      const continuesSwitch =
+        pending != null &&
+        inst != null &&
+        pending.agentId === inst.agentId.toLowerCase() &&
+        dressEpochRef.current === pending.epoch;
+      if (continuesSwitch) pendingSwitchRef.current = null;
+      // Dress the per-character OUTFIT (clothing/colors/blends) now that the body
+      // exists. Light + backdrop are GLOBAL and were re-asserted by
+      // applyEnvironmentRef above, so they're not part of this per-instance
+      // chain. A continued switch reuses its epoch; any other arrival (a swap
+      // driven from outside switchUeToAgent, or a stale pending entry) dresses
+      // under a fresh epoch.
+      void applyInstanceWardrobe(
+        inst?.wardrobe, inst?.agentId,
+        continuesSwitch ? { scope: 'outfit', epoch: pending.epoch } : undefined,
+      );
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const ps = pixelStreaming as any;
     ps.addResponseEventListener?.('unclaw-character-ready', onResponse);
     return () => ps.removeResponseEventListener?.('unclaw-character-ready');
   }, [pixelStreaming, applyInstanceWardrobe]);
+
+  // SWAP FAILURE: the UE subsystem now broadcasts `agentSwitchFailed` when a
+  // swap's cast fails or resolves to blank (previously it stalled silently and
+  // the frontend waited forever on a characterReady that never came). Replay
+  // the last requested switch — the C++ generation counter dedupes duplicate
+  // in-flight loads, so a replay is safe — up to a bounded number of times,
+  // then fall back to the reconcile driver so the UI always converges on
+  // whatever UE actually settled on.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const onFailed = (raw: string) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { return; }
+      if (!parsed || typeof parsed !== 'object') return;
+      if ((parsed as { EventType?: unknown }).EventType !== 'agentSwitchFailed') return;
+      const target = lastSwitchTargetRef.current;
+      // If UE confirmed this swap DISPATCHED (agentSwitchSuccess) and it still
+      // failed, the id was valid but the incoming class isn't a BP_CharacterBase
+      // / resolved blank: replaying the identical id would just dispatch-then-
+      // fail again. Reconcile to UE's truth instead of retrying.
+      const dispatched = switchDispatchedRef.current;
+      switchDispatchedRef.current = null;
+      const dispatchFailed =
+        dispatched != null &&
+        target != null &&
+        dispatched === target.agentId.toLowerCase();
+      if (!target || dispatchFailed || switchRetryRef.current >= SWITCH_MAX_RETRIES) {
+        // Nothing safe to replay, dispatch-then-cast-failed, or out of retries:
+        // reconcile to whatever UE actually settled on.
+        lastSwitchTargetRef.current = null;
+        switchRetryRef.current = 0;
+        setUeSessionEpoch((e) => e + 1);
+        return;
+      }
+      switchRetryRef.current += 1;
+      // Small backoff so a replay doesn't land inside the same load window.
+      setTimeout(() => {
+        switchUeToAgentRef.current?.(target.agentId, target.dir, target.wardrobe);
+      }, 400);
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ps = pixelStreaming as any;
+    ps.addResponseEventListener?.('unclaw-agent-switch-failed', onFailed);
+    return () => ps.removeResponseEventListener?.('unclaw-agent-switch-failed');
+  }, [pixelStreaming]);
+
+  // SWAP DISPATCHED: UE emits `agentSwitchSuccess` right after the `Swap to
+  // Character` node runs in the `agentSwitch` event — the swap left the gate
+  // with a valid, latched id. This is the early positive signal (characterReady
+  // still follows once the body spawns + binds). We record the dispatched id so
+  // a subsequent agentSwitchFailed is treated as a genuine cast failure (don't
+  // replay the same id) rather than a never-dispatched swap, and reset the retry
+  // counter since the swap is genuinely progressing.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const onDispatched = (raw: string) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { return; }
+      if (!parsed || typeof parsed !== 'object') return;
+      if ((parsed as { EventType?: unknown }).EventType !== 'agentSwitchSuccess') return;
+      switchDispatchedRef.current = lastSwitchTargetRef.current?.agentId.toLowerCase() ?? null;
+      switchRetryRef.current = 0;
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ps = pixelStreaming as any;
+    ps.addResponseEventListener?.('unclaw-agent-switch-success', onDispatched);
+    return () => ps.removeResponseEventListener?.('unclaw-agent-switch-success');
+  }, [pixelStreaming]);
 
   // RECONCILE on connect: UE answers our fetchCurrentAgent query with the
   // character it's currently showing (same shape as characterReady). Decide:
@@ -2440,18 +2665,22 @@ function AppMain() {
         // UE is already showing this character — don't re-switch (would loop on
         // reload). Just re-apply THIS instance's outfit, since UE may be wearing
         // another instance's look or the engine defaults.
-        setUeActiveAgentId(ueAgent || inst.agentId.toLowerCase());  // already on-screen; no characterReady will fire
-        void applyInstanceWardrobe(inst.wardrobe);
+        const live = ueAgent || inst.agentId.toLowerCase();
+        ueActiveAgentRef.current = live;  // already on-screen; no characterReady will fire
+        setUeActiveAgentId(live);
+        void applyInstanceWardrobe(inst.wardrobe, inst.agentId);
       } else {
-        // Blank or a different character — switch; its characterReady dresses it.
-        emitAgentSwitch(inst.agentId, 1);
+        // Blank or a different character: switch through the same path the
+        // carousel uses, so the scene half (light + backdrop) applies while
+        // the character loads and characterReady finishes the outfit.
+        switchUeToAgent(inst.agentId, 1, inst.wardrobe);
       }
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const ps = pixelStreaming as any;
     ps.addResponseEventListener?.('unclaw-fetch-current-agent', onResponse);
     return () => ps.removeResponseEventListener?.('unclaw-fetch-current-agent');
-  }, [pixelStreaming, applyInstanceWardrobe, emitAgentSwitch]);
+  }, [pixelStreaming, applyInstanceWardrobe, switchUeToAgent]);
 
   // Connect-time driver: ask UE which character it's on, and KEEP asking until
   // it answers. On a cold launch the stream connects several seconds before UE's
@@ -2463,6 +2692,11 @@ function AppMain() {
   useEffect(() => {
     if (connectionState !== 'connected') {
       initialResolvedRef.current = false;
+      // Stream gone: whatever dressing chain / idle-revert was in flight
+      // belongs to a session that no longer exists.
+      dressEpochRef.current += 1;
+      cancelScheduledIdleRevert();
+      ueActiveAgentRef.current = null;
       setUeActiveAgentId(null);
       return;
     }
@@ -2471,6 +2705,9 @@ function AppMain() {
     // without dropping the stream, so we must clear the resolved flag and
     // re-drive from scratch, exactly like a fresh connect.
     initialResolvedRef.current = false;
+    dressEpochRef.current += 1;
+    cancelScheduledIdleRevert();
+    ueActiveAgentRef.current = null;
     setUeActiveAgentId(null);
     let attempts = 0;
     const ask = () => {
@@ -2704,7 +2941,12 @@ function AppMain() {
   }, [onboardingComplete]);
 
   const handleCloseSheet = useCallback(() => setActiveWidget(null), []);
-  const handleExitCustomization = useCallback(() => setCustomizationActive(false), []);
+  // Cancel is try-on behavior: everything reverts. Dropping the preview falls
+  // the effect back to whatever the instance last saved.
+  const handleExitCustomization = useCallback(() => {
+    setCustomizationActive(false);
+    setEffectPreview(null);
+  }, []);
 
   const isConnected = connectionState === 'connected';
 
@@ -2962,14 +3204,13 @@ function AppMain() {
     };
   }, [isConnected, hasSession, streaming, voice.isListening]);
 
-  // Drive the textarea live as streaming partials arrive. ONLY the
-  // committed portion lands in the textarea, tentative text gets
-  // rendered as a light-gray overlay sitting on top of the textarea
-  // (handled by InputBar via the voiceTentative prop). This way the
-  // unconfirmed words have a clear visual distinction from the
-  // committed text without requiring a separate live-transcript view.
-  // Effect deps don't include tentative, that re-renders InputBar
-  // directly through its prop, no need to call setText for it.
+  // Drive the textarea live as streaming partials arrive. ONLY the committed
+  // portion is ever shown: this is the single source of the on-screen
+  // transcript. Unconfirmed (tentative) text is deliberately NOT rendered , it
+  // is the unstable tail that LocalAgreement-2 rewrites until two inferences
+  // agree, so drawing it made words flicker and, because it was passed to
+  // InputBar as `display` (committed + tentative) while the textarea already
+  // held committed, it rendered every committed word a second time.
   useEffect(() => {
     if (!streaming.isActive) return;
     const baseline = voiceBaselineRef.current;
@@ -2994,12 +3235,35 @@ function AppMain() {
   // effect).
   const handleSaveWardrobe = useCallback((settings: WardrobeSettings) => {
     emitWardrobeDescriptor({ EventType: 'finalizeClothing' });
-    // Persist to the INSTANCE being customized (the live one), not a global
-    // profile. wardrobeTargetRef tracks the selected real instance, so this
-    // is stale-free and lands on the right roster slot.
-    setInstanceWardrobe(wardrobeTargetRef.current, settings);
+    // The ENVIRONMENT (backdrop + key light + post effect) is GLOBAL, not
+    // per-instance: split those fields out to the global environment store and
+    // strip them from the instance wardrobe so a character swap never changes
+    // the room or grade. Both overlays inherit the current globals through their
+    // `initial` (spread below), so these keys round-trip unchanged unless the
+    // user touched them — writing them back is idempotent. `hairStrands` is
+    // dropped entirely (the strands control was removed).
+    const {
+      bgColorHex, bgColorIndex, bgGlow,
+      lightingAngle, lightIntensity, accentColorHex, accentColorIndex,
+      effectId, effectStrength,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      hairStrands: _dropStrands,
+      ...instanceSettings
+    } = settings;
+    setEnvironment({
+      bgColorHex, bgColorIndex, bgGlow,
+      lightingAngle, lightIntensity, accentColorHex, accentColorIndex,
+      effectId, effectStrength,
+    });
+    // Persist the rest to the INSTANCE being customized (the live one).
+    // wardrobeTargetRef tracks the selected real instance, so this is
+    // stale-free and lands on the right roster slot.
+    setInstanceWardrobe(wardrobeTargetRef.current, instanceSettings);
     setCustomizationActive(false);
-  }, [emitWardrobeDescriptor, setInstanceWardrobe]);
+    // The effect is persisted now, so the preview has nothing left to add;
+    // dropping it hands the grade back to the saved value with no flicker.
+    setEffectPreview(null);
+  }, [emitWardrobeDescriptor, setInstanceWardrobe, setEnvironment]);
 
   // wardrobeModeOn / wardrobeModeOff are now owned entirely by
   // CustomizationOverlay, which toggles them per active view (off in the hair
@@ -3062,6 +3326,15 @@ function AppMain() {
         connectionState={connectionState}
       />
 
+      {/* Post effects, graded over the stream. Mounted for the whole session,
+          not just while customizing: the effect is part of how she looks. The
+          in-flight preview wins over the saved value so dragging the strength
+          slider is instant. */}
+      <StreamEffects
+        effectId={effectPreview?.effectId ?? environment.effectId}
+        strength={effectPreview?.effectStrength ?? environment.effectStrength}
+      />
+
       {/* Customization mode, full-screen overlay anchored to the
           workspace wrapper, so it shares Grace's framing. Every other
           chrome element below fades out while it's mounted. Rendered
@@ -3070,13 +3343,43 @@ function AppMain() {
           properly fire wardrobeModeOff. */}
       <AnimatePresence>
         {customizationActive && (
-          <CustomizationOverlay
-            key="customization"
-            initial={currentInstance?.wardrobe ?? null}
-            onEmit={emitWardrobeDescriptor}
-            onSave={handleSaveWardrobe}
-            onCancel={handleExitCustomization}
-          />
+          // Two customization surfaces, picked by what the character IS. The
+          // custom-pipeline builds carry 34 hair / 18 brows / 6 lashes with
+          // thumbnails, which a blind stepper can't browse; the original six
+          // have a handful per slot and no art, which a grid would pad with
+          // empty tiles. Same props either way.
+          isCustomCharacter(activeAgentId) ? (
+            <CustomWardrobe
+              key="custom-wardrobe"
+              initial={{
+                ...(currentInstance?.wardrobe ?? {}),
+                // Environment (backdrop + light + effect) is GLOBAL: overlay the
+                // current globals so the pane opens on them, not on any stale
+                // per-instance copy left in the wardrobe blob.
+                ...environment,
+              }}
+              onEmit={emitWardrobeDescriptor}
+              onSave={handleSaveWardrobe}
+              onCancel={handleExitCustomization}
+              onEffect={setEffectPreview}
+              bgMode={environment.bgmode}
+              onBgMode={(m) => setEnvironment({ bgmode: m })}
+            />
+          ) : (
+            <CustomizationOverlay
+              key="customization"
+              initial={{
+                ...(currentInstance?.wardrobe ?? {}),
+                // Environment (backdrop + light) is GLOBAL: overlay current globals.
+                ...environment,
+              }}
+              onEmit={emitWardrobeDescriptor}
+              onSave={handleSaveWardrobe}
+              onCancel={handleExitCustomization}
+              bgMode={environment.bgmode}
+              onBgMode={(m) => setEnvironment({ bgmode: m })}
+            />
+          )
         )}
       </AnimatePresence>
 
@@ -3366,7 +3669,13 @@ function AppMain() {
                   onExpress={handleExpress}
                   voice={{
                     active: voice.isListening,
-                    disabled: isSending,
+                    // Only block STARTING voice while she's replying. It must
+                    // always be possible to STOP it: in continuous mode every
+                    // turn sets isSending, which used to grey the button out
+                    // (0.4 opacity, not-allowed) and pulse it while the mic was
+                    // still hot, so you couldn't switch voice mode off until she
+                    // finished. That was the erratic behaviour.
+                    disabled: isSending && !voice.isListening,
                     vadLevel: voice.vadLevel,
                     isUserSpeaking: voice.isUserSpeaking,
                     isTranscribing: voice.isTranscribing,
@@ -3374,25 +3683,19 @@ function AppMain() {
                     start: () => { void voice.start(); },
                     stop: () => { void voice.stop(); },
                   }}
-                  // Overlay during BOTH PTT and continuous mode. PTT
-                  // flips streaming.isActive on start(); continuous
-                  // mode flips it when VoiceController calls
-                  // startFeed() at speech onset. OR'ing `voice.isListening`
-                  // covers the brief gap between mic toggle and the WS
-                  // handshake.
+                  // Voice-active visual state during BOTH PTT and continuous
+                  // mode. PTT flips streaming.isActive on start(); continuous
+                  // mode flips it when VoiceController calls startFeed() at
+                  // speech onset. OR'ing `voice.isListening` covers the brief
+                  // gap between mic toggle and the WS handshake.
                   //
-                  // The overlay uses `display` (committed + tentative
-                  // joined) rather than `tentative` alone. Moonshine's
-                  // LocalAgreement-2 promotes most heard speech into
-                  // `committed` as soon as two consecutive inferences
-                  // agree on it; tentative is just the unstable tail.
-                  // Showing tentative-only made the overlay flicker
-                  // briefly with the last few words and disappear once
-                  // they stabilized, exactly the "millisecond flash"
-                  // the user reported. `display` keeps the whole
-                  // running transcript visible until finalize clears.
+                  // The bar shows ONLY committed transcript while you speak.
+                  // The committed text already lands in the textarea via the
+                  // setText effect above; we used to ALSO pass `display`
+                  // (committed + tentative) as a gray overlay, which re-rendered
+                  // every committed word a second time. Unconfirmed words are no
+                  // longer drawn at all.
                   voiceActive={streaming.isActive || voice.isListening}
-                  voiceTentative={streaming.display.trim().replace(/^\s+/u, '')}
                   onPrevPersona={handlePrevPersona}
                   onNextPersona={handleNextPersona}
                   onPersonaNameClick={() => selectInstance(ADD_SLOT, 1)}

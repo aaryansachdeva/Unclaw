@@ -10,11 +10,17 @@ import { ava } from './ava';
 import { goblin } from './goblin';
 import { chris } from './chris';
 import { joi } from './joi';
+import { grace_custom } from './grace_custom';
+import { kevin_custom } from './kevin_custom';
+import { syd_custom } from './syd_custom';
 
 export type { CharacterProfile, CharacterVoices } from './types';
 
 /** Ordered list (matches the AGENTS catalog order). */
-export const CHARACTERS: CharacterProfile[] = [grace, mark, ava, goblin, chris, joi];
+export const CHARACTERS: CharacterProfile[] = [
+  grace, mark, ava, goblin, chris, joi,
+  grace_custom, kevin_custom, syd_custom,
+];
 
 /** id -> profile. */
 export const CHARACTERS_BY_ID: Record<string, CharacterProfile> =

@@ -22,8 +22,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronLeft, ChevronRight, Check, ArrowLeft } from 'lucide-react';
 import { LightingDial } from './LightingDial';
-import { ColorPickerPanel, hexToRgb01 } from './ColorPickerPanel';
+import { ColorPickerPanel, hexToRgb01, round3 } from './ColorPickerPanel';
 import type { WardrobeSettings, ClothingColor } from '../services/userSettings';
+import { BACKGROUNDS, clampBgMode } from '../wardrobe/backgrounds';
+import { Dropdown } from './Onboarding/Dropdown';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -77,6 +79,35 @@ export const CLOTHING_COLORS: Array<{ label: string; hex: string; r: number; g: 
   { label: 'Plum',     hex: '#593a5b', r: 0.349, g: 0.227, b: 0.357 },
 ];
 
+// Backdrop palette for SM_HalfSphereBackground. Deliberately NOT the accent
+// set: those are lamp hues meant to light a face, these are deep ambient tones
+// meant to sit behind one. Index 0 (Navy) matches DESIGN.md's "dark navy
+// ambient" — the stream's authored look, so it's the sane default.
+// Exported so App can resolve a saved index on stream-connect.
+export const BG_COLORS: Array<{ label: string; hex: string; r: number; g: number; b: number }> = [
+  { label: 'Navy',     hex: '#1a2338', r: 0.102, g: 0.137, b: 0.220 },
+  { label: 'Ink',      hex: '#101014', r: 0.063, g: 0.063, b: 0.078 },
+  { label: 'Charcoal', hex: '#24262b', r: 0.141, g: 0.149, b: 0.169 },
+  { label: 'Teal',     hex: '#123536', r: 0.071, g: 0.208, b: 0.212 },
+  { label: 'Plum',     hex: '#2b1a33', r: 0.169, g: 0.102, b: 0.200 },
+  { label: 'Ember',    hex: '#33201a', r: 0.200, g: 0.125, b: 0.102 },
+];
+
+// Backdrop glow. Feeds the `Multiple` scalar param on the half-sphere's
+// dynamic material instance via changeBG's `value` field. A multiplier, so
+// 1 = the material's authored look, 0 = dark, >1 pushes into bloom.
+export const BG_GLOW_MIN = 0;
+export const BG_GLOW_MAX = 5;
+export const BG_GLOW_DEFAULT = 1;
+
+// Key-light brightness. Sent verbatim to UE's `Set Intensity`, so these are
+// RAW UE units (candelas) — not a 0-1 normalized value the Blueprint scales.
+// 8 is the light's authored default, which is why it's the reset point.
+// Exported so App can fall back to the same default on stream-connect.
+export const LIGHT_INTENSITY_MIN = 0;
+export const LIGHT_INTENSITY_MAX = 10;
+export const LIGHT_INTENSITY_DEFAULT = 8;
+
 // Categories whose garment master exposes diffuse_color_1/2. Hair is a
 // groom (different material), so it has no clothing-color submenu.
 const COLORABLE: WardrobeCategory[] = ['top', 'bottom', 'shoes'];
@@ -87,17 +118,24 @@ interface CustomizationOverlayProps {
   onSave: (settings: WardrobeSettings) => void;
   /** Close without saving, try-on behavior. */
   onCancel: () => void;
+  /** GLOBAL backdrop style index (bgmode). Backdrop is not per-instance. */
+  bgMode?: number;
+  /** Persist a new global backdrop style index. */
+  onBgMode?: (index: number) => void;
 }
 
 export function CustomizationOverlay({
-  initial, onEmit, onSave, onCancel,
+  initial, onEmit, onSave, onCancel, bgMode, onBgMode,
 }: CustomizationOverlayProps) {
   const [topIndex,    setTopIndex   ] = useState(clampIndex('top',    initial?.topIndex));
   const [bottomIndex, setBottomIndex] = useState(clampIndex('bottom', initial?.bottomIndex));
   const [shoesIndex,  setShoesIndex ] = useState(clampIndex('shoes',  initial?.shoesIndex));
   const [hairIndex,   setHairIndex  ] = useState(clampIndex('hair',   initial?.hairIndex));
   const [lightingAngle, setLightingAngle] = useState(clampAngle(initial?.lightingAngle ?? 0));
+  const [lightIntensity, setLightIntensity] = useState(clampIntensity(initial?.lightIntensity));
   const [accentColorIndex, setAccentColorIndex] = useState(clampAccent(initial?.accentColorIndex));
+  const [bgColorIndex, setBgColorIndex] = useState(clampBg(initial?.bgColorIndex));
+  const [bgGlow, setBgGlow] = useState(clampGlow(initial?.bgGlow));
 
   // null = master category list; a category = its detail submenu (stepper +,
   // for colorable categories, the two color rows).
@@ -111,11 +149,24 @@ export function CustomizationOverlay({
   // Freeform accent (lighting) color override, set via the picker. Wins over
   // accentColorIndex when present.
   const [accentColorHex, setAccentColorHex] = useState<string | undefined>(initial?.accentColorHex);
+  // Freeform backdrop override, same contract as accentColorHex.
+  const [bgColorHex, setBgColorHex] = useState<string | undefined>(initial?.bgColorHex);
   // Open color picker, anchored to the swatch that opened it. null = closed.
   type PickerTarget =
     | { kind: 'clothing'; cat: 'top' | 'bottom' | 'shoes'; slot: 'c1' | 'c2' }
-    | { kind: 'accent' };
+    | { kind: 'accent' }
+    | { kind: 'bg' };
   const [picker, setPicker] = useState<{ target: PickerTarget; rect: DOMRect } | null>(null);
+
+  // Dirty tracking: which settings the user actually touched this session.
+  // Save persists ONLY these, merged over the previously saved wardrobe. A
+  // full snapshot would fabricate values for categories the user never
+  // opened (the overlay defaults untouched categories to index 0 / angle 0,
+  // which is NOT necessarily what UE is authored to wear) and the re-dress
+  // chain would then force those fabrications onto the character at every
+  // switch. Absent-in-save = "never customized, leave UE's default alone".
+  const touchedRef = useRef<Set<string>>(new Set());
+  const touch = (key: string) => { touchedRef.current.add(key); };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -166,6 +217,7 @@ export function CustomizationOverlay({
     const current = getValue(cat);
     const next = ((current + step) % max + max) % max;
     setValue(cat, next);
+    touch(cat);
     onEmit({
       EventType: 'changeWardrobeItem',
       wardrobeCategory: cat,
@@ -175,29 +227,103 @@ export function CustomizationOverlay({
 
   const handleLighting = useCallback((angle: number) => {
     setLightingAngle(angle);
+    touch('lightingAngle');
     onEmit({ EventType: 'changeLightAngle', lightAngle: String(angle) });
   }, [onEmit]);
 
-  const emitLightColor = useCallback((rgb: { r: number; g: number; b: number }) => {
+  // changeLightColor carries BOTH the color and the brightness: the Blueprint
+  // pulls lightColor.r/g/b AND lightIntensity off the same Arguments Object,
+  // driving Set Light Color -> Set Intensity in one chain. So every emit sends
+  // the full pair — bumping intensity alone still has to restate the color, or
+  // the missing fields read as 0 and black the key light out.
+  //
+  // All four are NUMBERS. The BP reads them with `Get Number Field`, which
+  // returns 0 for a JSON string, so `toFixed` here would silently kill the
+  // light. round3 keeps the precision without the string.
+  const emitLight = useCallback((
+    rgb: { r: number; g: number; b: number },
+    intensity: number,
+  ) => {
     onEmit({
       EventType: 'changeLightColor',
-      'lightColor.r': rgb.r.toFixed(3),
-      'lightColor.g': rgb.g.toFixed(3),
-      'lightColor.b': rgb.b.toFixed(3),
+      'lightColor.r': round3(rgb.r),
+      'lightColor.g': round3(rgb.g),
+      'lightColor.b': round3(rgb.b),
+      lightIntensity: round3(intensity),
     });
   }, [onEmit]);
+
+  // Whatever color is live right now: custom hex override wins over the preset.
+  const currentRgb = useCallback(() => (
+    accentColorHex ? hexToRgb01(accentColorHex) : (ACCENT_COLORS[accentColorIndex] ?? ACCENT_COLORS[0])
+  ), [accentColorHex, accentColorIndex]);
 
   const handleAccent = useCallback((index: number) => {
     if (index < 0 || index >= ACCENT_COLORS.length) return;
     setAccentColorIndex(index);
     setAccentColorHex(undefined); // preset clears the custom override
-    emitLightColor(ACCENT_COLORS[index]);
-  }, [emitLightColor]);
+    touch('accent');
+    emitLight(ACCENT_COLORS[index], lightIntensity);
+  }, [emitLight, lightIntensity]);
 
   const handleAccentCustom = useCallback((hex: string) => {
     setAccentColorHex(hex);
-    emitLightColor(hexToRgb01(hex));
-  }, [emitLightColor]);
+    touch('accent');
+    emitLight(hexToRgb01(hex), lightIntensity);
+  }, [emitLight, lightIntensity]);
+
+  const handleIntensity = useCallback((value: number) => {
+    const next = clampIntensity(value);
+    setLightIntensity(next);
+    touch('lightIntensity');
+    emitLight(currentRgb(), next);
+  }, [emitLight, currentRgb]);
+
+  // changeBG mirrors changeLightColor's shape: one descriptor carrying the
+  // backdrop color AND its glow, because the Blueprint reads both off the same
+  // Arguments Object (bgcolor.r/g/b -> Make Linear Color -> the `Color` vector
+  // param; `value` -> the `Multiple` scalar param) on one dynamic material
+  // instance. Same rule as the light: send all four or the omitted ones read 0.
+  //
+  // Field names are lowercase `bgcolor.*` and a bare `value` — NOT bgColor.* —
+  // matching the BP's Get Number Field literals exactly. All numbers.
+  const emitBG = useCallback((
+    rgb: { r: number; g: number; b: number },
+    glow: number,
+  ) => {
+    onEmit({
+      EventType: 'changeBGColor',
+      'bgcolor.r': round3(rgb.r),
+      'bgcolor.g': round3(rgb.g),
+      'bgcolor.b': round3(rgb.b),
+      value: round3(glow),
+    });
+  }, [onEmit]);
+
+  const currentBgRgb = useCallback(() => (
+    bgColorHex ? hexToRgb01(bgColorHex) : (BG_COLORS[bgColorIndex] ?? BG_COLORS[0])
+  ), [bgColorHex, bgColorIndex]);
+
+  const handleBg = useCallback((index: number) => {
+    if (index < 0 || index >= BG_COLORS.length) return;
+    setBgColorIndex(index);
+    setBgColorHex(undefined); // preset clears the custom override
+    touch('bg');
+    emitBG(BG_COLORS[index], bgGlow);
+  }, [emitBG, bgGlow]);
+
+  const handleBgCustom = useCallback((hex: string) => {
+    setBgColorHex(hex);
+    touch('bg');
+    emitBG(hexToRgb01(hex), bgGlow);
+  }, [emitBG, bgGlow]);
+
+  const handleBgGlow = useCallback((value: number) => {
+    const next = clampGlow(value);
+    setBgGlow(next);
+    touch('bgGlow');
+    emitBG(currentBgRgb(), next);
+  }, [emitBG, currentBgRgb]);
 
   // UE's changeClothingColor takes BOTH tones every time + the category. Each
   // slot's effective color is its custom hex if set, else the palette preset.
@@ -220,6 +346,7 @@ export function CustomizationOverlay({
     const hexKey = slot === 'c1' ? 'c1Hex' : 'c2Hex';
     const nextPair: ClothingColor = { ...clothingColors[cat], [slot]: index, [hexKey]: undefined };
     setClothingColors((prev) => ({ ...prev, [cat]: nextPair }));
+    touch(`cc:${cat}`);
     emitClothingColor(cat, nextPair);
   }, [clothingColors, emitClothingColor]);
 
@@ -230,25 +357,53 @@ export function CustomizationOverlay({
     const hexKey = slot === 'c1' ? 'c1Hex' : 'c2Hex';
     const nextPair: ClothingColor = { ...clothingColors[cat], [hexKey]: hex };
     setClothingColors((prev) => ({ ...prev, [cat]: nextPair }));
+    touch(`cc:${cat}`);
     emitClothingColor(cat, nextPair);
   }, [clothingColors, emitClothingColor]);
 
+  // Persist only what was touched, merged over the previous save (see the
+  // touchedRef comment above). Assigning `undefined` on purpose (a preset
+  // pick clearing a custom hex) removes the key at JSON-serialization time.
   const handleSave = useCallback(() => {
-    onSave({
-      topIndex, bottomIndex, shoesIndex, hairIndex,
-      lightingAngle, accentColorIndex, accentColorHex,
-      clothingColors,
-    });
-  }, [onSave, topIndex, bottomIndex, shoesIndex, hairIndex, lightingAngle, accentColorIndex, accentColorHex, clothingColors]);
+    const touched = touchedRef.current;
+    const out: WardrobeSettings = { ...(initial ?? {}) };
+    if (touched.has('top'))    out.topIndex    = topIndex;
+    if (touched.has('bottom')) out.bottomIndex = bottomIndex;
+    if (touched.has('shoes'))  out.shoesIndex  = shoesIndex;
+    if (touched.has('hair'))   out.hairIndex   = hairIndex;
+    if (touched.has('lightingAngle'))  out.lightingAngle  = lightingAngle;
+    if (touched.has('lightIntensity')) out.lightIntensity = lightIntensity;
+    if (touched.has('accent')) {
+      out.accentColorIndex = accentColorIndex;
+      out.accentColorHex = accentColorHex;
+    }
+    if (touched.has('bg')) {
+      out.bgColorIndex = bgColorIndex;
+      out.bgColorHex = bgColorHex;
+    }
+    if (touched.has('bgGlow')) out.bgGlow = bgGlow;
+    const ccTouched = (['top', 'bottom', 'shoes'] as const)
+      .filter((cat) => touched.has(`cc:${cat}`));
+    if (ccTouched.length > 0) {
+      out.clothingColors = { ...(initial?.clothingColors ?? {}) };
+      for (const cat of ccTouched) out.clothingColors[cat] = clothingColors[cat];
+    }
+    onSave(out);
+  }, [onSave, initial, topIndex, bottomIndex, shoesIndex, hairIndex, lightingAngle, lightIntensity, accentColorIndex, accentColorHex, bgColorIndex, bgColorHex, bgGlow, clothingColors]);
 
   const activeAccent = accentColorHex
     ? { label: 'Custom', hex: accentColorHex }
     : (ACCENT_COLORS[accentColorIndex] ?? ACCENT_COLORS[0]);
 
+  const activeBg = bgColorHex
+    ? { label: 'Custom', hex: bgColorHex }
+    : (BG_COLORS[bgColorIndex] ?? BG_COLORS[0]);
+
   // Hex shown by the picker for whatever it's currently targeting.
   const pickerColor = (() => {
     if (!picker) return '#ffffff';
     if (picker.target.kind === 'accent') return accentColorHex ?? ACCENT_COLORS[accentColorIndex]?.hex ?? '#ffffff';
+    if (picker.target.kind === 'bg') return bgColorHex ?? BG_COLORS[bgColorIndex]?.hex ?? '#ffffff';
     const p = clothingColors[picker.target.cat];
     const slotHex = picker.target.slot === 'c1' ? p.c1Hex : p.c2Hex;
     return slotHex ?? CLOTHING_COLORS[picker.target.slot === 'c1' ? p.c1 : p.c2]?.hex ?? '#ffffff';
@@ -478,6 +633,17 @@ export function CustomizationOverlay({
         >
           <SectionLabel>Lighting</SectionLabel>
           <LightingDial value={lightingAngle} onChange={handleLighting} size={168} />
+          {/* Brightness under the dial: the dial sets WHERE the key light is,
+              this sets how hard it hits. Sits in the same block because they're
+              one thought, separated by a hairline rather than a second label. */}
+          <ValueSlider
+            value={lightIntensity}
+            onChange={handleIntensity}
+            min={LIGHT_INTENSITY_MIN}
+            max={LIGHT_INTENSITY_MAX}
+            width={168}
+            label="Key light intensity"
+          />
         </motion.div>
 
         {/* Accent palette, six bulbs. Active one grows + glows in its
@@ -548,6 +714,92 @@ export function CustomizationOverlay({
             />
           </div>
         </motion.div>
+
+        {/* Backdrop, same grammar as Accent so the column reads as one
+            system: label + live color name, a bulb row, then the magnitude
+            rail. The bulbs are deep tones rather than lamp hues because this
+            paints the half-sphere BEHIND her, not the light on her. */}
+        <motion.div
+          initial={{ opacity: 0, x: 18 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ duration: 0.5, ease: EASE_OUT_EXPO, delay: 0.42 }}
+          style={{
+            pointerEvents: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 8,
+            width: 200,
+          }}
+        >
+          <div style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 10,
+            height: 14,
+          }}>
+            <SectionLabel>Backdrop</SectionLabel>
+            <AnimatePresence mode="wait">
+              <motion.span
+                key={activeBg.label}
+                initial={{ opacity: 0, y: 3 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -3 }}
+                transition={{ duration: 0.22, ease: EASE_OUT_EXPO }}
+                style={{
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  letterSpacing: '0.18em',
+                  textTransform: 'uppercase',
+                  // These tones are near-black by design, so the label reads
+                  // off a lifted tint of the swatch rather than the swatch
+                  // itself — the raw hex would be invisible on the vignette.
+                  color: `color-mix(in srgb, ${activeBg.hex} 45%, #cfd6e4)`,
+                  textShadow: `0 1px 4px rgba(0,0,0,0.55), 0 0 10px ${activeBg.hex}40`,
+                }}
+              >
+                {activeBg.label}
+              </motion.span>
+            </AnimatePresence>
+          </div>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            padding: '2px 2px 4px 2px',
+          }}>
+            {BG_COLORS.map((c, i) => (
+              <AccentBulb
+                key={c.label}
+                color={c.hex}
+                label={c.label}
+                active={!bgColorHex && i === bgColorIndex}
+                onClick={() => handleBg(i)}
+              />
+            ))}
+            <CustomSwatch
+              customHex={bgColorHex}
+              onOpen={(rect) => setPicker({ target: { kind: 'bg' }, rect })}
+            />
+          </div>
+          <ValueSlider
+            value={bgGlow}
+            onChange={handleBgGlow}
+            min={BG_GLOW_MIN}
+            max={BG_GLOW_MAX}
+            width={168}
+            label="Backdrop glow"
+          />
+          {onBgMode && (
+            <BackdropStylePicker
+              value={clampBgMode(bgMode)}
+              onSelect={(m) => {
+                onEmit({ EventType: 'changeBGMaterial', bgmode: m });
+                onBgMode(m);
+              }}
+            />
+          )}
+        </motion.div>
       </div>
 
       {/* ===== Save, bottom-right anchor ================================
@@ -601,6 +853,7 @@ export function CustomizationOverlay({
             anchorRect={picker.rect}
             onChange={(hex) => {
               if (picker.target.kind === 'accent') handleAccentCustom(hex);
+              else if (picker.target.kind === 'bg') handleBgCustom(hex);
               else handleClothingCustom(picker.target.cat, picker.target.slot, hex);
             }}
             onClose={() => setPicker(null)}
@@ -991,6 +1244,112 @@ function ClothingSwatch({
 
 // ============ section label ============================================
 
+// ============ value slider ===========================================
+// The quiet "how much" control, shared by key-light intensity and backdrop
+// glow. Deliberately a flat rail and not a dial — the LightingDial already
+// owns "which direction", this owns magnitude, and stacked dials would read
+// as a cockpit. The accent stays off it: magnitude is not a moment of
+// attention, so the fill is warm white and the rail is a hairline. Readout is
+// the same low-contrast mono as the boot clock.
+export function ValueSlider({ value, onChange, min, max, step = 0.1, width = 168, label }: {
+  value: number;
+  onChange: (n: number) => void;
+  min: number;
+  max: number;
+  step?: number;
+  width?: number;
+  label: string;
+}) {
+  const span = max - min;
+  const pct = span > 0 ? ((value - min) / span) * 100 : 0;
+  return (
+    <div style={{
+      width,
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: 7,
+      marginTop: 2,
+    }}>
+      <input
+        className="unclaw-intensity"
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        aria-label={label}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{
+          width: '100%',
+          // Fill left of the thumb, hairline track to its right. Painted on the
+          // input itself so there's no second element to keep in sync.
+          background: `linear-gradient(to right,
+            rgba(255, 245, 235, 0.72) 0%,
+            rgba(255, 245, 235, 0.72) ${pct}%,
+            rgba(255, 255, 255, 0.14) ${pct}%,
+            rgba(255, 255, 255, 0.14) 100%)`,
+        }}
+      />
+      <div style={{
+        fontFamily: '"SF Mono", ui-monospace, Menlo, Monaco, monospace',
+        fontSize: 10,
+        letterSpacing: '0.14em',
+        color: 'var(--text-ghost)',
+        fontVariantNumeric: 'tabular-nums',
+        textShadow: '0 1px 3px rgba(0,0,0,0.55)',
+      }}>
+        {value.toFixed(1)}
+      </div>
+      <style>{`
+        input.unclaw-intensity {
+          -webkit-appearance: none;
+          appearance: none;
+          height: 2px;
+          border-radius: 999px;
+          outline: none;
+          cursor: pointer;
+        }
+        input.unclaw-intensity::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 11px;
+          height: 11px;
+          border-radius: 50%;
+          background: rgba(255, 248, 240, 0.95);
+          box-shadow: 0 1px 5px rgba(0, 0, 0, 0.6),
+                      0 0 10px rgba(255, 240, 220, 0.35);
+          cursor: pointer;
+          transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        input.unclaw-intensity:hover::-webkit-slider-thumb { transform: scale(1.18); }
+        input.unclaw-intensity:active::-webkit-slider-thumb { transform: scale(1.05); }
+        input.unclaw-intensity:focus-visible::-webkit-slider-thumb {
+          box-shadow: 0 0 0 3px rgba(196, 68, 68, 0.45);
+        }
+      `}</style>
+    </div>
+  );
+}
+
+// Backdrop STYLE picker (bgmode). A compact dropdown (same component as the
+// rest of the app), one entry per DA_Backgrounds mode. Global setting, so
+// selecting fires a live changeBGMaterial AND persists via onSelect.
+export function BackdropStylePicker({ value, onSelect }: {
+  value: number;
+  onSelect: (index: number) => void;
+}) {
+  return (
+    <div style={{ width: 150, pointerEvents: 'auto' }}>
+      <Dropdown
+        value={String(clampBgMode(value))}
+        onChange={(id) => onSelect(Number(id))}
+        options={BACKGROUNDS.map((b) => ({ id: String(b.index), label: b.name }))}
+      />
+    </div>
+  );
+}
+
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
@@ -1054,6 +1413,21 @@ function clampIndex(category: WardrobeCategory, value: number | undefined): numb
 function clampAngle(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return ((Math.round(value) % 360) + 360) % 360;
+}
+
+function clampBg(value: number | undefined): number {
+  if (value == null || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(BG_COLORS.length - 1, Math.floor(value)));
+}
+
+function clampGlow(value: number | undefined): number {
+  if (value == null || !Number.isFinite(value)) return BG_GLOW_DEFAULT;
+  return Math.max(BG_GLOW_MIN, Math.min(BG_GLOW_MAX, value));
+}
+
+function clampIntensity(value: number | undefined): number {
+  if (value == null || !Number.isFinite(value)) return LIGHT_INTENSITY_DEFAULT;
+  return Math.max(LIGHT_INTENSITY_MIN, Math.min(LIGHT_INTENSITY_MAX, value));
 }
 
 function clampAccent(value: number | undefined): number {

@@ -515,10 +515,10 @@ export function getProvider(id: LLMProviderId | null | undefined): ProviderInfo 
  *  - kokoro: local 82M open-weight model (~325 MB), soul in-process
  *  - supertonic: local ONNX TTS (~400 MB model + lazy-fetched custom
  *                voice JSONs from R2). Streaming + Grace clone shipped.
- *  - qwen3: DISABLED for now while its runtime API stabilizes. The
- *           value is kept in the union so legacy serialized profiles
- *           still typecheck; the wizard no longer offers it as an
- *           option and soul rejects it on /chat. */
+ *  - qwen3: local MLX Qwen3-TTS 0.6B (re-enabled 2026-07-17). One-click
+ *           install (~2.5 GB weights via soul /tts/qwen3/install); custom
+ *           voices are wav+txt reference pairs in soul's
+ *           data/qwen3/voices/. No key required. */
 export type TtsProviderId =
   | 'elevenlabs'
   | 'kokoro'
@@ -796,10 +796,8 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
     // selected custom voice JSON (e.g. `grace`) from R2 on first
     // synth. No key, no install panel, no field-level requirement.
   } else if (profile.tts_provider === 'qwen3') {
-    // DISABLED: the wizard no longer offers Qwen3, but a legacy
-    // serialized profile may still carry it. Treat as no required
-    // field; /validate_keys will fail the run and surface the
-    // disabled-provider error from soul.
+    // Local, keyless. Installedness is validated by /validate_keys
+    // (soul checks the MLX weights on disk), not by a field here.
   } else {
     if (!profile.elevenlabs_api_key) missing.push('ElevenLabs API key');
   }

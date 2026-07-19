@@ -94,14 +94,6 @@ interface InputBarProps {
    *  directly in the same surface the user types into, no separate
    *  view. */
   voiceActive?: boolean;
-  /** Unconfirmed model output — what voice has heard but the
-   *  LocalAgreement-2 algorithm hasn't promoted to committed yet.
-   *  Renders as a light-gray overlay sitting on top of the
-   *  textarea, positioned right after the textarea's actual content
-   *  via an invisible spacer that mirrors `message`. Gives the user
-   *  immediate visual feedback while words are still firming up,
-   *  without polluting the textarea's editable content. */
-  voiceTentative?: string;
   /** Persona switcher — chevron-prev / chevron-next, inline in row 2. */
   onPrevPersona: () => void;
   onNextPersona: () => void;
@@ -169,7 +161,6 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onExpress,
   voice,
   voiceActive = false,
-  voiceTentative = '',
   onPrevPersona,
   onNextPersona,
   onPersonaNameClick,
@@ -205,8 +196,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   //      avoid the React-state-update race that would otherwise
   //      let trailing spaces survive into the next utterance).
   //   2. App calls setText() with whatever the textarea should show
-  //      (committed text only — tentative renders inline via the
-  //      mirror overlay above, driven by the voiceTentative prop).
+  //      (committed text only — unconfirmed/tentative words are never
+  //      drawn, so the bar can't show the same word twice).
   //   3. focus() returns keyboard focus to the textarea so the user
   //      can edit immediately after a voice session.
   useImperativeHandle(forwardedRef, () => ({
@@ -339,6 +330,16 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     if (slash.active) slashReset();
   }, [slash.active, slash.query, slashReset]);
 
+  // Live handle on the voice state for the PTT listeners below. `voice` is built
+  // as an object literal by the parent on every render, so depending on it
+  // directly re-ran the effect constantly , and since vadLevel setState fires per
+  // VAD frame (~30-60Hz) while the mic is open, the cleanup's
+  // `if (pttHeld) voice.stop()` fired a frame after keydown and killed the very
+  // utterance you were holding Space to record. Read through a ref instead and
+  // register the listeners ONCE, so cleanup only runs on a real unmount.
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
+
   // Hold-Space push-to-talk. Press Space to start the mic, release to
   // stop. Skips when the user is typing in any text field (otherwise
   // every space in chat would toggle voice). Skips while voice is
@@ -359,20 +360,21 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       if (e.repeat) return;
       if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
       if (isEditableTarget(e.target)) return;
-      if (voice.disabled) return;
+      const v = voiceRef.current;
+      if (v.disabled) return;
       // If voice is already active from a click toggle, leave it alone.
       // PTT should layer ON TOP of click-to-toggle, not steal it.
-      if (voice.active) return;
+      if (v.active) return;
       pttHeld = true;
       e.preventDefault();
-      voice.start();
+      v.start();
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.code !== 'Space') return;
       if (!pttHeld) return;
       pttHeld = false;
       e.preventDefault();
-      voice.stop();
+      voiceRef.current.stop();
     };
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
@@ -381,9 +383,9 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       window.removeEventListener('keyup', onKeyUp);
       // Stop on unmount if we were holding (covers user navigating away
       // mid-utterance — don't leave the mic open).
-      if (pttHeld) voice.stop();
+      if (pttHeld) voiceRef.current.stop();
     };
-  }, [voice]);
+  }, []);
 
   const handleSend = useCallback(() => {
     if (slash.active && slash.items.length > 0) {
@@ -692,14 +694,22 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             width: '100%',
           }}
         >
-          {/* Visible mirror overlay. Renders the textarea's committed
-              text PLUS any voice tentative text inline-merged in
-              light gray. Sits BEHIND the textarea (z-index < textarea)
-              and shares font/line-height/padding so its wrapping
-              matches the textarea's exactly — when the user types or
-              voice commits, the textarea's transparent characters
-              occupy the same columns as the mirror's visible ones,
-              so the cursor caret lands in the right spot. */}
+          {/* Visible mirror overlay. Renders the textarea's committed text.
+              Sits BEHIND the textarea (z-index < textarea) and shares
+              font/line-height/padding so its wrapping matches the textarea's
+              exactly — when the user types or voice commits, the textarea's
+              transparent characters occupy the same columns as the mirror's
+              visible ones, so the cursor caret lands in the right spot.
+
+              While speaking this shows ONLY committed transcript. It used to
+              also append a gray "tentative" span, but App fed that span
+              `streaming.display` (which is committed + tentative), while
+              `message` already held the committed text — so every committed
+              word rendered TWICE, once dark and once gray. Unconfirmed words
+              are now simply not drawn: LocalAgreement-2 promotes text to
+              committed as soon as two inferences agree, so committed is already
+              fast, and not drawing the unstable tail also removes the flicker
+              it caused as words got promoted. */}
           <div
             aria-hidden
             style={{
@@ -724,14 +734,6 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             }}
           >
             {message}
-            {voiceActive && voiceTentative && (
-              <>
-                {message && !message.endsWith(' ') ? ' ' : ''}
-                <span style={{ color: 'rgba(255, 255, 255, 0.40)' }}>
-                  {voiceTentative}
-                </span>
-              </>
-            )}
             {/* Slash-command ghost-text autocomplete. Only shows when
                 there's a single best match the user is in the middle
                 of typing — sits flush against the typed text so the
@@ -1156,16 +1158,16 @@ function VoiceButton({
   isSending: boolean;
   reduce: boolean;
 }) {
+  // Monochrome by default. The accent is precious (DESIGN.md): it appears only
+  // at the one real moment of attention, the AI transcribing/speaking. Listening
+  // is conveyed by MOTION (the strands ripple with your voice), not by hue , the
+  // old green/teal read as neon and fought the stream for attention.
   const ringColor = voice.isTranscribing
     ? 'var(--accent)'
-    : voice.isUserSpeaking
-      ? 'var(--live)'
-      : 'rgba(255,255,255,0.35)';
+    : 'rgba(255,255,255,0.35)';
   const barColor = voice.isTranscribing
     ? 'rgba(40, 20, 20, 0.85)'
-    : voice.isUserSpeaking
-      ? 'rgba(20, 50, 28, 0.85)'
-      : 'rgba(20, 20, 20, 0.78)';
+    : 'rgba(20, 20, 20, 0.78)';
 
   // Mode drives the bar visuals:
   //   - 'transcribing' → phase-offset wave keyframe (CSS animation)
@@ -1185,11 +1187,11 @@ function VoiceButton({
     0,
     Math.min(1, voice.isTranscribing ? 0.7 : voice.vadLevel),
   );
-  // Palette tracks the existing state semantics: warm ember while the AI speaks,
-  // green while the mic is listening (matches --live / --accent usage).
-  const strandColors = voice.isTranscribing
-    ? ['#c44444', '#ff7a5c', '#ffc24d']
-    : ['#22c55e', '#5eead4', '#c44444'];
+  // Frosted-slate monochrome. The strands read as light, not as a colour, so the
+  // orb sits in the chrome instead of competing with the stream. Listening is
+  // communicated by how they MOVE (amplitude/speed follow vadLevel above), which
+  // is the signal that actually matters; hue added nothing but noise.
+  const strandColors = ['#e8ecf4', '#b8c2d4', '#8892a6'];
 
   // Plain button — visibility is owned by the parent wrapper div's
   // opacity transition. Mixing framer-motion's initial/animate/exit
@@ -1223,7 +1225,10 @@ function VoiceButton({
         alignItems: 'center',
         justifyContent: 'center',
         padding: 0,
-        animation: isSending && !reduce
+        // Breathe only on the RESTING pill while she replies. When voice mode is
+        // active the strands are already animating; pulsing the whole orb on top
+        // of them just read as jitter.
+        animation: isSending && !voice.active && !reduce
           ? 'voice-breathing 1.6s ease-in-out infinite'
           : undefined,
         transition:
@@ -1243,7 +1248,9 @@ function VoiceButton({
           taper={2.2}
           spread={1}
           intensity={0.5 + strandEnergy * 0.5}
-          saturation={1.3}
+          // 1.0 = leave the (already monochrome) colours alone. The old 1.3
+          // pumped saturation, which is what made the strands read as neon.
+          saturation={1.0}
           opacity={1}
           scale={1.4}
         />

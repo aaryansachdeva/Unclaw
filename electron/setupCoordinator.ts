@@ -435,6 +435,24 @@ async function runStageRuntime(
     { stream: true, extraEnv: uvEnv, timeoutMs: 20 * 60_000 },
   );
 
+  // Strip torch/torchaudio. Nothing on the Mac path imports them (T2F is
+  // lazy + MLX, Kokoro is MLX, lipsync is ONNX, STT is mlx-whisper), but
+  // mlx-whisper's package METADATA declares torch, so the resolve above
+  // drags ~450 MB of wheels back in on every fresh install. Requirements
+  // can't express "ignore this transitive dep" portably; an explicit
+  // uninstall after the resolve is deterministic under any resolver.
+  // Best-effort: if they were never installed, uv exits fine.
+  await runCommand(
+    window,
+    uv,
+    [
+      'pip', 'uninstall',
+      '--python', venvPythonPath(paths.pythonEnv),
+      'torch', 'torchaudio',
+    ],
+    { stream: true, extraEnv: uvEnv, timeoutMs: 2 * 60_000 },
+  );
+
   setStage(window, {
     id: 'runtime',
     progress: 1,
@@ -530,6 +548,19 @@ export async function syncSoulVenv(
       '--python', venvPython,
       '-r', requirementsFile,
       '--index-strategy', 'unsafe-best-match',
+    ],
+    { stream: true, extraEnv: uvEnv },
+  );
+  // Same torch strip as the first-run install: mlx-whisper's metadata
+  // re-drags torch on every resolve even though nothing imports it on
+  // the Mac path. Keep the venv in the shipped (torch-free) shape.
+  await runCommand(
+    window!,
+    uv,
+    [
+      'pip', 'uninstall',
+      '--python', venvPython,
+      'torch', 'torchaudio',
     ],
     { stream: true, extraEnv: uvEnv },
   );
