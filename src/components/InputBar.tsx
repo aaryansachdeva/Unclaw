@@ -1195,15 +1195,15 @@ function AgentSwitcher({
                     onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; }}
                     onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
                   >
-                    {/* Presence dot: filled+glowing when this agent is the live
-                        one, a hollow ring when idle. */}
+                    {/* Presence dot. TODO: wire to real per-agent activity;
+                        for now every agent reads "idle" (there's no live
+                        task-status signal yet), so a hollow ring always. */}
                     <span
                       aria-hidden
                       style={{
                         width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-                        background: active ? 'var(--live, #8cbf8a)' : 'transparent',
-                        border: active ? 'none' : '1.5px solid rgba(255,255,255,0.22)',
-                        boxShadow: active ? '0 0 6px rgba(140,191,138,0.6)' : 'none',
+                        background: 'transparent',
+                        border: '1.5px solid rgba(255,255,255,0.22)',
                         transition: 'all 150ms var(--ease-out-quart)',
                       }}
                     />
@@ -1214,9 +1214,9 @@ function AgentSwitcher({
                       flexShrink: 0,
                       fontSize: 9.5, fontWeight: 600, letterSpacing: '0.06em',
                       textTransform: 'uppercase',
-                      color: active ? 'var(--live, #8cbf8a)' : 'var(--text-ghost)',
+                      color: 'var(--text-ghost)',
                     }}>
-                      {active ? 'Active' : 'Idle'}
+                      Idle
                     </span>
                   </button>
                 </li>

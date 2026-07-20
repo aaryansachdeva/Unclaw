@@ -82,6 +82,42 @@ export class StreamingTranscriber {
   /** EMA-smoothed RMS so the visualizer doesn't strobe between frames. */
   private smoothedRms = 0;
 
+  // --- Sample-rate safety net -----------------------------------------
+  // We create the AudioContext at 16 kHz (what Moonshine/Whisper expect),
+  // but some platforms IGNORE that hint and hand back a native-rate context
+  // (48 kHz is common, and this Mac's UnclawSilentSink Core Audio driver can
+  // force it). If we then ship those frames untouched, soul labels them as
+  // 16 kHz and the model hears everything ~3x too fast → total gibberish.
+  // So we resample to 16 kHz on the fly whenever the context isn't already
+  // 16 kHz. Continuous linear resampler: `_rsPos` carries the fractional read
+  // position across frames and `_rsPrev` holds the previous frame's last
+  // sample for interpolation across the boundary.
+  private _rsNeed = false;
+  private _rsStep = 1;      // input samples consumed per 16 kHz output sample
+  private _rsPos = 0;       // fractional read index into the current frame
+  private _rsPrev = 0;      // last sample of the previous frame
+
+  private resampleTo16k(frame: Float32Array): Float32Array {
+    const step = this._rsStep;
+    const n = frame.length;
+    // Upper bound on output length; trim at the end.
+    const out = new Float32Array(Math.ceil((n - this._rsPos) / step) + 1);
+    let k = 0;
+    let pos = this._rsPos;
+    while (pos < n) {
+      const i = Math.floor(pos);
+      const frac = pos - i;
+      const a = i < 0 ? this._rsPrev : frame[i];
+      const j = i + 1;
+      const b = j < 0 ? this._rsPrev : (j < n ? frame[j] : frame[n - 1]);
+      out[k++] = a + (b - a) * frac;
+      pos += step;
+    }
+    this._rsPos = pos - n;          // carry remainder into next frame
+    this._rsPrev = frame[n - 1];
+    return out.subarray(0, k);
+  }
+
   on(listener: StreamingListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -180,6 +216,16 @@ export class StreamingTranscriber {
       if (this.ctx.state === 'suspended') {
         await this.ctx.resume();
       }
+      // The 16 kHz hint above is best-effort. If the platform gave us a
+      // different rate, resample frames to 16 kHz before sending (see the
+      // resampler fields). Reset the resampler state for this session.
+      const actualRate = this.ctx.sampleRate;
+      this._rsNeed = actualRate !== SAMPLE_RATE;
+      this._rsStep = actualRate / SAMPLE_RATE;
+      this._rsPos = 0;
+      this._rsPrev = 0;
+      console.info('[stt] AudioContext', actualRate, 'Hz',
+        this._rsNeed ? `→ resampling to ${SAMPLE_RATE}Hz` : '(native 16k)');
 
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -211,9 +257,15 @@ export class StreamingTranscriber {
         // hasn't started speaking through yet.
         const ws = this.ws;
         if (ws && ws.readyState === WebSocket.OPEN) {
-          // Float32Array.buffer is transferable, but WebSocket.send()
-          // accepts ArrayBuffer directly so we just ship buffer.
-          ws.send(data.samples.buffer);
+          // Resample to 16 kHz if the context isn't already there, then ship.
+          // (A no-op copy-free pass-through when the 16 kHz hint was honored.)
+          if (this._rsNeed) {
+            const rs = this.resampleTo16k(data.samples);
+            // subarray shares the backing buffer; slice to send just our span.
+            ws.send(rs.slice().buffer);
+          } else {
+            ws.send(data.samples.buffer);
+          }
         }
       };
 
