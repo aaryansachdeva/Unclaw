@@ -12,11 +12,14 @@ import { RemindersPanel } from './components/Reminders';
 import { StocksPanel } from './components/Stocks';
 import { NewsPanel } from './components/News';
 import { WeatherPanel } from './components/Weather';
-import { CustomizationOverlay, ACCENT_COLORS, BG_COLORS, BG_GLOW_DEFAULT, LIGHT_INTENSITY_DEFAULT } from './components/CustomizationOverlay';
+// Shared color/lighting constants live in CustomizationOverlay; the unified
+// customization surface itself is CustomWardrobe (drives every character now).
+import { ACCENT_COLORS, BG_COLORS, BG_GLOW_DEFAULT, LIGHT_INTENSITY_DEFAULT, CLOTHING_COLORS } from './components/CustomizationOverlay';
 import { CustomWardrobe } from './components/CustomWardrobe';
+import { CameraModeToggle } from './components/CameraModeToggle';
 import { StreamEffects } from './components/StreamEffects';
-import { isCustomCharacter } from './wardrobe/catalog';
 import { dressCharacter, type DressScope } from './wardrobe/dressCharacter';
+import { cameraCustomize, cameraForMode, type CameraMode } from './wardrobe/camera';
 import { PulseGrid } from './components/PulseGrid';
 import { hexToRgb01, round3 } from './components/ColorPickerPanel';
 import { useEnvironment } from './hooks/useEnvironment';
@@ -966,12 +969,43 @@ function AppMain() {
   // bounded retry). Cleared on characterReady success + when consumed by a
   // failure.
   const switchDispatchedRef = useRef<string | null>(null);
+  // Non-null (a setTimeout id) while a "same character → blank → same character"
+  // interstitial is mid-flight. UE's SwapCharacter no-ops when the target class
+  // is already live (two roster instances of one character), so switching
+  // between them doesn't transition. We route it through a blank frame for a
+  // graceful fade. While set, the 'blank' rejection (agentSwitchFailed) is
+  // expected and must not trigger the retry/reconcile.
+  const sameIdBlankRef = useRef<number | null>(null);
+  // How long the blank frame shows before the same character respawns.
+  const SAME_ID_BLANK_MS = 380;
 
-  const emitAgentSwitch = useCallback((agentId: string, dir: number) => {
+  const emitAgentSwitch = useCallback((
+    agentId: string, dir: number, wardrobe?: WardrobeSettings | null,
+  ) => {
     // Leaving a character obsoletes anything still being applied to it.
     dressEpochRef.current += 1;
     cancelScheduledIdleRevert();
-    pixelStreaming?.emitUIInteraction({ EventType: 'agentSwitch', agentId, slideDir: dir });
+    // MERGED SWITCH+DRESS: agentSwitch now carries the wardrobe INDICES
+    // (top/bottom/shoes/hair/eyelash/eyebrow) so UE applies them inside the swap
+    // graph, right after SwapToCharacter completes — no async window where a
+    // separate initializeClothing could miss the character. Untouched slots go
+    // as -1, the "don't touch, keep the authored default" sentinel (UE skips the
+    // Update when index < 0). Absent on the base six for brows/lashes (they have
+    // none) → -1. Harmless to older UE builds that don't read these fields; the
+    // characterReady dress chain still runs for colors/blends (and as a
+    // belt-and-suspenders for indices) until we cut over.
+    const idx = (v?: number) => (v == null || !Number.isFinite(v) ? -1 : Math.floor(v));
+    pixelStreaming?.emitUIInteraction({
+      EventType: 'agentSwitch',
+      agentId,
+      slideDir: dir,
+      top:     idx(wardrobe?.topIndex),
+      bottom:  idx(wardrobe?.bottomIndex),
+      shoes:   idx(wardrobe?.shoesIndex),
+      hair:    idx(wardrobe?.hairIndex),
+      eyelash: idx(wardrobe?.lashIndex),
+      eyebrow: idx(wardrobe?.browIndex),
+    });
   }, [pixelStreaming]);
 
   // Switch UE to an agent, handling the same-class case: UE's SwapCharacter
@@ -989,30 +1023,51 @@ function AppMain() {
   const switchUeToAgent = useCallback((
     agentId: string, dir: number, wardrobe?: WardrobeSettings | null,
   ) => {
-    const alreadyLive =
-      ueActiveAgentRef.current != null &&
-      ueActiveAgentRef.current === agentId.toLowerCase();
-    emitAgentSwitch(agentId, dir);
-    if (alreadyLive) {
-      void applyInstanceWardrobeRef.current?.(wardrobe, agentId);
-    } else {
+    // A new switch supersedes any pending same-id blank interstitial.
+    if (sameIdBlankRef.current != null) {
+      window.clearTimeout(sameIdBlankRef.current);
+      sameIdBlankRef.current = null;
+    }
+    const lc = agentId.toLowerCase();
+    // Fresh spawn of `agentId`: emit the switch, arm the retry/dispatch state,
+    // and record a pending switch so characterReady dresses the selected
+    // instance under this epoch. The environment (key light + backdrop) is
+    // GLOBAL, re-asserted at characterReady, so agentSwitch goes out alone.
+    const spawnFresh = () => {
+      emitAgentSwitch(agentId, dir, wardrobe);
       ueActiveAgentRef.current = null;
-      const lc = agentId.toLowerCase();
-      // Remember the target so `agentSwitchFailed` can replay it. Reset the
-      // retry counter only on a genuinely new target (a retry re-enters with
-      // the same agentId and must keep counting).
+      // Reset retries only on a genuinely new target (a replay keeps counting).
       if (lastSwitchTargetRef.current?.agentId.toLowerCase() !== lc) {
         switchRetryRef.current = 0;
       }
       lastSwitchTargetRef.current = { agentId, dir, wardrobe: wardrobe ?? null };
       const epoch = ++dressEpochRef.current;
       pendingSwitchRef.current = { agentId: lc, epoch };
-      // The environment (key light + backdrop) is GLOBAL now, applied by
-      // applyEnvironment (re-asserted at characterReady), so there is no per-
-      // character "scene half" to fire at switch time — agentSwitch goes out
-      // alone, and the per-character OUTFIT (clothing/colors/blends) is dressed
-      // at characterReady once the body exists, under this switch's epoch.
+    };
+    const alreadyLive =
+      ueActiveAgentRef.current != null && ueActiveAgentRef.current === lc;
+    if (alreadyLive) {
+      // Same character CLASS, different roster instance (e.g. grace → grace).
+      // UE's SwapCharacter no-ops when the class is already live, so a plain
+      // re-switch doesn't transition and re-dressing in place snaps the outfit
+      // with no motion. Route it through a blank frame — grace → blank → grace
+      // — so the character fades out and back in, and characterReady fires again
+      // to dress the incoming instance. Clear the switch state first so the
+      // 'blank' rejection (agentSwitchFailed) can't replay the old target while
+      // we wait for the timer.
+      lastSwitchTargetRef.current = null;
+      switchRetryRef.current = 0;
+      switchDispatchedRef.current = null;
+      pendingSwitchRef.current = null;
+      emitAgentSwitch('blank', dir);      // clear the stage (bumps epoch, cancels idle)
+      ueActiveAgentRef.current = null;
+      sameIdBlankRef.current = window.setTimeout(() => {
+        sameIdBlankRef.current = null;
+        spawnFresh();                      // now NOT alreadyLive -> real respawn
+      }, SAME_ID_BLANK_MS);
+      return;
     }
+    spawnFresh();
   }, [emitAgentSwitch]);
   // Live ref to switchUeToAgent so the agentSwitchFailed retry (and headless
   // drivers) can call the current fn without re-subscribing.
@@ -2436,31 +2491,38 @@ function AppMain() {
   // re-sending an unchanged material (which would reset the backdrop color).
   // Reset to undefined on disconnect so a reconnect re-asserts it once.
   const lastAppliedBgmodeRef = useRef<number | null | undefined>(undefined);
-  const applyEnvironment = useCallback(() => {
+  const applyEnvironment = useCallback((opts?: { forceMaterial?: boolean }) => {
     if (!pixelStreaming) return;
     const e = environment;
-    // Backdrop. ORDER MATTERS: changeBGMaterial swaps the backdrop material,
-    // which resets its color parameter to the material's default — so the
+    // Backdrop. ORDER MATTERS: changeBGMaterial swaps/re-instantiates the
+    // backdrop material, which resets its color parameter to the material's
+    // default (a frame later, even if we set the color right after) — so the
     // material MUST be applied BEFORE the color, or it wipes the color we just
     // set (the "bg color reverts on save" bug: applyEnvironment ran the color
     // then the material, and the material reset it).
-    // changeBGMaterial swaps/re-instantiates the backdrop material, which
-    // resets its color parameter to the material default (a frame later, even
-    // if we set the color right after). So send it ONLY when the material
-    // actually changed — never on a color-only re-apply, or it wipes the color.
-    // (Reset on disconnect so a reconnect re-asserts the material once.)
-    if (e.bgmode != null && e.bgmode !== lastAppliedBgmodeRef.current) {
+    //
+    // On a normal color-only re-apply we SKIP the material (send it only when
+    // bgmode actually changed) precisely so it can't wipe the color. But on a
+    // SESSION RESET, UE has dropped the backdrop back to its engine default, so
+    // the material genuinely must be re-asserted first — callers on that path
+    // pass forceMaterial. The order (material → color) is identical either way;
+    // forceMaterial only decides WHETHER the material is re-sent, never after.
+    const force = opts?.forceMaterial === true;
+    let materialEmitted = false;
+    if (e.bgmode != null && (force || e.bgmode !== lastAppliedBgmodeRef.current)) {
       pixelStreaming.emitUIInteraction({
         EventType: 'changeBGMaterial',
         bgmode: e.bgmode,
         Timestamp: new Date().toISOString(),
       });
       lastAppliedBgmodeRef.current = e.bgmode;
+      materialEmitted = true;
     }
     const bgRgb = e.bgColorHex
       ? hexToRgb01(e.bgColorHex)
       : (BG_COLORS[e.bgColorIndex ?? 0] ?? BG_COLORS[0]);
-    pixelStreaming.emitUIInteraction({
+    const ps = pixelStreaming;
+    const emitColor = () => ps.emitUIInteraction({
       EventType: 'changeBGColor',
       'bgcolor.r': round3(bgRgb.r),
       'bgcolor.g': round3(bgRgb.g),
@@ -2468,6 +2530,17 @@ function AppMain() {
       value: round3(e.bgGlow ?? BG_GLOW_DEFAULT),
       Timestamp: new Date().toISOString(),
     });
+    emitColor();
+    // changeBGMaterial re-instantiates the backdrop material and resets its
+    // color a FRAME LATER (async) — so the color we send right after gets wiped
+    // by that late reset. This is why the saved color lands on SAVE (where the
+    // material isn't re-sent, bgmode unchanged) but reverts on LOAD / reconnect
+    // (where it is). When the material was (re)emitted, re-assert the color a
+    // couple of beats later so it survives the material's async reset.
+    if (materialEmitted) {
+      window.setTimeout(emitColor, 200);
+      window.setTimeout(emitColor, 600);
+    }
     // Key light.
     if (e.lightingAngle != null) {
       pixelStreaming.emitUIInteraction({
@@ -2502,6 +2575,38 @@ function AppMain() {
   useEffect(() => {
     if (pixelStreaming) applyEnvironment();
   }, [environment, pixelStreaming, applyEnvironment]);
+
+  // ===== Camera ==========================================================
+  // We drive the camera explicitly (updateCameraFromLocation) instead of
+  // letting it move as a side-effect of wardrobeModeOn/Off. The desired framing
+  // is a function of (which character, are we customizing, the chosen mode):
+  // each character has its own resting height. Customization always pulls back
+  // to show the whole figure; otherwise the user's toggle (default / waist /
+  // full) picks the shot. locB.x/y/z go on the wire as NUMBERS (UE reads them
+  // with Get Number Field). Optionally pass an explicit agentId (e.g. from
+  // characterReady, before activeAgentId state has caught up to the new spawn).
+  const [cameraMode, setCameraMode] = useState<CameraMode>('default');
+  const applyCamera = useCallback((agentIdOverride?: string | null) => {
+    if (!pixelStreaming) return;
+    const aid = agentIdOverride ?? activeAgentId;
+    const [x, y, z] = customizationActive ? cameraCustomize(aid) : cameraForMode(aid, cameraMode);
+    pixelStreaming.emitUIInteraction({
+      EventType: 'updateCameraFromLocation',
+      'locB.x': round3(x),
+      'locB.y': round3(y),
+      'locB.z': round3(z),
+      Timestamp: new Date().toISOString(),
+    });
+  }, [pixelStreaming, activeAgentId, customizationActive, cameraMode]);
+  const applyCameraRef = useRef(applyCamera);
+  applyCameraRef.current = applyCamera;
+  // Re-frame whenever the active character, the customize mode, or the chosen
+  // camera mode changes (and once the stream is up). characterReady also nudges
+  // this (below) so a fresh cold-boot spawn — which the connect-time emit races
+  // ahead of — still lands.
+  useEffect(() => {
+    if (pixelStreaming) applyCamera();
+  }, [activeAgentId, customizationActive, cameraMode, pixelStreaming, applyCamera]);
 
 
   // Mood-accent bleed. The GLOBAL key-light color the user picks
@@ -2588,13 +2693,20 @@ function AppMain() {
       switchDispatchedRef.current = null;
       ueActiveAgentRef.current = spawned;
       setUeActiveAgentId(spawned);
+      // Re-frame the camera for the character that just spawned. Every switch
+      // lands here (each character is a different height), and passing `spawned`
+      // explicitly avoids racing the activeAgentId state update. Fires on cold
+      // boot too (this is the reliable point after UE is actually ready).
+      applyCameraRef.current?.(spawned);
       // Re-assert the GLOBAL environment (backdrop + key light) ONLY when this
       // spawn is part of a session (re)establishment (cold boot / reset /
       // reconnect) — where UE came up at its default. A user-initiated
       // character switch keeps the persistent backdrop, so we don't re-send it.
       if (reapplyEnvOnNextReadyRef.current) {
         reapplyEnvOnNextReadyRef.current = false;
-        applyEnvironmentRef.current?.();
+        // Session (re)establishment: UE reset the backdrop to its default, so
+        // force the material to re-assert BEFORE the color (material → color).
+        applyEnvironmentRef.current?.({ forceMaterial: true });
       }
       // Stale/racing-signal guard: only dress when the character UE actually
       // spawned (msg.agentId) matches the instance we're targeting.
@@ -2630,6 +2742,46 @@ function AppMain() {
     return () => ps.removeResponseEventListener?.('unclaw-character-ready');
   }, [pixelStreaming, applyInstanceWardrobe]);
 
+  // PER-SLOT CLOTHING COLOUR. The merged agentSwitch carries the wardrobe
+  // INDICES; UE async-loads each garment mesh and reports updateTopSuccess /
+  // updateBottomSuccess / updateShoesSuccess once that mesh lands. A garment's
+  // colour (a dynamic material instance) can only take AFTER its mesh exists, so
+  // we send changeClothingColor off these signals — the moment each slot is
+  // ready, coloured from the selected instance's saved pair. No-op when the slot
+  // has no saved colour (keeps the mesh default). hair/eyelash/eyebrow are
+  // grooms with no clothing colour. Live edits during customization colour
+  // directly (the character is already on-screen), so they don't need this.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const CAT_FOR: Record<string, 'top' | 'bottom' | 'shoes'> = {
+      updateTopSuccess: 'top', updateBottomSuccess: 'bottom', updateShoesSuccess: 'shoes',
+    };
+    const onUpdate = (raw: string) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { return; }
+      const et = (parsed as { EventType?: unknown })?.EventType;
+      if (typeof et !== 'string') return;
+      const cat = CAT_FOR[et];
+      if (!cat) return;
+      const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current);
+      const pair = inst?.wardrobe?.clothingColors?.[cat];
+      if (!pair) return; // no saved colour for this slot -> leave the mesh default
+      const c1 = pair.c1Hex ? hexToRgb01(pair.c1Hex) : (CLOTHING_COLORS[pair.c1] ?? CLOTHING_COLORS[0]);
+      const c2 = pair.c2Hex ? hexToRgb01(pair.c2Hex) : (CLOTHING_COLORS[pair.c2] ?? CLOTHING_COLORS[0]);
+      pixelStreaming.emitUIInteraction({
+        EventType: 'changeClothingColor',
+        wardrobeCategory: cat,
+        'color1.r': c1.r.toFixed(3), 'color1.g': c1.g.toFixed(3), 'color1.b': c1.b.toFixed(3),
+        'color2.r': c2.r.toFixed(3), 'color2.g': c2.g.toFixed(3), 'color2.b': c2.b.toFixed(3),
+        Timestamp: new Date().toISOString(),
+      });
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ps = pixelStreaming as any;
+    ps.addResponseEventListener?.('unclaw-update-success', onUpdate);
+    return () => ps.removeResponseEventListener?.('unclaw-update-success');
+  }, [pixelStreaming]);
+
   // SWAP FAILURE: the UE subsystem now broadcasts `agentSwitchFailed` when a
   // swap's cast fails or resolves to blank (previously it stalled silently and
   // the frontend waited forever on a characterReady that never came). Replay
@@ -2648,6 +2800,10 @@ function AppMain() {
       // 'blank' agentSwitch is EXPECTED. Don't retry or reconcile — that would
       // drag the last agent back onto the hidden stage. Cancel handles restore.
       if (onAddSlotRef.current) return;
+      // A same-id blank interstitial (grace → blank → grace) is mid-flight; the
+      // 'blank' rejection is expected and the scheduled respawn will bring the
+      // character back. Don't retry/reconcile off it.
+      if (sameIdBlankRef.current != null) return;
       const target = lastSwitchTargetRef.current;
       // If UE confirmed this swap DISPATCHED (agentSwitchSuccess) and it still
       // failed, the id was valid but the incoming class isn't a BP_CharacterBase
@@ -2743,8 +2899,13 @@ function AppMain() {
         // No characterReady fires on this path, so without this the saved
         // backdrop color silently reverts to UE's default on any reconcile
         // that lands on an already-live character (warm reconnect, soul
-        // restart, reset) — read as "the bg color doesn't save".
-        applyEnvironmentRef.current?.();
+        // restart, reset) — read as "the bg color doesn't save". This is a
+        // reset path (UE dropped the backdrop to default), so force the
+        // material to re-assert BEFORE the color (material → color).
+        applyEnvironmentRef.current?.({ forceMaterial: true });
+        // Same reasoning for the camera: no characterReady fires here, so
+        // re-frame for the already-live character (warm reconnect / reset).
+        applyCameraRef.current?.(live);
       } else {
         // Blank or a different character: switch through the same path the
         // carousel uses, so the scene half (light + backdrop) applies while
@@ -2795,6 +2956,11 @@ function AppMain() {
     cancelScheduledIdleRevert();
     ueActiveAgentRef.current = null;
     setUeActiveAgentId(null);
+    // A reset/reconnect clears UE's backdrop material back to default, so the
+    // material must be re-asserted by the next applyEnvironment. Clear the
+    // skip-cache (otherwise applyEnvironment thinks UE still has it and the
+    // backdrop stays default after a reset).
+    lastAppliedBgmodeRef.current = undefined;
     let attempts = 0;
     const ask = () => {
       if (initialResolvedRef.current) return;
@@ -3460,43 +3626,28 @@ function AppMain() {
           properly fire wardrobeModeOff. */}
       <AnimatePresence>
         {customizationActive && (
-          // Two customization surfaces, picked by what the character IS. The
-          // custom-pipeline builds carry 34 hair / 18 brows / 6 lashes with
-          // thumbnails, which a blind stepper can't browse; the original six
-          // have a handful per slot and no art, which a grid would pad with
-          // empty tiles. Same props either way.
-          isCustomCharacter(activeAgentId) ? (
-            <CustomWardrobe
-              key="custom-wardrobe"
-              initial={{
-                ...(currentInstance?.wardrobe ?? {}),
-                // Environment (backdrop + light + effect) is GLOBAL: overlay the
-                // current globals so the pane opens on them, not on any stale
-                // per-instance copy left in the wardrobe blob.
-                ...environment,
-              }}
-              onEmit={emitWardrobeDescriptor}
-              onSave={handleSaveWardrobe}
-              onCancel={handleExitCustomization}
-              onEffect={setEffectPreview}
-              bgMode={environment.bgmode}
-              onBgMode={(m) => setEnvironment({ bgmode: m })}
-            />
-          ) : (
-            <CustomizationOverlay
-              key="customization"
-              initial={{
-                ...(currentInstance?.wardrobe ?? {}),
-                // Environment (backdrop + light) is GLOBAL: overlay current globals.
-                ...environment,
-              }}
-              onEmit={emitWardrobeDescriptor}
-              onSave={handleSaveWardrobe}
-              onCancel={handleExitCustomization}
-              bgMode={environment.bgmode}
-              onBgMode={(m) => setEnvironment({ bgmode: m })}
-            />
-          )
+          // One unified customization surface for every character. It resolves
+          // its own wardrobe from the active agent id: custom-pipeline builds
+          // get the full catalog (34 hair / 18 brows / 6 lashes + body); the
+          // base six get their restricted set (own hair, shared clothing, no
+          // brows/lashes, no body). See wardrobeForAgent in catalog.ts.
+          <CustomWardrobe
+            key="custom-wardrobe"
+            agentId={activeAgentId}
+            initial={{
+              ...(currentInstance?.wardrobe ?? {}),
+              // Environment (backdrop + light + effect) is GLOBAL: overlay the
+              // current globals so the pane opens on them, not on any stale
+              // per-instance copy left in the wardrobe blob.
+              ...environment,
+            }}
+            onEmit={emitWardrobeDescriptor}
+            onSave={handleSaveWardrobe}
+            onCancel={handleExitCustomization}
+            onEffect={setEffectPreview}
+            bgMode={environment.bgmode}
+            onBgMode={(m) => setEnvironment({ bgmode: m })}
+          />
         )}
       </AnimatePresence>
 
@@ -3771,6 +3922,14 @@ function AppMain() {
                 pointerEvents: 'none',
               }}
             >
+              {/* Camera framing toggle, floats just above the input bar.
+                  Only while a stream is up and not in customization (which owns
+                  its own full-figure framing). */}
+              {isConnected && !customizationActive && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8, pointerEvents: 'auto' }}>
+                  <CameraModeToggle mode={cameraMode} onChange={setCameraMode} />
+                </div>
+              )}
               <div style={{ pointerEvents: 'auto' }}>
                 <InputBar
                   ref={inputBarRef}

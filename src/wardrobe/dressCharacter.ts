@@ -54,8 +54,7 @@
 // dressing a character it no longer owns instead of racing the next chain.
 
 import type { WardrobeSettings } from '../services/userSettings';
-import { CLOTHING_COLORS } from '../components/CustomizationOverlay';
-import { hexToRgb01, round3 } from '../components/ColorPickerPanel';
+import { round3 } from '../components/ColorPickerPanel';
 import { isCustomCharacter } from './catalog';
 
 export type DescriptorPayload = Record<string, unknown> & { EventType: string };
@@ -85,77 +84,29 @@ export function buildDressPayloads(
 ): DescriptorPayload[] {
   const out: DescriptorPayload[] = [];
 
-  // The ENVIRONMENT (key light + backdrop) is GLOBAL now — applied by App.tsx's
-  // applyEnvironment on every switch (changeLightAngle/changeLightColor +
-  // changeBGColor/changeBGMaterial), NOT per-instance here. See
-  // src/hooks/useEnvironment.ts. So the 'scene' scope emits nothing; every
-  // per-character payload below is OUTFIT (needs a body to hang on).
-  if (scope !== 'scene') {
-    const idx = {
-      top: w.topIndex, bottom: w.bottomIndex,
-      shoes: w.shoesIndex, hair: w.hairIndex,
-    } as const;
-    const cats = (Object.keys(idx) as Array<keyof typeof idx>)
-      .filter((c) => idx[c] != null);
-    if (cats.length === 4) {
+  // As of the merged-switch cutover, this switch-time chain carries ONLY body
+  // blends. Everything else moved:
+  //   * clothing INDICES (top/bottom/shoes/hair/eyelash/eyebrow) ride on the
+  //     merged `agentSwitch` descriptor (emitAgentSwitch), applied UE-side inside
+  //     the swap graph after the async spawn — no more initializeClothing.
+  //   * clothing COLORS are applied by App.tsx on the per-slot updateXSuccess
+  //     responses, because the garment mesh must exist before its DMI colour can
+  //     take (each Update async-loads the mesh).
+  //   * the ENVIRONMENT (light + backdrop) is GLOBAL (App.tsx applyEnvironment).
+  // Body blends stay here: they act on the base body mesh, which exists at
+  // spawn, so they're safe at characterReady. Custom builds only.
+  if (scope !== 'scene' && isCustomCharacter(agentId)) {
+    // Both axes home = the authored shape; re-asserting zeroes buys nothing.
+    const h = w.heightBlend ?? 0;
+    const wt = w.weightBlend ?? 0;
+    if (h !== 0 || wt !== 0) {
       out.push({
-        EventType: 'initializeClothing',
-        top: idx.top!, bottom: idx.bottom!, shoes: idx.shoes!, hair: idx.hair!,
+        EventType: 'setBlends',
+        tall:  round3(Math.max(0, h)),
+        short: round3(Math.max(0, -h)),
+        fat:   round3(Math.max(0, wt)),
+        slim:  round3(Math.max(0, -wt)),
       });
-    } else {
-      for (const c of cats) {
-        out.push({
-          EventType: 'changeWardrobeItem',
-          wardrobeCategory: c,
-          wardrobeIndex: idx[c]!,
-        });
-      }
-    }
-    // Custom-pipeline builds only; the original six have no such categories.
-    if (isCustomCharacter(agentId)) {
-      for (const [cat, i] of [
-        ['eyebrow', w.browIndex],
-        ['eyelash', w.lashIndex],
-      ] as const) {
-        if (i == null) continue;
-        out.push({
-          EventType: 'changeWardrobeItem',
-          wardrobeCategory: cat,
-          wardrobeIndex: i,
-        });
-      }
-      // Both axes home = the authored shape; re-asserting zeroes buys nothing.
-      const h = w.heightBlend ?? 0;
-      const wt = w.weightBlend ?? 0;
-      if (h !== 0 || wt !== 0) {
-        out.push({
-          EventType: 'setBlends',
-          tall:  round3(Math.max(0, h)),
-          short: round3(Math.max(0, -h)),
-          fat:   round3(Math.max(0, wt)),
-          slim:  round3(Math.max(0, -wt)),
-        });
-      }
-    }
-    // Colors AFTER the garments they tint. Ordered channel makes the
-    // back-to-back send safe: UE still applies them in this order.
-    if (w.clothingColors) {
-      for (const cat of ['top', 'bottom', 'shoes'] as const) {
-        const pair = w.clothingColors[cat];
-        if (!pair) continue;
-        const c1 = pair.c1Hex ? hexToRgb01(pair.c1Hex) : (CLOTHING_COLORS[pair.c1] ?? CLOTHING_COLORS[0]);
-        const c2 = pair.c2Hex ? hexToRgb01(pair.c2Hex) : (CLOTHING_COLORS[pair.c2] ?? CLOTHING_COLORS[0]);
-        out.push({
-          EventType: 'changeClothingColor',
-          wardrobeCategory: cat,
-          'color1.r': c1.r.toFixed(3),
-          'color1.g': c1.g.toFixed(3),
-          'color1.b': c1.b.toFixed(3),
-          'color2.r': c2.r.toFixed(3),
-          'color2.g': c2.g.toFixed(3),
-          'color2.b': c2.b.toFixed(3),
-        });
-      }
     }
   }
 

@@ -195,3 +195,120 @@ export function clampCustomIndex(cat: CustomCategory, value: number | undefined)
 export function isCustomCharacter(agentId: string | null | undefined): boolean {
   return !!agentId && agentId.endsWith('_custom');
 }
+
+// ======================================================================
+// BASE (non-custom) characters — the original six: grace / mark / ava /
+// goblin / chris / joi.
+//
+// These do NOT use the shared 34-hair / 18-brow / 6-lash catalog. Each has
+// its own UE wardrobe DataAsset (DA_Wardrobe_<Name>) with a small, fixed set,
+// and `wardrobeIndex` is the array index into THAT DataAsset — a different
+// index space than the custom catalog above.
+//
+// What's the same for all six (verified against every DA_Wardrobe_*): the
+// top / bottom / shoes arrays. Their leading indices are identical to the
+// custom catalog's, so the base sets are just the custom lists minus the
+// custom-only extras (Long Tee at top 4, Mid-Calf Jeans at bottom 6).
+//
+// What differs per character: HAIR. Each base character carries its own 5
+// grooms in its own order (transcribed from each DataAsset's Hair Grooms
+// array). The style keys below reuse the 34-hair catalog's keys ONLY to
+// borrow their thumbnail + label — the `index` is the base character's own.
+//
+// What's absent for base characters: eyebrow + eyelash (baked, one each per
+// character, not selectable) and body blends (setBlends is custom-only).
+
+/** Tops/bottoms/shoes are shared across all six base characters and match the
+ *  custom catalog's leading indices exactly. */
+const BASE_TOPS: WardrobeItem[]    = TOPS.slice(0, 4);   // hoodie, sweater, crewNeckTee, cropTop
+const BASE_BOTTOMS: WardrobeItem[] = BOTTOMS.slice(0, 6); // jeans … shorts (no Mid-Calf)
+const BASE_SHOES: WardrobeItem[]   = SHOES;               // all four, identical to custom
+
+/** Category order for base characters: no brows/lashes. */
+export const BASE_CATEGORY_ORDER: CustomCategory[] = ['hair', 'top', 'bottom', 'shoes'];
+
+const HAIR_BY_KEY = new Map(HAIR.map((h) => [h.key, h] as const));
+
+/** Build a base character's hair list: [baseIndex, catalogKey] pairs. The key
+ *  'none' is a real slot (an empty groom in the DataAsset — e.g. Goblin's bald
+ *  index 0) and renders the nameplate fallback. Every other key borrows its
+ *  label + thumbnail from the 34-hair catalog. */
+function baseHair(pairs: Array<[number, string]>): WardrobeItem[] {
+  return pairs.map(([index, key]) => {
+    if (key === 'none') return { index, key: 'none', name: 'Bald' };
+    const h = HAIR_BY_KEY.get(key);
+    return { index, key, name: h?.name ?? key, thumb: h?.thumb };
+  });
+}
+
+/** Per-base-character hair grooms, in DataAsset (wardrobeIndex) order. */
+export const BASE_HAIR: Record<string, WardrobeItem[]> = {
+  ava: baseHair([
+    [0, 'Hair_S_Updo'], [1, 'Hair_L_Straight'], [2, 'Hair_L_StraightBangs'],
+    [3, 'Hair_M_BobCurly'], [4, 'Hair_M_BobMessy'],
+  ]),
+  chris: baseHair([
+    [0, 'Hair_S_Casual'], [1, 'Hair_S_Clean'], [2, 'Hair_S_SideSweptFringe'],
+    [3, 'Hair_S_SweptUp'], [4, 'Hair_M_Layered'],
+  ]),
+  goblin: baseHair([
+    [0, 'none'], [1, 'Hair_M_FauxMohawk'], [2, 'Hair_M_Mohawk'],
+    [3, 'Hair_S_CurlyFade'], [4, 'Hair_S_PulledBack'],
+  ]),
+  grace: baseHair([
+    [0, 'Hair_S_Updo'], [1, 'Hair_M_BobMessy'], [2, 'Hair_M_BobCurly'],
+    [3, 'Hair_L_StraightBangs'], [4, 'Hair_M_TwistedBraids'],
+  ]),
+  joi: baseHair([
+    [0, 'Hair_M_BobStraight'], [1, 'Hair_M_BobCurly'], [2, 'Hair_L_MessyClumps'],
+    [3, 'Hair_L_StraightBangs'], [4, 'Hair_S_Updo'],
+  ]),
+  mark: baseHair([
+    [0, 'Hair_M_TwistedBraids'], [1, 'Hair_M_FauxMohawk'], [2, 'Hair_M_Layered'],
+    [3, 'Hair_S_AfroFade'], [4, 'Hair_S_Coil'],
+  ]),
+};
+
+/** Everything the customization UI needs to render one character's wardrobe. */
+export interface AgentWardrobe {
+  /** Category chips to show, in order. */
+  categories: CustomCategory[];
+  /** category -> its items (empty array for categories this character lacks). */
+  items: Record<CustomCategory, WardrobeItem[]>;
+  /** Categories with a two-tone color submenu. */
+  colorable: CustomCategory[];
+  /** Whether the character supports body blends (height/weight). Custom-only. */
+  body: boolean;
+}
+
+const EMPTY_ITEMS: Record<CustomCategory, WardrobeItem[]> = {
+  hair: [], eyebrow: [], eyelash: [], top: [], bottom: [], shoes: [],
+};
+
+/** Resolve the wardrobe surface for an agent. Custom characters get the full
+ *  catalog + brows/lashes + body; base characters get their restricted set
+ *  (shared clothing, own hair, no brows/lashes, no body). */
+export function wardrobeForAgent(agentId: string | null | undefined): AgentWardrobe {
+  if (isCustomCharacter(agentId)) {
+    return {
+      categories: CUSTOM_CATEGORY_ORDER,
+      items: CUSTOM_WARDROBE,
+      colorable: CUSTOM_COLORABLE,
+      body: true,
+    };
+  }
+  const hair = BASE_HAIR[agentId ?? ''] ?? BASE_HAIR.grace;
+  return {
+    categories: BASE_CATEGORY_ORDER,
+    items: { ...EMPTY_ITEMS, hair, top: BASE_TOPS, bottom: BASE_BOTTOMS, shoes: BASE_SHOES },
+    colorable: CUSTOM_COLORABLE,
+    body: false,
+  };
+}
+
+/** Clamp a saved index into a resolved item list (per-agent bounds). */
+export function clampAgentIndex(items: WardrobeItem[], value: number | undefined): number {
+  const max = items.length;
+  if (value == null || !Number.isFinite(value) || max === 0) return 0;
+  return Math.max(0, Math.min(max - 1, Math.floor(value)));
+}

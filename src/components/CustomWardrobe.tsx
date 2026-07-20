@@ -24,7 +24,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, Check } from 'lucide-react';
+import { ArrowLeft, Check, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { WardrobeSettings, ClothingColor } from '../services/userSettings';
 import { ColorPickerPanel, hexToRgb01, round3 } from './ColorPickerPanel';
 import { LightingDial } from './LightingDial';
@@ -35,8 +35,8 @@ import {
 } from './CustomizationOverlay';
 import { clampBgMode } from '../wardrobe/backgrounds';
 import {
-  CUSTOM_CATEGORY_ORDER, CUSTOM_CATEGORY_LABELS, CUSTOM_COLORABLE,
-  itemsFor, clampCustomIndex, type CustomCategory, type WardrobeItem,
+  CUSTOM_CATEGORY_LABELS, CUSTOM_COLORABLE,
+  wardrobeForAgent, clampAgentIndex, type CustomCategory, type WardrobeItem,
 } from '../wardrobe/catalog';
 import {
   STREAM_EFFECTS, EffectSwatch, effectFor,
@@ -45,29 +45,22 @@ import {
 
 const EASE_OUT_EXPO = [0.16, 1, 0.3, 1] as const;
 
-// Body and Environment are not garment slots, so they ride alongside the six
-// wardrobe categories rather than inside CUSTOM_CATEGORY_ORDER (which is the
-// UE wardrobeCategory contract and must stay exactly the six UE accepts).
-// Effects merged into Environment (2026-07-19): one "the room" pane holds
-// light + backdrop + post effects, so there's no separate lens tab.
-type Pane = CustomCategory | 'body' | 'environment';
-const PANES: Pane[] = [...CUSTOM_CATEGORY_ORDER, 'body', 'environment'];
+// Body and Environment are not garment slots, so they ride alongside the
+// wardrobe categories rather than inside the category order (which is the UE
+// wardrobeCategory contract). Which categories/panes exist is per-character
+// now: custom builds carry the full set + brows/lashes + body; the base six
+// get their restricted set (own hair, shared clothing, no brows/lashes, no
+// body). See wardrobeForAgent in catalog.ts.
+// Effects is its own pane again (2026-07-20): a horizontal reel like the
+// wardrobe, so the full set is scrubbable. Environment holds just light +
+// backdrop.
+type Pane = CustomCategory | 'body' | 'environment' | 'effects';
 const PANE_LABELS: Record<Pane, string> = {
   ...CUSTOM_CATEGORY_LABELS,
   body: 'Body',
   environment: 'Environment',
+  effects: 'Effects',
 };
-
-// Chip-strip separator: after the character panes (her), before the room.
-// Two groups now: her | the room.
-const GROUP_BREAK_AFTER = new Set<Pane>(['body']);
-
-// Wardrobe staging (the full-body turntable) is the DEFAULT. It's off only for
-// the three face slots, where the body pose fights a head-level framing and
-// you're judging millimetres of brow. Everything else wants the whole figure:
-// garments obviously, Body because height and weight ARE the silhouette, and
-// Environment because you're lighting a stage, not a face.
-const FACE_PANES: Pane[] = ['hair', 'eyebrow', 'eyelash'];
 
 // Frame geometry. 52px is deliberately small: the reel is scrubbed, not
 // scanned, and the selected frame blows up to 1.22x anyway. Smaller frames mean
@@ -78,13 +71,18 @@ const FRAME_SELECTED = 1.22;
 /** Per-pane bar height. The bar animates between these. */
 function barHeight(pane: Pane): number {
   if (pane === 'body') return 182;
-  // Environment holds light + backdrop (+ style) on the left and post effects
-  // on the right, side by side, so it stays compact and non-scrolling.
-  if (pane === 'environment') return 216;
+  // Environment holds light + backdrop (+ style) side by side.
+  if (pane === 'environment') return 200;
+  // Effects is a reel + name/blurb + strength, like a garment pane.
+  if (pane === 'effects') return 178;
   return CUSTOM_COLORABLE.includes(pane as CustomCategory) ? 178 : 146;
 }
 
 interface CustomWardrobeProps {
+  /** Active character TYPE id (grace/mark/ava/goblin/chris/joi/*_custom).
+   *  Selects which wardrobe surface to render: full catalog for custom
+   *  builds, the restricted per-character set for the base six. */
+  agentId?: string | null;
   initial?: WardrobeSettings | null;
   onEmit: (payload: Record<string, unknown>) => void;
   onSave: (settings: WardrobeSettings) => void;
@@ -98,15 +96,33 @@ interface CustomWardrobeProps {
   onBgMode?: (index: number) => void;
 }
 
-export function CustomWardrobe({ initial, onEmit, onSave, onCancel, onEffect, bgMode, onBgMode }: CustomWardrobeProps) {
-  const [pane, setPane] = useState<Pane>('hair');
+export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onEffect, bgMode, onBgMode }: CustomWardrobeProps) {
+  // The wardrobe surface for THIS character: which categories exist, their
+  // items (per-character hair, shared/subset clothing), whether body blends
+  // apply. Memoized on agentId so a switch mid-session re-resolves.
+  const wardrobe = useMemo(() => wardrobeForAgent(agentId), [agentId]);
+  const catItems = useCallback((c: CustomCategory) => wardrobe.items[c] ?? [], [wardrobe]);
 
-  const [hair,    setHair]    = useState(() => clampCustomIndex('hair',    initial?.hairIndex));
-  const [eyebrow, setEyebrow] = useState(() => clampCustomIndex('eyebrow', initial?.browIndex));
-  const [eyelash, setEyelash] = useState(() => clampCustomIndex('eyelash', initial?.lashIndex));
-  const [top,     setTop]     = useState(() => clampCustomIndex('top',     initial?.topIndex));
-  const [bottom,  setBottom]  = useState(() => clampCustomIndex('bottom',  initial?.bottomIndex));
-  const [shoes,   setShoes]   = useState(() => clampCustomIndex('shoes',   initial?.shoesIndex));
+  // Panes = this character's garment categories, then Body (custom only), then
+  // the global Environment. Divider is rendered before Environment.
+  const panes = useMemo<Pane[]>(
+    () => [...wardrobe.categories, ...(wardrobe.body ? ['body' as const] : []), 'environment', 'effects'],
+    [wardrobe],
+  );
+
+  const [pane, setPane] = useState<Pane>('hair');
+  // A character switch can drop the current pane (e.g. leaving a custom build
+  // while on Eyebrow). Fall back to the first pane if it's gone.
+  useEffect(() => {
+    if (!panes.includes(pane)) setPane(panes[0] ?? 'hair');
+  }, [panes, pane]);
+
+  const [hair,    setHair]    = useState(() => clampAgentIndex(wardrobe.items.hair,    initial?.hairIndex));
+  const [eyebrow, setEyebrow] = useState(() => clampAgentIndex(wardrobe.items.eyebrow, initial?.browIndex));
+  const [eyelash, setEyelash] = useState(() => clampAgentIndex(wardrobe.items.eyelash, initial?.lashIndex));
+  const [top,     setTop]     = useState(() => clampAgentIndex(wardrobe.items.top,     initial?.topIndex));
+  const [bottom,  setBottom]  = useState(() => clampAgentIndex(wardrobe.items.bottom,  initial?.bottomIndex));
+  const [shoes,   setShoes]   = useState(() => clampAgentIndex(wardrobe.items.shoes,   initial?.shoesIndex));
 
   const [clothingColors, setClothingColors] = useState<Record<'top' | 'bottom' | 'shoes', ClothingColor>>(() => ({
     top:    normalizeColor(initial?.clothingColors?.top),
@@ -166,8 +182,8 @@ export function CustomWardrobe({ initial, onEmit, onSave, onCancel, onEffect, bg
     onEffect?.({ effectId: id, effectStrength: strength });
   }, [onEffect]);
 
-  const isGarment = pane !== 'body' && pane !== 'environment';
-  const items: WardrobeItem[] = isGarment ? itemsFor(pane) : [];
+  const isGarment = pane !== 'body' && pane !== 'environment' && pane !== 'effects';
+  const items: WardrobeItem[] = isGarment ? catItems(pane) : [];
   const selected = isGarment ? value(pane) : 0;
 
   const pickItem = useCallback((cat: CustomCategory, index: number) => {
@@ -193,13 +209,10 @@ export function CustomWardrobe({ initial, onEmit, onSave, onCancel, onEffect, bg
     return () => document.removeEventListener('keydown', onKey);
   }, [onCancel, isGarment, items.length, selected, pane, pickItem]);
 
-  const stageOn = !FACE_PANES.includes(pane);
-  useEffect(() => {
-    onEmit({ EventType: stageOn ? 'wardrobeModeOn' : 'wardrobeModeOff' });
-  }, [stageOn, onEmit]);
-  const onEmitRef = useRef(onEmit);
-  onEmitRef.current = onEmit;
-  useEffect(() => () => { onEmitRef.current({ EventType: 'wardrobeModeOff' }); }, []);
+  // NOTE: wardrobeModeOn/Off is gone. All it ever did was zoom the camera
+  // in/out for the fitting-room framing, and the camera is now driven from
+  // App.tsx (updateCameraFromLocation, keyed on customizationActive) — so the
+  // zoom-out-to-show-the-whole-figure happens there instead.
 
   const emitClothingColor = useCallback((cat: 'top' | 'bottom' | 'shoes', pair: ClothingColor) => {
     const a = pair.c1Hex ? hexToRgb01(pair.c1Hex) : CLOTHING_COLORS[pair.c1];
@@ -419,21 +432,21 @@ export function CustomWardrobe({ initial, onEmit, onSave, onCancel, onEffect, bg
               padding: '0 12px',
             }}
           >
-            {PANES.map((p) => (
+            {panes.map((p) => (
               <Fragment key={p}>
-                <Chip
-                  label={PANE_LABELS[p]}
-                  active={pane === p}
-                  onClick={() => setPane(p)}
-                />
-                {/* Hairline breaks between the three ideas: her, the room,
-                    the lens. Quieter than group labels, same information. */}
-                {GROUP_BREAK_AFTER.has(p) && (
+                {/* Hairline break between her (garments/body) and the room
+                    (environment). Quieter than a group label, same info. */}
+                {p === 'environment' && (
                   <span aria-hidden style={{
                     flex: '0 0 auto', width: 1, height: 12, margin: '0 5px',
                     background: 'rgba(255,255,255,0.10)',
                   }} />
                 )}
+                <Chip
+                  label={PANE_LABELS[p]}
+                  active={pane === p}
+                  onClick={() => setPane(p)}
+                />
               </Fragment>
             ))}
           </div>
@@ -477,8 +490,9 @@ export function CustomWardrobe({ initial, onEmit, onSave, onCancel, onEffect, bg
                 </>
               ) : pane === 'body' ? (
                 <div style={{
-                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  gap: 34, padding: '2px 16px 12px',
+                  flex: 1, display: 'flex', flexDirection: 'column',
+                  alignItems: 'center', justifyContent: 'center',
+                  gap: 20, padding: '2px 16px 12px',
                 }}>
                   <Lever
                     label="Height"
@@ -495,15 +509,11 @@ export function CustomWardrobe({ initial, onEmit, onSave, onCancel, onEffect, bg
                     onChange={(v) => { setWeightBlend(v); touch('weightBlend'); emitBlends(heightBlend, v); }}
                   />
                 </div>
-              ) : (
-                // Environment = three vertical sections: Light | Backdrop |
-                // Effects. Light+Backdrop live in EnvironmentPane (split by their
-                // own divider); Effects is its own section whose frame grid wraps
-                // and scrolls vertically. `stretch` gives the effects grid full
-                // height to scroll in; the outer bar itself never scrolls.
+              ) : pane === 'environment' ? (
+                // Environment = Light | Backdrop, side by side (their own divider).
                 <div style={{
                   flex: 1, minHeight: 0, display: 'flex', alignItems: 'stretch',
-                  gap: 14, overflow: 'hidden', padding: '8px 18px',
+                  justifyContent: 'center', overflow: 'hidden', padding: '8px 18px',
                 }}>
                 <EnvironmentPane
                   angle={lightingAngle}
@@ -529,14 +539,15 @@ export function CustomWardrobe({ initial, onEmit, onSave, onCancel, onEffect, bg
                   bgMode={bgMode}
                   onBgMode={onBgMode ? (m) => { onEmit({ EventType: 'changeBGMaterial', bgmode: m }); onBgMode(m); } : undefined}
                 />
-                <span style={{ flex: '0 0 auto', width: 1, alignSelf: 'stretch', background: 'rgba(255,255,255,0.06)' }} />
+                </div>
+              ) : (
+                // Effects: its own pane, a horizontal reel like the wardrobe.
                 <EffectsPane
                   effectId={effectId}
                   strength={effectStrength}
                   onPick={(id) => applyEffect(id, effectStrength)}
                   onStrength={(v) => applyEffect(effectId, v)}
                 />
-                </div>
               )}
             </motion.div>
           </AnimatePresence>
@@ -561,39 +572,99 @@ export function CustomWardrobe({ initial, onEmit, onSave, onCancel, onEffect, bg
 
 // ============ reel ==================================================
 
+// Chevron buttons flank every horizontal reel: there's no visible scrollbar,
+// so these are how you scrub the set. Each dims at the edge it can't move
+// toward. Shared by the wardrobe reel and the effects reel.
+function useReelArrows(scrollRef: React.RefObject<HTMLDivElement | null>) {
+  const [edges, setEdges] = useState({ canLeft: false, canRight: false });
+  const sync = useCallback(() => {
+    const box = scrollRef.current;
+    if (!box) return;
+    const canLeft = box.scrollLeft > 1;
+    const canRight = box.scrollLeft + box.clientWidth < box.scrollWidth - 1;
+    setEdges((p) => (p.canLeft === canLeft && p.canRight === canRight ? p : { canLeft, canRight }));
+  }, [scrollRef]);
+  const scroll = useCallback((dir: 1 | -1) => {
+    const box = scrollRef.current;
+    if (!box) return;
+    box.scrollBy({ left: dir * Math.max(120, box.clientWidth * 0.7), behavior: 'smooth' });
+  }, [scrollRef]);
+  return { edges, sync, scroll };
+}
+
+function ReelArrow({ dir, active, onClick }: { dir: 'left' | 'right'; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label={dir === 'left' ? 'Scroll left' : 'Scroll right'}
+      onClick={onClick}
+      disabled={!active}
+      style={{
+        flex: '0 0 auto',
+        width: 24, height: 24, padding: 0, borderRadius: 8,
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        background: 'rgba(255,255,255,0.05)',
+        border: '1px solid rgba(255,255,255,0.10)',
+        color: 'var(--text-secondary, #d4cec7)',
+        cursor: active ? 'pointer' : 'default',
+        opacity: active ? 1 : 0.25,
+        transition: 'opacity 160ms var(--ease-out-quart)',
+      }}
+    >
+      {dir === 'left' ? <ChevronLeft size={15} strokeWidth={2} /> : <ChevronRight size={15} strokeWidth={2} />}
+    </button>
+  );
+}
+
 function Reel({ items, selected, onPick }: {
   items: WardrobeItem[]; selected: number; onPick: (i: number) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const selRef = useRef<HTMLButtonElement | null>(null);
+  const { edges, sync, scroll } = useReelArrows(scrollRef);
 
-  // Keep the selected frame centered. Without this, arrow-scrubbing walks the
-  // selection off-screen and the reel feels broken.
+  // Bring the selected frame into view ONLY when it's off-screen (e.g. arrow-
+  // scrubbing walked it out). We scroll the reel's own scrollLeft directly
+  // rather than element.scrollIntoView, because scrollIntoView also scrolls
+  // every ancestor — which yanked the whole panel and reset your horizontal
+  // position on each pick. Clicking an already-visible item now leaves the
+  // scroll exactly where you left it.
   useEffect(() => {
     const el = selRef.current;
-    if (!el) return;
-    el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    const box = scrollRef.current;
+    if (!el || !box) return;
+    const elR = el.getBoundingClientRect();
+    const boxR = box.getBoundingClientRect();
+    if (elR.left < boxR.left || elR.right > boxR.right) {
+      const delta = elR.left - boxR.left - (boxR.width - elR.width) / 2;
+      box.scrollBy({ left: delta, behavior: 'smooth' });
+    }
   }, [selected]);
+  // Refresh arrow enabled-state when the set changes (and on mount).
+  useEffect(() => { sync(); }, [items.length, sync]);
 
   return (
-    <div
-      ref={scrollRef}
-      role="listbox"
-      aria-label="Items"
-      style={{
-        flex: '0 0 auto',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 7,
-        // Vertical padding leaves room for the selected frame to grow + lift
-        // without clipping against the scroll box.
-        padding: '9px 16px 7px',
-        overflowX: 'auto',
-        overflowY: 'hidden',
-        scrollbarWidth: 'none',
-        scrollSnapType: 'x proximity',
-      }}
-    >
+    <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 3, padding: '0 8px' }}>
+      <ReelArrow dir="left" active={edges.canLeft} onClick={() => scroll(-1)} />
+      <div
+        ref={scrollRef}
+        role="listbox"
+        aria-label="Items"
+        onScroll={sync}
+        style={{
+          flex: 1, minWidth: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 7,
+          // Vertical padding leaves room for the selected frame to grow + lift
+          // without clipping against the scroll box.
+          padding: '9px 6px 7px',
+          overflowX: 'auto',
+          overflowY: 'hidden',
+          scrollbarWidth: 'none',
+          scrollSnapType: 'x proximity',
+        }}
+      >
       {items.map((item) => {
         const isSel = item.index === selected;
         return (
@@ -610,6 +681,7 @@ function Reel({ items, selected, onPick }: {
             whileTap={{ scale: isSel ? FRAME_SELECTED * 0.97 : 0.96 }}
             transition={{ type: 'spring', stiffness: 480, damping: 30 }}
             style={{
+              position: 'relative', // contains the no-thumb nameplate (inset:0)
               flex: '0 0 auto',
               width: FRAME, height: FRAME,
               padding: 0,
@@ -653,6 +725,8 @@ function Reel({ items, selected, onPick }: {
           </motion.button>
         );
       })}
+      </div>
+      <ReelArrow dir="right" active={edges.canRight} onClick={() => scroll(1)} />
     </div>
   );
 }
@@ -714,33 +788,41 @@ function EffectsPane({ effectId, strength, onPick, onStrength }: {
 }) {
   const fx = effectFor(effectId);
   const isNone = fx.id === DEFAULT_EFFECT_ID;
+  const scrollRef = useRef<HTMLDivElement | null>(null);
   const selRef = useRef<HTMLButtonElement | null>(null);
+  const { edges, sync, scroll } = useReelArrows(scrollRef);
 
+  // Same out-of-view-only scroll as the wardrobe reel: don't yank the strip
+  // (and its ancestors) back on every pick.
   useEffect(() => {
-    selRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    const el = selRef.current;
+    const box = scrollRef.current;
+    if (!el || !box) return;
+    const elR = el.getBoundingClientRect();
+    const boxR = box.getBoundingClientRect();
+    if (elR.left < boxR.left || elR.right > boxR.right) {
+      box.scrollBy({ left: elR.left - boxR.left - (boxR.width - elR.width) / 2, behavior: 'smooth' });
+    }
   }, [effectId]);
+  useEffect(() => { sync(); }, [sync]);
 
   return (
-    <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 5, paddingTop: 2 }}>
-      <span style={{
-        flex: '0 0 auto', paddingLeft: 4,
-        fontSize: 8.5, fontWeight: 700, letterSpacing: '0.14em',
-        textTransform: 'uppercase', color: 'var(--text-ghost)',
-      }}>
-        Effects
-      </span>
-      {/* Frames WRAP into a grid and the grid scrolls vertically inside this
-          section, so every effect is reachable without a horizontal reel. */}
+    <>
+      {/* Horizontal reel, same act as the wardrobe: scrub a set, pick one. */}
+      <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 3, padding: '0 8px' }}>
+      <ReelArrow dir="left" active={edges.canLeft} onClick={() => scroll(-1)} />
       <div
+        ref={scrollRef}
         role="listbox"
         aria-label="Effects"
+        onScroll={sync}
         style={{
-          flex: 1, minHeight: 0,
-          display: 'flex', flexWrap: 'wrap', alignContent: 'flex-start',
-          justifyContent: 'flex-start', gap: 7,
-          padding: '2px 10px 2px 2px',
-          overflowX: 'hidden', overflowY: 'auto',
-          scrollbarWidth: 'thin',
+          flex: 1, minWidth: 0,
+          display: 'flex', alignItems: 'center', gap: 7,
+          padding: '9px 6px 7px',
+          overflowX: 'auto', overflowY: 'hidden',
+          scrollbarWidth: 'none',
+          scrollSnapType: 'x proximity',
         }}
       >
         {STREAM_EFFECTS.map((e) => {
@@ -787,6 +869,8 @@ function EffectsPane({ effectId, strength, onPick, onStrength }: {
             </motion.button>
           );
         })}
+      </div>
+      <ReelArrow dir="right" active={edges.canRight} onClick={() => scroll(1)} />
       </div>
 
       {/* Name + what it does. The blurb earns its place here because an
@@ -841,19 +925,18 @@ function EffectsPane({ effectId, strength, onPick, onStrength }: {
           label="Effect strength"
         />
       </div>
-    </div>
+    </>
   );
 }
 
 // ============ lever =================================================
-// A bipolar vertical fader: zero in the middle, poles at the ends. Vertical
-// because that's the shape of the idea — taller is up. Custom rather than an
-// <input type=range> because vertical range inputs are a browser-support coin
-// flip and this needs a center detent, a fill that grows OUT from the middle,
-// and a thumb that snaps home. The mixing-desk read is the point: two faders,
-// both resting at center, is instantly legible as "she is at her defaults".
+// A bipolar HORIZONTAL fader: zero in the middle, poles at the ends (minus
+// left, plus right). Custom rather than an <input type=range> because this
+// needs a center detent, a fill that grows OUT from the middle, and a thumb
+// that snaps home. The mixing-desk read is the point: two faders, both resting
+// at center, is instantly legible as "she is at her defaults".
 
-const LEVER_H = 96;
+const LEVER_W = 150;
 const DETENT = 0.05;   // snap-to-zero window; the lever has a real center click
 
 function Lever({ label, plus, minus, value, onChange }: {
@@ -866,13 +949,13 @@ function Lever({ label, plus, minus, value, onChange }: {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [dragging, setDragging] = useState(false);
 
-  // Pointer y -> signed value. Up is positive, which is why the sign flips.
-  const fromPointer = useCallback((clientY: number) => {
+  // Pointer x -> signed value. Left is minus, right is plus.
+  const fromPointer = useCallback((clientX: number) => {
     const el = trackRef.current;
     if (!el) return 0;
     const r = el.getBoundingClientRect();
-    const t = (clientY - r.top) / r.height;        // 0 at top, 1 at bottom
-    const v = 1 - t * 2;                            // +1 top, -1 bottom
+    const t = (clientX - r.left) / r.width;        // 0 at left, 1 at right
+    const v = t * 2 - 1;                            // -1 left, +1 right
     const clamped = Math.max(-1, Math.min(1, v));
     return Math.abs(clamped) < DETENT ? 0 : Math.round(clamped * 100) / 100;
   }, []);
@@ -880,11 +963,11 @@ function Lever({ label, plus, minus, value, onChange }: {
   const onPointerDown = (e: React.PointerEvent) => {
     e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(true);
-    onChange(fromPointer(e.clientY));
+    onChange(fromPointer(e.clientX));
   };
   const onPointerMove = (e: React.PointerEvent) => {
     if (!dragging) return;
-    onChange(fromPointer(e.clientY));
+    onChange(fromPointer(e.clientX));
   };
   const endDrag = (e: React.PointerEvent) => {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
@@ -893,85 +976,87 @@ function Lever({ label, plus, minus, value, onChange }: {
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     const step = e.shiftKey ? 0.01 : 0.05;
-    if (e.key === 'ArrowUp')        { e.preventDefault(); onChange(Math.min(1, round2(value + step))); }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); onChange(Math.max(-1, round2(value - step))); }
+    if (e.key === 'ArrowRight')     { e.preventDefault(); onChange(Math.min(1, round2(value + step))); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); onChange(Math.max(-1, round2(value - step))); }
     else if (e.key === 'Home' || e.key === '0') { e.preventDefault(); onChange(0); }
   };
 
-  // Thumb position: +1 -> top, -1 -> bottom.
-  const pct = (1 - value) / 2;                     // 0 at +1, 1 at -1
-  const thumbTop = pct * LEVER_H;
+  // Thumb position: -1 -> left, +1 -> right.
+  const pct = (value + 1) / 2;                     // 0 at -1, 1 at +1
+  const thumbLeft = pct * LEVER_W;
   // Fill spans center -> thumb, so magnitude reads as distance from home.
-  const fillTop = value > 0 ? thumbTop : LEVER_H / 2;
-  const fillH = Math.abs(value) * (LEVER_H / 2);
+  const fillLeft = value > 0 ? LEVER_W / 2 : thumbLeft;
+  const fillW = Math.abs(value) * (LEVER_W / 2);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5 }}>
-      <PoleLabel active={value > 0.02}>{plus}</PoleLabel>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+        <PoleLabel active={value < -0.02}>{minus}</PoleLabel>
 
-      <div
-        ref={trackRef}
-        role="slider"
-        tabIndex={0}
-        aria-label={`${label} blend`}
-        aria-valuemin={-1}
-        aria-valuemax={1}
-        aria-valuenow={value}
-        aria-valuetext={valueText(value, plus, minus)}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
-        onKeyDown={onKeyDown}
-        style={{
-          position: 'relative',
-          width: 26,
-          height: LEVER_H,
-          cursor: dragging ? 'grabbing' : 'pointer',
-          touchAction: 'none',
-          outline: 'none',
-        }}
-      >
-        {/* rail */}
-        <span style={{
-          position: 'absolute', left: '50%', top: 0, bottom: 0,
-          width: 3, marginLeft: -1.5, borderRadius: 999,
-          background: 'rgba(255,255,255,0.13)',
-        }} />
-        {/* center detent: the home line you can feel by sight */}
-        <span style={{
-          position: 'absolute', left: 3, right: 3, top: LEVER_H / 2 - 0.5,
-          height: 1, background: 'rgba(255,255,255,0.30)',
-        }} />
-        {/* fill, growing out of the middle */}
-        <motion.span
-          animate={{ top: fillTop, height: fillH }}
-          transition={dragging ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 40 }}
+        <div
+          ref={trackRef}
+          role="slider"
+          tabIndex={0}
+          aria-label={`${label} blend`}
+          aria-valuemin={-1}
+          aria-valuemax={1}
+          aria-valuenow={value}
+          aria-valuetext={valueText(value, plus, minus)}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+          onKeyDown={onKeyDown}
           style={{
-            position: 'absolute', left: '50%', width: 3, marginLeft: -1.5,
-            borderRadius: 999,
-            background: 'rgba(255, 245, 235, 0.78)',
+            position: 'relative',
+            width: LEVER_W,
+            height: 20,
+            cursor: dragging ? 'grabbing' : 'pointer',
+            touchAction: 'none',
+            outline: 'none',
           }}
-        />
-        {/* thumb */}
-        <motion.span
-          animate={{ top: thumbTop }}
-          transition={dragging ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 40 }}
-          style={{
-            position: 'absolute', left: '50%',
-            width: 14, height: 14, marginLeft: -7, marginTop: -7,
-            borderRadius: '50%',
-            background: 'rgba(255, 248, 240, 0.96)',
-            boxShadow: '0 1px 6px rgba(0,0,0,0.6), 0 0 12px rgba(255,240,220,0.35)',
-            // At home the thumb sits flush and quiet; off home it lifts.
-            scale: value === 0 ? 0.86 : 1,
-          }}
-        />
+        >
+          {/* rail */}
+          <span style={{
+            position: 'absolute', top: '50%', left: 0, right: 0,
+            height: 3, marginTop: -1.5, borderRadius: 999,
+            background: 'rgba(255,255,255,0.13)',
+          }} />
+          {/* center detent: the home line you can feel by sight */}
+          <span style={{
+            position: 'absolute', top: 3, bottom: 3, left: LEVER_W / 2 - 0.5,
+            width: 1, background: 'rgba(255,255,255,0.30)',
+          }} />
+          {/* fill, growing out of the middle */}
+          <motion.span
+            animate={{ left: fillLeft, width: fillW }}
+            transition={dragging ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 40 }}
+            style={{
+              position: 'absolute', top: '50%', height: 3, marginTop: -1.5,
+              borderRadius: 999,
+              background: 'rgba(255, 245, 235, 0.78)',
+            }}
+          />
+          {/* thumb */}
+          <motion.span
+            animate={{ left: thumbLeft }}
+            transition={dragging ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 40 }}
+            style={{
+              position: 'absolute', top: '50%',
+              width: 14, height: 14, marginTop: -7, marginLeft: -7,
+              borderRadius: '50%',
+              background: 'rgba(255, 248, 240, 0.96)',
+              boxShadow: '0 1px 6px rgba(0,0,0,0.6), 0 0 12px rgba(255,240,220,0.35)',
+              // At home the thumb sits flush and quiet; off home it lifts.
+              scale: value === 0 ? 0.86 : 1,
+            }}
+          />
+        </div>
+
+        <PoleLabel active={value > 0.02}>{plus}</PoleLabel>
       </div>
 
-      <PoleLabel active={value < -0.02}>{minus}</PoleLabel>
-
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, marginTop: 2 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, marginTop: 1 }}>
         <span style={{
           fontSize: 9.5, fontWeight: 600, letterSpacing: '0.1em',
           textTransform: 'uppercase', color: 'var(--text-ghost)',
@@ -995,7 +1080,7 @@ function PoleLabel({ children, active }: { children: React.ReactNode; active: bo
   return (
     <span style={{
       fontSize: 8.5, fontWeight: 700, letterSpacing: '0.12em',
-      textTransform: 'uppercase',
+      textTransform: 'uppercase', whiteSpace: 'nowrap',
       // The engaged pole brightens: which way you've pushed, without a readout.
       color: active ? 'var(--text-primary, #fafafa)' : 'rgba(255,255,255,0.24)',
       transition: 'color 180ms var(--ease-out-quart)',
