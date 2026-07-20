@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import QRCode from 'qrcode';
 import { Smartphone, Check, Loader2, RefreshCw } from 'lucide-react';
+import logoUrl from '../assets/logo.png';
 import {
   ensureConnectLink,
   fetchPairStatus,
-  unpairPhone,
   type ConnectLink,
   type PairStatus,
 } from '../services/companion';
@@ -18,10 +18,10 @@ type Phase = 'loading' | 'signin' | 'ready' | 'error';
  * "Connect your phone" popover — anchored under the titlebar phone button.
  *
  * Ensures the desktop is paired (arms soul's cloud-signalling client), renders
- * the QR the phone scans, and polls the pair status so it flips to "Phone
- * connected" the moment a device bridges in. The QR is a universal link to the
- * Worker; the Worker only proxies signalling — the avatar video/audio flow
- * DIRECT phone<->desktop after the handshake.
+ * the QR the phone scans (Unclaw logo in the center), and polls the pair status
+ * so it flips to "Phone connected" the moment a device bridges in. The QR is a
+ * universal link to the Worker; the Worker only proxies signalling — the avatar
+ * video/audio flow DIRECT phone<->desktop after the handshake.
  */
 export function CompanionPanel({
   authToken,
@@ -35,11 +35,11 @@ export function CompanionPanel({
   const [phase, setPhase] = useState<Phase>('loading');
   const [error, setError] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
-  const [connectUrl, setConnectUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<PairStatus | null>(null);
   const mountedRef = useRef(true);
 
   const phoneConnected = (status?.active_players?.length ?? 0) > 0;
+  const authInvalid = status?.state === 'AUTH_INVALID';
 
   const load = useCallback(async () => {
     setPhase('loading');
@@ -52,9 +52,9 @@ export function CompanionPanel({
         setError('Could not build a connect link. Is the companion service running?');
         return;
       }
-      setConnectUrl(link.connect_url);
+      // High error-correction so the center logo (~20% occlusion) stays scannable.
       const dataUrl = await QRCode.toDataURL(link.connect_url, {
-        errorCorrectionLevel: 'M',
+        errorCorrectionLevel: 'H',
         margin: 1,
         width: 460,
         color: { dark: '#12151c', light: '#f4f2ef' },
@@ -71,14 +71,13 @@ export function CompanionPanel({
     }
   }, [authToken, userId]);
 
-  // Load once on mount.
   useEffect(() => {
     mountedRef.current = true;
     void load();
     return () => { mountedRef.current = false; };
   }, [load]);
 
-  // Poll live pair status while open so "Phone connected" lights up on its own.
+  // Poll live pair status so "Phone connected" lights up on its own.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
@@ -91,12 +90,6 @@ export function CompanionPanel({
     const id = setInterval(tick, 3000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
-
-  const handleUnpair = useCallback(async () => {
-    try { await unpairPhone(authToken); } catch { /* best-effort */ }
-    setStatus(null);
-    void load();
-  }, [authToken, load]);
 
   return (
     <motion.div
@@ -112,7 +105,7 @@ export function CompanionPanel({
         left: '50%',
         marginLeft: -140,
         width: 280,
-        padding: '16px 16px 14px',
+        padding: '16px 16px 16px',
         borderRadius: 16,
         background: 'var(--glass-bg-panel)',
         backdropFilter: 'var(--glass-blur)',
@@ -133,7 +126,7 @@ export function CompanionPanel({
 
       {phase === 'loading' && (
         <Centered>
-          <Loader2 size={22} className="spin-slow" style={{ color: 'var(--text-ghost)' }} />
+          <Loader2 size={22} className="companion-spin" style={{ color: 'var(--text-ghost)' }} />
           <p style={hintStyle}>Preparing your link…</p>
         </Centered>
       )}
@@ -158,7 +151,7 @@ export function CompanionPanel({
 
       {phase === 'ready' && (
         <>
-          {/* QR on a light tile so the phone camera reads it cleanly in dark theme */}
+          {/* QR on a light tile with the Unclaw logo in the center */}
           <div style={{
             position: 'relative',
             borderRadius: 14,
@@ -173,9 +166,24 @@ export function CompanionPanel({
                 alt="Scan to connect your phone"
                 width={228}
                 height={228}
-                style={{ display: 'block', width: 228, height: 228, opacity: phoneConnected ? 0.25 : 1, transition: 'opacity 0.3s var(--ease-out-quart)' }}
+                style={{ display: 'block', width: 228, height: 228, opacity: phoneConnected ? 0.22 : 1, transition: 'opacity 0.3s var(--ease-out-quart)' }}
               />
             )}
+
+            {/* Center logo badge — sits in the QR's high-EC reserved center. */}
+            {!phoneConnected && (
+              <div style={{
+                position: 'absolute',
+                width: 52, height: 52, borderRadius: 13,
+                background: '#f4f2ef',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                boxShadow: '0 1px 4px rgba(0,0,0,0.14)',
+              }}>
+                <img src={logoUrl} alt="" width={38} height={38}
+                  style={{ display: 'block', width: 38, height: 38, objectFit: 'contain' }} />
+              </div>
+            )}
+
             {phoneConnected && (
               <div style={{
                 position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
@@ -194,56 +202,31 @@ export function CompanionPanel({
             )}
           </div>
 
-          <p style={{ ...hintStyle, marginBottom: 4 }}>
+          <p style={{ ...hintStyle, marginBottom: 6 }}>
             {phoneConnected
               ? 'Streaming directly to your phone.'
-              : 'Scan with the Unclaw app to connect instantly.'}
+              : authInvalid
+                ? 'Pairing expired — reopen to re-pair.'
+                : 'Scan with the Unclaw app to connect.'}
           </p>
 
-          {/* live state line */}
-          <StatusLine status={status} phoneConnected={phoneConnected} />
-
-          <div style={{ display: 'flex', justifyContent: 'center', marginTop: 8 }}>
-            <button type="button" onClick={() => void handleUnpair()} style={unpairStyle}>
-              Disconnect &amp; forget phone
-            </button>
+          {/* Simple status dot: connected / ready-to-scan / needs re-pair */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+            <span style={{
+              width: 6, height: 6, borderRadius: '50%',
+              background: phoneConnected ? 'var(--live, #8cbf8a)'
+                : authInvalid ? 'var(--accent)' : 'var(--text-secondary)',
+              boxShadow: phoneConnected ? '0 0 6px var(--live, #8cbf8a)' : 'none',
+            }} />
+            <span style={{ fontSize: 11, color: 'var(--text-ghost)', letterSpacing: '0.01em' }}>
+              {phoneConnected ? 'Connected' : authInvalid ? 'Re-pair needed' : 'Ready to scan'}
+            </span>
           </div>
         </>
       )}
 
-      <style>{`.spin-slow{animation:companion-spin 1.1s linear infinite}@keyframes companion-spin{to{transform:rotate(360deg)}}`}</style>
-      {/* dev aid: expose the raw link for copy on hover of the QR title */}
-      {connectUrl && phase === 'ready' && (
-        <span aria-hidden style={{ display: 'none' }}>{connectUrl}</span>
-      )}
+      <style>{`.companion-spin{animation:companion-spin 1.1s linear infinite}@keyframes companion-spin{to{transform:rotate(360deg)}}`}</style>
     </motion.div>
-  );
-}
-
-function StatusLine({ status, phoneConnected }: { status: PairStatus | null; phoneConnected: boolean }) {
-  const state = status?.state ?? '…';
-  const dotColor = phoneConnected
-    ? 'var(--live, #8cbf8a)'
-    : state === 'RUNNING'
-      ? 'var(--live, #8cbf8a)'
-      : state === 'AUTH_INVALID'
-        ? 'var(--accent)'
-        : 'var(--text-ghost)';
-  const label = phoneConnected
-    ? 'Connected'
-    : state === 'RUNNING'
-      ? 'Waiting for your phone'
-      : state === 'RECONNECTING'
-        ? 'Reconnecting…'
-        : state === 'AUTH_INVALID'
-          ? 'Re-pair needed'
-          : 'Getting ready…';
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 2 }}>
-      <span style={{ width: 6, height: 6, borderRadius: '50%', background: dotColor,
-        boxShadow: dotColor === 'var(--text-ghost)' ? 'none' : `0 0 6px ${dotColor}` }} />
-      <span style={{ fontSize: 11, color: 'var(--text-ghost)', letterSpacing: '0.01em' }}>{label}</span>
-    </div>
   );
 }
 
@@ -273,10 +256,4 @@ const retryBtnStyle: React.CSSProperties = {
   background: 'var(--glass-bg-hover)', border: '1px solid var(--glass-border)',
   color: 'var(--text-primary)', fontSize: 12, fontWeight: 600, cursor: 'pointer',
   fontFamily: 'inherit',
-};
-
-const unpairStyle: React.CSSProperties = {
-  background: 'transparent', border: 'none', padding: '2px 4px',
-  color: 'var(--text-ghost)', fontSize: 11, cursor: 'pointer', fontFamily: 'inherit',
-  letterSpacing: '0.01em',
 };
