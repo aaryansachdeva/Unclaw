@@ -137,8 +137,11 @@ export function CompanionPanel({
       style={{
         position: 'absolute',
         top: 'calc(100% + 12px)',
-        left: '50%',
-        marginLeft: -140,
+        // Right-anchored: the phone button sits near the window's right edge, so
+        // a centered 280px panel overflowed and got clipped. Open leftward from
+        // the button instead. The small negative right nudges it toward the
+        // window edge without spilling past it.
+        right: -30,
         width: 280,
         padding: '16px 16px 16px',
         borderRadius: 16,
