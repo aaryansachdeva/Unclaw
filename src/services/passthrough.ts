@@ -42,17 +42,29 @@ export interface PassthroughBridgeOptions {
    *  speak so a toggle takes effect immediately: muted drops incoming
    *  lines; verbosity caps the play-queue (drop-oldest). */
   getPrefs?: () => PassthroughPrefs;
+  /** Whether the app is ready to render a spoken turn: signed in AND
+   *  onboarding complete (TTS provider / voice / keys). Reported to soul on
+   *  connect so the `speak` shim can gate on it (a passthrough session can be
+   *  connected while still on the sign-in / setup screen). */
+  getReady?: () => boolean;
   /** Optional: connection state changes, for a status pill. */
   onStatus?: (state: 'connecting' | 'open' | 'closed') => void;
+}
+
+/** Handle returned by startPassthroughBridge. */
+export interface PassthroughBridgeHandle {
+  stop: () => void;
+  /** Re-report readiness (e.g. after the user signs in mid-session). */
+  reportReady: (ready: boolean) => void;
 }
 
 const RECONNECT_MIN_MS = 800;
 const RECONNECT_MAX_MS = 8000;
 
 /** Open the passthrough channel and render every pushed speak. Returns a
- *  stop() that closes the socket and halts reconnection. Safe to call
- *  again after stop() (e.g. on a soul port change) — call stop() first. */
-export function startPassthroughBridge(opts: PassthroughBridgeOptions): () => void {
+ *  handle: stop() closes the socket + halts reconnection; reportReady() pushes
+ *  fresh readiness to soul. Safe to call again after stop() — call stop() first. */
+export function startPassthroughBridge(opts: PassthroughBridgeOptions): PassthroughBridgeHandle {
   let ws: WebSocket | null = null;
   let stopped = false;
   let backoff = RECONNECT_MIN_MS;
@@ -123,6 +135,11 @@ export function startPassthroughBridge(opts: PassthroughBridgeOptions): () => vo
     }
   };
 
+  const reportReady = (ready: boolean) => {
+    try { ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: 'ready', ready })); }
+    catch { /* socket closing */ }
+  };
+
   const connect = () => {
     if (stopped) return;
     opts.onStatus?.('connecting');
@@ -139,6 +156,8 @@ export function startPassthroughBridge(opts: PassthroughBridgeOptions): () => vo
       backoff = RECONNECT_MIN_MS;
       opts.onStatus?.('open');
       console.log('[passthrough] channel open');
+      // Report readiness so the shim knows if speech will actually render.
+      reportReady(opts.getReady?.() ?? false);
     };
     sock.onmessage = (ev) => {
       let msg: PassthroughSpeakMsg;
@@ -161,12 +180,15 @@ export function startPassthroughBridge(opts: PassthroughBridgeOptions): () => vo
 
   connect();
 
-  return () => {
-    stopped = true;
-    clearReconnect();
-    if (ws) {
-      try { ws.close(); } catch { /* already closed */ }
-      ws = null;
-    }
+  return {
+    stop: () => {
+      stopped = true;
+      clearReconnect();
+      if (ws) {
+        try { ws.close(); } catch { /* already closed */ }
+        ws = null;
+      }
+    },
+    reportReady,
   };
 }

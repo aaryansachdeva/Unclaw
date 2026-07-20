@@ -3050,15 +3050,27 @@ function AppMain() {
   // the bridge (which would drop + redial the WS).
   const passthroughPrefsRef = useRef(passthroughPrefs);
   passthroughPrefsRef.current = passthroughPrefs;
+  // Ready = signed in (authToken) AND onboarded (profile). The shim gates on
+  // this so the agent isn't told "spoken" while the app is on the sign-in /
+  // setup screen (where /speak can't render , no keys). Reported over the WS.
+  const passthroughReady = !!authToken && !!profile;
+  const passthroughBridgeRef = useRef<{ stop: () => void; reportReady: (r: boolean) => void } | null>(null);
   useEffect(() => {
     if (!passthrough || !isConnected || !pixelStreaming) return undefined;
-    const stop = startPassthroughBridge({
+    const bridge = startPassthroughBridge({
       onRendered: (result) => { dispatchChatResult(result); },
       getVoices: () => personaVoicesRef.current,
       getPrefs: () => passthroughPrefsRef.current,
+      getReady: () => (!!authTokenRef.current && !!profileRef.current),
     });
-    return () => { stop(); };
+    passthroughBridgeRef.current = bridge;
+    return () => { bridge.stop(); passthroughBridgeRef.current = null; };
   }, [passthrough, isConnected, pixelStreaming, dispatchChatResult]);
+  // Re-report readiness if the user signs in / finishes onboarding while a
+  // passthrough session is already open (bridge stays connected).
+  useEffect(() => {
+    passthroughBridgeRef.current?.reportReady(passthroughReady);
+  }, [passthroughReady]);
 
   // Body-idle resync. A renderer refresh/crash tears down the stream
   // session and the fresh one starts on the default body-idle loop,

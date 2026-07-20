@@ -3,26 +3,23 @@
 //   * Config file is `mcp_settings.json` (NOT cline_mcp_settings.json), and
 //     the approval key is `alwaysAllow` (NOT autoApprove).
 import { existsSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { registerAdapter, upsertMcpJson, removeMcpJson } from '../installer.mjs';
+import { vscodeGlobalStorageRoots, vscodeExtensionDirs } from '../platform.mjs';
 
-const CODE_ROOTS = ['Code', 'Code - Insiders', 'Cursor', 'VSCodium']
-  .map((d) => join(homedir(), 'Library', 'Application Support', d, 'User', 'globalStorage'));
+const EXT = 'rooveterinaryinc.roo-cline';
+const CODE_ROOTS = vscodeGlobalStorageRoots();
 
 function settingsPath() {
   for (const root of CODE_ROOTS) {
-    if (existsSync(join(root, 'rooveterinaryinc.roo-cline'))) {
-      return join(root, 'rooveterinaryinc.roo-cline', 'settings', 'mcp_settings.json');
-    }
+    if (existsSync(join(root, EXT))) return join(root, EXT, 'settings', 'mcp_settings.json');
   }
-  return join(CODE_ROOTS[0], 'rooveterinaryinc.roo-cline', 'settings', 'mcp_settings.json');
+  return join(CODE_ROOTS[0], EXT, 'settings', 'mcp_settings.json');
 }
 
 function hasExtension() {
-  const extDirs = [join(homedir(), '.vscode', 'extensions'), join(homedir(), '.vscode-insiders', 'extensions')];
-  return extDirs.some((d) => { try { return readdirSync(d).some((n) => n.startsWith('rooveterinaryinc.roo-cline-')); } catch { return false; } })
-    || CODE_ROOTS.some((r) => existsSync(join(r, 'rooveterinaryinc.roo-cline')));
+  return vscodeExtensionDirs().some((d) => { try { return readdirSync(d).some((n) => n.startsWith(`${EXT}-`)); } catch { return false; } })
+    || CODE_ROOTS.some((r) => existsSync(join(r, EXT)));
 }
 
 registerAdapter({

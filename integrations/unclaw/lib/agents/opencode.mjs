@@ -5,11 +5,11 @@
 //     "local"; `command` is a SINGLE ARRAY [cmd, ...args].
 //   * Guidance: AGENTS.md (global ~/.config/opencode/AGENTS.md).
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { registerAdapter, onPath, upsertMcpJson, removeMcpJson, upsertInstructions, INSTRUCTIONS_BODY } from '../installer.mjs';
+import { opencodeDir } from '../platform.mjs';
 
-const DIR = join(homedir(), '.config', 'opencode');
+const DIR = opencodeDir();
 const CFG = join(DIR, 'opencode.json');
 
 registerAdapter({

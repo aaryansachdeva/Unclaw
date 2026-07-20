@@ -20,25 +20,48 @@
 // no MCP registration / restart.
 
 import { readFileSync, existsSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 
-// --- ports.json discovery -------------------------------------------------
+// Self-contained (this file is copied ALONE to ~/.unclaw/bin) , no relative imports.
+const IS_WIN = platform() === 'win32';
+const IS_MAC = platform() === 'darwin';
+
+// --- UnClaw install + ports.json discovery --------------------------------
 //
-// soul writes {host, http, ...} to <SOUL_DATA_DIR>/ports.json on every
-// boot. Two standard locations: the packaged app's runtime dir and the
-// dev repo's soul/data. SOUL_PORTS_JSON overrides both. Pick the freshest
-// readable file so a stale dev copy never shadows a running packaged app.
+// The shim never links against UnClaw , it talks to it over loopback HTTP.
+// soul writes {host, http, ...} to <userData>/runtime/data/ports.json on every
+// boot; we read the freshest one and POST to it. The port is only valid while
+// UnClaw is running (a stale file fails the /health probe , see passthroughStatus).
+
+/** Electron userData dir for the app, per OS (app name "unclaw"). */
+function unclawUserDataDir() {
+  if (IS_WIN) return join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'unclaw');
+  if (IS_MAC) return join(homedir(), 'Library', 'Application Support', 'unclaw');
+  return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'unclaw'); // linux
+}
+
 function candidatePortsPaths() {
   const out = [];
   if (process.env.SOUL_PORTS_JSON) out.push(process.env.SOUL_PORTS_JSON);
   if (process.env.SOUL_DATA_DIR) out.push(join(process.env.SOUL_DATA_DIR, 'ports.json'));
-  out.push(join(homedir(), 'Library', 'Application Support', 'unclaw', 'runtime', 'data', 'ports.json'));
-  // Dev repo layout: this file lives at <repo>/UnClaw/integrations/unclaw-skill/scripts/,
-  // soul/data is a sibling of UnClaw. Also try a couple of common dev roots.
-  out.push(join(homedir(), 'Documents', 'Unclaw-Mac', 'soul', 'data', 'ports.json'));
+  out.push(join(unclawUserDataDir(), 'runtime', 'data', 'ports.json')); // packaged, cross-OS
+  out.push(join(homedir(), 'Documents', 'Unclaw-Mac', 'soul', 'data', 'ports.json')); // dev
   return out;
+}
+
+/** Is the UnClaw app installed on this machine? (Distinct from running.) Used
+ *  to tell "download UnClaw" from "just launch it". Checks the app bundle,
+ *  falling back to the userData dir (created on first run). */
+function unclawInstalled() {
+  const bundles = IS_MAC
+    ? ['/Applications/Unclaw.app', join(homedir(), 'Applications', 'Unclaw.app')]
+    : IS_WIN
+      ? [join(process.env.LOCALAPPDATA || '', 'Programs', 'unclaw', 'Unclaw.exe'),
+         join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Unclaw', 'Unclaw.exe')]
+      : ['/opt/Unclaw', join(homedir(), '.local', 'share', 'unclaw')]; // linux best-effort
+  return bundles.some(existsSync) || existsSync(unclawUserDataDir());
 }
 
 function resolvePorts() {
@@ -65,11 +88,12 @@ function soulHttpBase() {
 
 // --- HTTP calls -----------------------------------------------------------
 
-async function postSpeak({ text, mood, action }) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** One POST to /passthrough/speak. Returns soul's body, or an {ok:false,error}. */
+async function speakOnce({ text, mood, action }) {
   const base = soulHttpBase();
-  if (!base) {
-    return { ok: false, error: 'UnClaw soul server not found (no ports.json). Is UnClaw running?' };
-  }
+  if (!base) return { ok: false, delivered: 0, error: 'UnClaw soul server not found (no ports.json).' };
   let res;
   try {
     res = await fetch(`${base}/passthrough/speak`, {
@@ -79,19 +103,57 @@ async function postSpeak({ text, mood, action }) {
       signal: AbortSignal.timeout(10_000),
     });
   } catch (e) {
-    return { ok: false, error: `could not reach UnClaw soul at ${base}: ${e.message}` };
+    return { ok: false, delivered: 0, error: `could not reach UnClaw soul at ${base}: ${e.message}` };
   }
   let body = {};
   try { body = await res.json(); } catch { /* non-JSON */ }
-  if (!res.ok) {
-    return { ok: false, error: `soul /passthrough/speak ${res.status}`, ...body };
+  if (!res.ok) return { ok: false, delivered: 0, error: `soul /passthrough/speak ${res.status}`, ...body };
+  return body; // { ok, delivered, muted?, verbosity? }
+}
+
+/** Poll until the passthrough session is READY (connected + signed-in +
+ *  onboarded), or timeout. Readiness , not mere connection , is what lets
+ *  /speak actually render. */
+async function waitForReady(capMs) {
+  const deadline = Date.now() + capMs;
+  while (Date.now() < deadline) {
+    const s = await passthroughStatus();
+    if (s.ready) return true;
+    await sleep(1500);
   }
-  return body; // { ok, delivered, error? }
+  return false;
+}
+
+// Speak with LAZY auto-launch: try to deliver first (zero overhead when UnClaw
+// is already up); only if nothing received it AND UnClaw is installed do we
+// launch passthrough, wait for it to be READY, and retry ONCE. Disable with
+// UNCLAW_NO_AUTOLAUNCH=1.
+//   * muted        → held (agent should stop speaking until unmuted).
+//   * notReady     → a session is open but the user isn't signed in / set up,
+//                    so nothing would render , tell the user, don't launch.
+async function postSpeak({ text, mood, action }) {
+  const first = await speakOnce({ text, mood, action });
+  if (first.muted) return first;
+  if (first.delivered > 0 && first.ready === false) return { ...first, notReady: true };
+  if (first.delivered > 0) return first; // delivered + renderable
+  if (process.env.UNCLAW_NO_AUTOLAUNCH || !unclawInstalled()) return first;
+
+  // Nothing received it. Launch UnClaw (warm = flip to passthrough, fast; cold
+  // = full app + UE boot, slow) and wait until it's actually ready to render.
+  const wasRunning = !!soulHttpBase();
+  await launchPassthrough();
+  const ready = await waitForReady(wasRunning ? 25_000 : 90_000);
+  if (!ready) {
+    const s = await passthroughStatus();
+    return { ...first, autolaunch: s.connected ? 'launched, but not signed in / set up yet' : 'timed out waiting for UnClaw to come up' };
+  }
+  return { ...(await speakOnce({ text, mood, action })), autolaunched: true };
 }
 
 async function passthroughStatus() {
+  const installed = unclawInstalled();
   const base = soulHttpBase();
-  if (!base) return { running: false, connected: false, reason: 'soul not found' };
+  if (!base) return { installed, running: false, connected: false, reason: installed ? 'installed but not running' : 'UnClaw not installed' };
   // /health reports whether soul is up + how many passthrough renderers are
   // subscribed; /passthrough/prefs reports the user's talkativeness + mute.
   try {
@@ -105,14 +167,16 @@ async function passthroughStatus() {
       if (pr.ok) prefs = await pr.json();
     } catch { /* prefs optional */ }
     return {
+      installed,
       running: ok,
       connected: (j.passthrough_clients ?? 0) > 0,
+      ready: !!j.passthrough_ready, // connected AND signed-in + onboarded
       verbosity: prefs.verbosity ?? 'balanced',
       muted: !!prefs.muted,
       base,
     };
   } catch (e) {
-    return { running: false, connected: false, reason: e.message };
+    return { installed, running: false, connected: false, ready: false, reason: e.message };
   }
 }
 
@@ -168,6 +232,15 @@ function mcpServer() {
       description:
         'Launch (or focus) the UnClaw avatar window in passthrough mode so '
         + 'subsequent speak calls are heard. Safe to call again if already open.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'unclaw_status',
+      description:
+        'Check whether a live UnClaw passthrough session is connected and the '
+        + "user's current talkativeness + mute settings, BEFORE speaking. Use "
+        + 'this if you want to know if speech will be heard, or to tune how much '
+        + 'you say to the talkativeness level.',
       inputSchema: { type: 'object', properties: {} },
     },
   ];
@@ -227,14 +300,23 @@ function mcpServer() {
         const pref = r.verbosity ? ` [talkativeness: ${r.verbosity}]` : '';
         if (r.muted) {
           text = `Held , the user has the avatar MUTED. Stop calling speak until it clears.${pref}`;
-        } else if (r.ok) {
-          text = `Spoken (delivered to ${r.delivered} UnClaw window${r.delivered === 1 ? '' : 's'}).${pref}`;
+        } else if (r.notReady) {
+          text = 'UnClaw is open but the user is not signed in / finished setup yet, so nothing will play. Ask them to sign in and finish setup in UnClaw, then try again.';
+        } else if (r.ok && r.delivered > 0) {
+          text = `Spoken${r.autolaunched ? ' (auto-launched UnClaw first)' : ''} (delivered to ${r.delivered} window${r.delivered === 1 ? '' : 's'}).${pref}`;
+        } else if (r.autolaunch) {
+          text = `Launched UnClaw , ${r.autolaunch}. Try speaking again in a moment.`;
         } else {
           text = `Not spoken: ${r.error || 'unknown error'}${pref}`;
         }
       } else if (name === 'launch_unclaw') {
         const r = await launchPassthrough();
         text = r.ok ? 'UnClaw launching in passthrough mode.' : `Launch failed: ${r.error}`;
+      } else if (name === 'unclaw_status') {
+        const s = await passthroughStatus();
+        text = !s.running ? 'UnClaw is not running , launch it first (launch_unclaw).'
+          : !s.connected ? 'UnClaw is running but no passthrough session is connected yet , speech will not be heard.'
+          : `Live. talkativeness: ${s.verbosity}${s.muted ? ' , MUTED (hold speech until unmuted)' : ''}.`;
       } else {
         send({ jsonrpc: '2.0', id, error: { code: -32601, message: `unknown tool ${name}` } });
         return;
@@ -299,4 +381,14 @@ async function main() {
   }
 }
 
-main();
+// Reusable core for the `unclaw` CLI (doctor/test/status) , importing this
+// file must NOT run the CLI.
+export { soulHttpBase, resolvePorts, postSpeak, passthroughStatus, launchPassthrough, unclawInstalled };
+
+// Run the CLI only when invoked directly (`node unclaw-speak.mjs ...`), not
+// when imported by bin/unclaw.mjs.
+import { argv } from 'node:process';
+import { fileURLToPath as _f2u } from 'node:url';
+if (argv[1] && (() => { try { return _f2u(import.meta.url) === argv[1]; } catch { return false; } })()) {
+  main();
+}

@@ -5,11 +5,16 @@ capability into Codex, opencode, Gemini CLI, Cursor, Cline, Roo, Windsurf,
 Claude Code — with one command.
 
 ```bash
-npx unclaw            # detect installed agents + connect them all
-npx unclaw detect     # just list what's supported / installed
-npx unclaw install codex opencode   # only these
-npx unclaw uninstall  # remove
+npx unclaw-cli               # detect installed agents + connect them all
+npx unclaw-cli detect        # list what's supported / installed
+npx unclaw-cli install codex opencode   # only these
+npx unclaw-cli status        # agents connected + is UnClaw live + talkativeness
+npx unclaw-cli test          # send a test line to the avatar (verify the chain)
+npx unclaw-cli doctor        # diagnose why speaking isn't working
+npx unclaw-cli uninstall     # remove
 ```
+
+(The installed command is `unclaw` , `npm i -g unclaw-cli` then just `unclaw ...`.)
 
 Then start your agent — it gains a `speak` tool. Launch UnClaw in passthrough
 mode (`/unclaw`, or `open "unclaw://passthrough"`) and the avatar voices
@@ -66,7 +71,15 @@ Node.js is required only where the MCP server runs. Gemini CLI users already
 have it; for the others the installer resolves an absolute node and, if none
 exists, should prompt to install one.
 
+## Cross-platform
+
+macOS, Windows, Linux. Most agents key their config off the home dir
+(`~/.codex`, `~/.gemini`, `~/.cursor`, ...) which is portable; the OS-specific
+bits , the VS Code globalStorage root (Cline/Roo) and finding `node` , are
+handled in `lib/platform.mjs` (Library/Application Support · %APPDATA% ·
+XDG_CONFIG_HOME; `which` · `where`).
+
 ## Requirements
 
-Node 18+. macOS paths above; Linux/Windows adapters follow the same schemas
-with per-OS config locations (TODO for non-macOS).
+Node 18+. Node is only needed where the MCP server runs; the installer resolves
+an absolute node path (Dock/Start-menu-launched GUI editors get a minimal PATH).

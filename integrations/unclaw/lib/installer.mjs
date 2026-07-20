@@ -100,25 +100,12 @@ export function upsertInstructions(path, body) {
 function short(p) { return p.replace(homedir(), '~'); }
 
 // ---- node + agent-cli resolution ----------------------------------------
-
-let _node;
-/** Absolute path to a `node` binary. MUST be absolute: Dock-launched GUI
- *  editors (Cursor/Cline/Windsurf) inherit a minimal PATH; and in the UnClaw
- *  app process.execPath is Electron, not node. */
-export function resolveNode() {
-  if (_node) return _node;
-  const cands = [];
-  try { cands.push(execFileSync('which', ['node'], { encoding: 'utf8' }).trim()); } catch { /* none */ }
-  if (/[/\\]node$/.test(process.execPath)) cands.push(process.execPath); // node running us (CLI path)
-  cands.push('/opt/homebrew/bin/node', '/usr/local/bin/node', '/usr/bin/node');
-  _node = cands.find((c) => c && existsSync(c)) || 'node';
-  return _node;
-}
-
-/** Is a binary resolvable on PATH? (terminal agents inherit the shell PATH.) */
-export function onPath(bin) {
-  try { execFileSync('which', [bin], { stdio: 'ignore' }); return true; } catch { return false; }
-}
+//
+// resolveNode() / onPath() are cross-platform (see lib/platform.mjs). MUST use
+// an ABSOLUTE node: Dock/Start-menu-launched GUI editors inherit a minimal
+// PATH, and in the UnClaw app process.execPath is Electron, not node.
+export { resolveNode, onPath } from './platform.mjs';
+import { resolveNode as _resolveNode } from './platform.mjs';
 
 /** Run an agent's own `mcp add` CLI (safest , the tool owns its format). */
 export function runAgentCli(bin, args) {
@@ -161,10 +148,11 @@ function safe(fn, fallback) {
 
 function ctx() {
   const runtime = installRuntime();
+  const node = _resolveNode();
   return {
-    node: resolveNode(),
+    node,
     runtime,
-    server: { command: resolveNode(), args: [runtime, '--mcp'] }, // JSON `mcpServers` shape
+    server: { command: node, args: [runtime, '--mcp'] }, // JSON `mcpServers` shape
     UNCLAW_HOME,
   };
 }
