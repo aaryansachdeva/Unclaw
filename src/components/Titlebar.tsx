@@ -440,7 +440,7 @@ export function Titlebar({
                   just left of the pin. Shown only when signed in (a session is
                   needed to pair). */}
               {companionAuth && (
-                <div ref={companionWrapRef} style={{ position: 'relative', display: 'inline-flex' }}>
+                <div ref={companionWrapRef} style={{ position: 'relative', display: 'inline-flex', marginLeft: -5 }}>
                   <button
                     type="button"
                     onClick={() => setCompanionOpen((o) => !o)}
@@ -492,6 +492,7 @@ export function Titlebar({
                       // bright when pinned, dim when not.
                       width: 22,
                       height: 22,
+                      marginLeft: -5,
                       background: 'transparent',
                       border: 'none',
                       padding: 0,
