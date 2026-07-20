@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
-import QRCode from 'qrcode';
+import QRCodeStyling from 'qr-code-styling';
 import { Smartphone, Check, Loader2, RefreshCw } from 'lucide-react';
 import logoUrl from '../assets/logo.png';
 import {
@@ -14,14 +14,43 @@ const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
 type Phase = 'loading' | 'signin' | 'ready' | 'error';
 
+const QR_PX = 228;
+
+/** Build a styled QR: rounded modules + soft-cornered finder eyes, with the
+ *  Unclaw logo dropped into a carved-out center (the pattern is generated
+ *  AROUND the logo, not pasted over it). */
+function makeQr(data: string): QRCodeStyling {
+  return new QRCodeStyling({
+    width: QR_PX,
+    height: QR_PX,
+    type: 'canvas',
+    data,
+    image: logoUrl,
+    margin: 0,
+    qrOptions: { errorCorrectionLevel: 'H' },
+    dotsOptions: { type: 'rounded', color: '#141821' },
+    cornersSquareOptions: { type: 'extra-rounded', color: '#141821' },
+    cornersDotOptions: { type: 'dot', color: '#c44444' },
+    backgroundOptions: { color: 'transparent' },
+    imageOptions: {
+      crossOrigin: 'anonymous',
+      // Carve the modules out behind the logo + give it a big footprint so it
+      // reads as designed-in rather than overlaid.
+      hideBackgroundDots: true,
+      imageSize: 0.4,
+      margin: 5,
+    },
+  });
+}
+
 /**
  * "Connect your phone" popover — anchored under the titlebar phone button.
  *
  * Ensures the desktop is paired (arms soul's cloud-signalling client), renders
- * the QR the phone scans (Unclaw logo in the center), and polls the pair status
- * so it flips to "Phone connected" the moment a device bridges in. The QR is a
- * universal link to the Worker; the Worker only proxies signalling — the avatar
- * video/audio flow DIRECT phone<->desktop after the handshake.
+ * a branded QR the phone scans, and polls the pair status so it flips to
+ * "Phone connected" the moment a device bridges in. The QR is a universal link
+ * to the Worker; the Worker only proxies signalling — the avatar video/audio
+ * flow DIRECT phone<->desktop after the handshake.
  */
 export function CompanionPanel({
   authToken,
@@ -34,9 +63,11 @@ export function CompanionPanel({
 }) {
   const [phase, setPhase] = useState<Phase>('loading');
   const [error, setError] = useState<string | null>(null);
-  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [connectUrl, setConnectUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<PairStatus | null>(null);
   const mountedRef = useRef(true);
+  const qrBoxRef = useRef<HTMLDivElement>(null);
+  const qrRef = useRef<QRCodeStyling | null>(null);
 
   const phoneConnected = (status?.active_players?.length ?? 0) > 0;
   const authInvalid = status?.state === 'AUTH_INVALID';
@@ -52,15 +83,7 @@ export function CompanionPanel({
         setError('Could not build a connect link. Is the companion service running?');
         return;
       }
-      // High error-correction so the center logo (~20% occlusion) stays scannable.
-      const dataUrl = await QRCode.toDataURL(link.connect_url, {
-        errorCorrectionLevel: 'H',
-        margin: 1,
-        width: 460,
-        color: { dark: '#12151c', light: '#f4f2ef' },
-      });
-      if (!mountedRef.current) return;
-      setQrDataUrl(dataUrl);
+      setConnectUrl(link.connect_url);
       setPhase('ready');
     } catch (e) {
       if (!mountedRef.current) return;
@@ -76,6 +99,18 @@ export function CompanionPanel({
     void load();
     return () => { mountedRef.current = false; };
   }, [load]);
+
+  // Draw / update the styled QR once the container + link exist.
+  useEffect(() => {
+    if (phase !== 'ready' || !connectUrl || !qrBoxRef.current) return;
+    if (!qrRef.current) {
+      qrRef.current = makeQr(connectUrl);
+      qrBoxRef.current.innerHTML = '';
+      qrRef.current.append(qrBoxRef.current);
+    } else {
+      qrRef.current.update({ data: connectUrl });
+    }
+  }, [phase, connectUrl]);
 
   // Poll live pair status so "Phone connected" lights up on its own.
   useEffect(() => {
@@ -151,7 +186,7 @@ export function CompanionPanel({
 
       {phase === 'ready' && (
         <>
-          {/* QR on a light tile with the Unclaw logo in the center */}
+          {/* Styled QR on a light tile. */}
           <div style={{
             position: 'relative',
             borderRadius: 14,
@@ -160,31 +195,14 @@ export function CompanionPanel({
             boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.06)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}>
-            {qrDataUrl && (
-              <img
-                src={qrDataUrl}
-                alt="Scan to connect your phone"
-                width={228}
-                height={228}
-                style={{ display: 'block', width: 228, height: 228, opacity: phoneConnected ? 0.22 : 1, transition: 'opacity 0.3s var(--ease-out-quart)' }}
-              />
-            )}
-
-            {/* Center logo badge — covers ~10% of the code area, safely within
-                the 'H' error-correction budget (~30%), so the QR still scans. */}
-            {!phoneConnected && (
-              <div style={{
-                position: 'absolute',
-                width: 72, height: 72, borderRadius: 17,
-                background: '#f4f2ef',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                boxShadow: '0 1px 5px rgba(0,0,0,0.16)',
-              }}>
-                <img src={logoUrl} alt="" width={54} height={54}
-                  style={{ display: 'block', width: 54, height: 54, objectFit: 'contain' }} />
-              </div>
-            )}
-
+            <div
+              ref={qrBoxRef}
+              style={{
+                width: QR_PX, height: QR_PX, lineHeight: 0,
+                opacity: phoneConnected ? 0.18 : 1,
+                transition: 'opacity 0.3s var(--ease-out-quart)',
+              }}
+            />
             {phoneConnected && (
               <div style={{
                 position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
