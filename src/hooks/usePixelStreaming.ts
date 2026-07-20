@@ -139,9 +139,18 @@ export function usePixelStreaming({
     // emitting the Resolution command. Wire format is identical to the SDK's
     // own path: emitCommand() -> streamMessageController 'Command' handler,
     // same as onMatchViewportResolutionCallback's default body.
-    // TEMP(revert): resolution cap lifted for testing. Restore `= 1920` to re-cap
-    // the longest side for the HW encoder + bitrate sanity.
-    const MAX_RENDER_DIM = Number.MAX_SAFE_INTEGER; // TEMP: no cap
+    // Cap the longest rendered side. Everything downstream scales with pixel
+    // area: UE's scene-texture chain, the capture/I420/NV12 conversions, and
+    // the HW encoder. Uncapped Retina (dpr 2) testing measured ~6.5 GB resident
+    // at launch and ~1 GB of realloc churn per window resize. 1600 (vs 1920)
+    // trims ~30% more off every output-sized buffer in the whole pipeline;
+    // memory > sharpness call made 2026-07-19.
+    const MAX_RENDER_DIM = 1600;
+    // Last dims actually sent to UE. Identical re-sends are skipped (layout
+    // jitter + the layered connect-time fires produce duplicates); reset on
+    // each webRtcConnected so a fresh session always gets one real send even
+    // if a pre-connect attempt was dropped with the data channel closed.
+    const lastSentRes = { w: 0, h: 0 };
     const installDprResolutionOverride = (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vp: any,
@@ -152,13 +161,29 @@ export function usePixelStreaming({
         let w = Math.round(cssW * dpr);
         let h = Math.round(cssH * dpr);
         const longest = Math.max(w, h);
+        // Cap, then quantize the longest side DOWN to a 128px step (above
+        // 1024). Every distinct resolution UE receives costs one realloc
+        // cycle of the backbuffer + capture + encoder chain, so snapping to
+        // steps makes most window resizes send nothing at all (the dedupe
+        // below eats the repeat). Worst-case cost is a <=127px downscale the
+        // video element upscales away, invisible at stream viewing sizes.
+        // Below 1024 the buffers are small enough that native size is fine.
+        let target = longest;
         if (longest > MAX_RENDER_DIM) {
-          const s = MAX_RENDER_DIM / longest;
+          target = MAX_RENDER_DIM;
+        } else if (longest >= 1024) {
+          target = Math.floor(longest / 128) * 128;
+        }
+        if (target < longest) {
+          const s = target / longest;
           w = Math.round(w * s);
           h = Math.round(h * s);
         }
         w -= w % 2; // even dims: H264 4:2:0 chroma subsampling needs them
         h -= h % 2;
+        if (w === lastSentRes.w && h === lastSentRes.h) return;
+        lastSentRes.w = w;
+        lastSentRes.h = h;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (ps as any).emitCommand({ 'Resolution.Width': w, 'Resolution.Height': h });
       };
@@ -176,17 +201,89 @@ export function usePixelStreaming({
       }
     };
 
-    // Dev-mode handle so the update can be fired from DevTools when
-    // diagnosing a layout-change miss. Stripped in production builds
-    // by Vite's dead-code elimination on import.meta.env.DEV.
+    // Decoder diagnostic. Chromium can silently fall back from VideoToolbox
+    // to FFmpeg software decode (codec-profile mismatch, GPU process restart),
+    // which costs ~200MB of CPU-side frame copies plus real CPU per frame.
+    // Log the implementation so a regression is a visible console line.
+    // HW names vary by Chromium version: "VideoToolboxVideoDecoder" (current),
+    // "VDAVideoDecoder" / "ExternalDecoder" (older). Software is consistently
+    // "FFmpegVideoDecoder" (or libvpx/dav1d for codecs we don't send). Match
+    // the known-HW set, so an unrecognized new name warns instead of passing.
+    const logDecoderImplementation = async () => {
+      try {
+        const pc: RTCPeerConnection | undefined =
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (ps as any)._webRtcController?.peerConnectionController?.peerConnection;
+        if (!pc) {
+          // eslint-disable-next-line no-console
+          console.warn('[ps] video decoder: no peer connection yet');
+          return;
+        }
+        let seen = false;
+        const stats = await pc.getStats();
+        stats.forEach((report) => {
+          if (report.type === 'inbound-rtp' && report.kind === 'video') {
+            seen = true;
+            const r = report as {
+              decoderImplementation?: string;
+              framesDecoded?: number;
+              totalDecodeTime?: number;
+            };
+            const avgMs = r.framesDecoded && r.totalDecodeTime
+              ? (r.totalDecodeTime / r.framesDecoded) * 1000
+              : undefined;
+            const avgStr = avgMs !== undefined ? `, avg decode ${avgMs.toFixed(2)}ms/frame` : '';
+            if (r.decoderImplementation === undefined) {
+              // Chromium fingerprinting-gates decoderImplementation: it's only
+              // exposed to pages granted media capture, which this renderer
+              // never requests (the mic lives UE-side). NOT a software signal.
+              // Verified 2026-07-19 that decode is hardware regardless: a
+              // VTDecoderXPCService spawns alongside the app on connect
+              // (out-of-process VideoToolbox). The avg decode time is the
+              // permission-free heuristic: HW runs ~1-3ms/frame at our sizes,
+              // software typically 5ms+.
+              // eslint-disable-next-line no-console
+              console.log(
+                `[ps] video decoder: hidden by Chromium (no capture permission)${avgStr}` +
+                ' — check for a VTDecoderXPCService process to confirm HW'
+              );
+              return;
+            }
+            const impl = r.decoderImplementation;
+            const hw = /VideoToolbox|VDA|External|MediaCodec|hw/i.test(impl);
+            // eslint-disable-next-line no-console
+            console[hw ? 'log' : 'warn'](
+              `[ps] video decoder: ${impl}${avgStr}${hw ? '' : ' (SOFTWARE decode: expect extra RAM + CPU)'}`
+            );
+          }
+        });
+        if (!seen) {
+          // eslint-disable-next-line no-console
+          console.warn('[ps] video decoder: no inbound video stats yet (stream not decoding?)');
+        }
+      } catch {
+        // Diagnostic only, never let it interfere with the stream.
+      }
+    };
+
+    // Dev-mode handles for DevTools: fire the viewport-res update when
+    // diagnosing a layout-change miss, and query the decoder verdict on
+    // demand (`await psDecoderCheck()`). Stripped in production builds by
+    // Vite's dead-code elimination on import.meta.env.DEV.
     if (import.meta.env.DEV) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (window as any).forceViewportUpdate = forceViewportResolutionUpdate;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).psDecoderCheck = logDecoderImplementation;
     }
 
     ps.addEventListener('webRtcConnecting', () => setConnectionState('connecting'));
     ps.addEventListener('webRtcConnected', () => {
       setConnectionState('connected');
+      // New session: forget the dedupe state so the first resolution send of
+      // this connection always goes out on the wire.
+      lastSentRes.w = 0;
+      lastSentRes.h = 0;
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
@@ -248,6 +345,10 @@ export function usePixelStreaming({
       setTimeout(forceViewportResolutionUpdate, 1000);
       setTimeout(forceViewportResolutionUpdate, 2000);
       setTimeout(forceViewportResolutionUpdate, 3000);
+      // One-time decoder diagnostic ~4s after stream start (stats need a few
+      // decoded frames before decoderImplementation populates). See
+      // logDecoderImplementation for why this exists.
+      setTimeout(() => void logDecoderImplementation(), 4000);
     });
 
     // Dynamic-resize: watch the video parent's pixel size and re-fire

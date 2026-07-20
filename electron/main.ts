@@ -24,6 +24,16 @@ import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
 
+// Cap Chromium's GPU memory budget. By default Chromium scales its tile /
+// cache / staging budget to system RAM (generous on a 64GB machine); measured
+// 2026-07-19 the GPU process held a 1.6GB physical footprint (268MB across 561
+// IOSurfaces + 617MB IOAccelerator) for one window streaming one video. 512MB
+// forces the compositor to evict instead of hoard. Worst case is a rare
+// repaint flicker under fast UI motion; the WebRTC video path is unaffected
+// (decoded frames live in VideoToolbox surfaces outside this budget).
+// Must run before app ready, so module top level.
+app.commandLine.appendSwitch('force-gpu-mem-available-mb', '512');
+
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;

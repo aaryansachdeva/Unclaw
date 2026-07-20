@@ -15,16 +15,18 @@ import {
   useEffect,
   useImperativeHandle,
   useMemo,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AnimatePresence,
   motion,
   useReducedMotion,
 } from 'framer-motion';
 import {
-  Plus, ArrowRight, ChevronLeft, ChevronRight,
+  Plus, ArrowRight, ChevronDown,
   PanelRightOpen, PanelRightClose,
 } from 'lucide-react';
 
@@ -94,11 +96,15 @@ interface InputBarProps {
    *  directly in the same surface the user types into, no separate
    *  view. */
   voiceActive?: boolean;
-  /** Persona switcher — chevron-prev / chevron-next, inline in row 2. */
-  onPrevPersona: () => void;
-  onNextPersona: () => void;
-  /** Clicking the persona name opens the "add new agent" picker. */
-  onPersonaNameClick?: () => void;
+  /** Persona switcher — the roster as a dropdown list, plus a + button to add.
+   *  `agents` is every roster instance in carousel order. */
+  agents: Array<{ id: string; name: string }>;
+  /** Currently selected roster instance id (or the Add slot). */
+  selectedAgentId: string;
+  /** Switch to a roster instance by id (dropdown pick). */
+  onSelectAgent: (id: string) => void;
+  /** Open the "add a new agent" picker (the + button). */
+  onAddAgent?: () => void;
   /** Disable the persona switcher when stream isn't connected. */
   personaDisabled?: boolean;
   /** Called when the user pastes an image into the textarea. Each
@@ -161,9 +167,10 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onExpress,
   voice,
   voiceActive = false,
-  onPrevPersona,
-  onNextPersona,
-  onPersonaNameClick,
+  agents,
+  selectedAgentId,
+  onSelectAgent,
+  onAddAgent,
   personaDisabled = false,
   onPasteImage,
   onAttachImages,
@@ -832,63 +839,16 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             gap: 8,
           }}
         >
-          {/* Inline agent switcher */}
-          <div
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 6,
-              flexShrink: 0,
-              opacity: personaDisabled ? 0.4 : 1,
-              transition: 'opacity 0.25s var(--ease-out-quart)',
-            }}
-          >
-            <InlineChevron
-              direction="prev"
-              onClick={onPrevPersona}
-              disabled={personaDisabled}
-            />
-            <button
-              type="button"
-              onClick={onPersonaNameClick}
-              disabled={personaDisabled || !onPersonaNameClick}
-              title={onPersonaNameClick ? 'Add a new agent' : undefined}
-              style={{
-                minWidth: 64,
-                textAlign: 'center',
-                fontSize: 13.5,
-                fontWeight: 600,
-                letterSpacing: '0.01em',
-                color: 'var(--text-primary)',
-                background: 'transparent',
-                border: 'none',
-                padding: '2px 4px',
-                borderRadius: 6,
-                cursor: (personaDisabled || !onPersonaNameClick) ? 'default' : 'pointer',
-                transition: 'opacity 150ms var(--ease-out-quart, ease)',
-              }}
-              onMouseEnter={(e) => { if (onPersonaNameClick && !personaDisabled) e.currentTarget.style.opacity = '0.62'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}
-            >
-              <AnimatePresence mode="wait">
-                <motion.span
-                  key={personaName}
-                  initial={reduce ? { opacity: 1 } : { opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
-                  transition={{ duration: 0.18, ease: EASE_OUT_EXPO }}
-                  style={{ display: 'inline-block' }}
-                >
-                  {personaName}
-                </motion.span>
-              </AnimatePresence>
-            </button>
-            <InlineChevron
-              direction="next"
-              onClick={onNextPersona}
-              disabled={personaDisabled}
-            />
-          </div>
+          {/* Agent switcher — dropdown list of the roster + a + button to add */}
+          <AgentSwitcher
+            personaName={personaName}
+            agents={agents}
+            selectedAgentId={selectedAgentId}
+            onSelect={onSelectAgent}
+            onAdd={onAddAgent}
+            disabled={personaDisabled}
+            reduce={reduce}
+          />
 
           {/* Spacer */}
           <div style={{ flex: 1 }} />
@@ -1033,54 +993,241 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
 });
 
 // ---------------------------------------------------------------------
-// Inline chevron used by the agent switcher (row 2 of the input bar)
+// Agent switcher — the roster as a dropdown list + a + button (row 2)
 // ---------------------------------------------------------------------
 
-function InlineChevron({
-  direction,
-  onClick,
-  disabled,
+function AgentSwitcher({
+  personaName, agents, selectedAgentId, onSelect, onAdd, disabled, reduce,
 }: {
-  direction: 'prev' | 'next';
-  onClick: () => void;
+  personaName: string;
+  agents: Array<{ id: string; name: string }>;
+  selectedAgentId: string;
+  onSelect: (id: string) => void;
+  onAdd?: () => void;
   disabled: boolean;
+  reduce: boolean;
 }) {
-  const Icon = direction === 'prev' ? ChevronLeft : ChevronRight;
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const chipRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  // Fixed-viewport anchor for the portaled list. The list is rendered into
+  // document.body so it escapes the InputBar's `overflow: hidden` glass capsule
+  // (which would otherwise clip it to inside the bar). `bottom` anchors it just
+  // above the chip's top edge; the bar lives at the bottom of the window.
+  const [menuPos, setMenuPos] = useState<{ left: number; bottom: number; minWidth: number } | null>(null);
+
+  const measure = useCallback(() => {
+    const r = chipRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setMenuPos({
+      left: r.left,
+      bottom: window.innerHeight - r.top + 8,
+      minWidth: Math.max(176, r.width),
+    });
+  }, []);
+
+  // Measure synchronously before paint whenever the menu is open, so it never
+  // flashes at a stale position.
+  useLayoutEffect(() => { if (open) measure(); }, [open, measure]);
+
+  // Close on outside click / Escape; re-measure on resize (the list is fixed to
+  // the viewport, so a window resize shifts where the chip sits).
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t) || listRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    const onResize = () => measure();
+    window.addEventListener('pointerdown', onDown);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onResize);
+    };
+  }, [open, measure]);
+
+  const pick = (id: string) => {
+    setOpen(false);
+    if (id !== selectedAgentId) onSelect(id);
+  };
+
   return (
-    <motion.button
-      type="button"
-      whileHover={disabled ? undefined : { scale: 1.1 }}
-      whileTap={disabled ? undefined : { scale: 0.9 }}
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={direction === 'prev' ? 'Previous agent' : 'Next agent'}
+    <div
+      ref={rootRef}
       style={{
-        width: 22,
-        height: 22,
-        borderRadius: 6,
-        background: 'transparent',
-        border: 'none',
-        color: 'var(--text-secondary)',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        flexShrink: 0,
+        position: 'relative',
         display: 'inline-flex',
         alignItems: 'center',
-        justifyContent: 'center',
-        fontFamily: 'inherit',
-        transition: 'all 0.15s var(--ease-out-quart)',
-      }}
-      onMouseEnter={(e) => {
-        if (disabled) return;
-        e.currentTarget.style.background = 'var(--glass-bg-hover)';
-        e.currentTarget.style.color = 'var(--text-primary)';
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = 'transparent';
-        e.currentTarget.style.color = 'var(--text-secondary)';
+        gap: 4,
+        flexShrink: 0,
+        opacity: disabled ? 0.4 : 1,
+        transition: 'opacity 0.25s var(--ease-out-quart)',
       }}
     >
-      <Icon size={16} strokeWidth={3} style={{ transform: 'translateY(1px)' }} />
-    </motion.button>
+      {/* Current agent — click opens the roster list above the bar. */}
+      <button
+        ref={chipRef}
+        type="button"
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => !disabled && setOpen((o) => !o)}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 5,
+          maxWidth: 148,
+          fontSize: 13.5, fontWeight: 600, letterSpacing: '0.01em',
+          color: 'var(--text-primary)',
+          background: open ? 'var(--glass-bg-hover)' : 'transparent',
+          border: 'none', padding: '3px 7px', borderRadius: 7,
+          cursor: disabled ? 'default' : 'pointer',
+          transition: 'background 150ms var(--ease-out-quart)',
+        }}
+        onMouseEnter={(e) => { if (!disabled && !open) e.currentTarget.style.background = 'var(--glass-bg-hover)'; }}
+        onMouseLeave={(e) => { if (!open) e.currentTarget.style.background = 'transparent'; }}
+      >
+        <AnimatePresence mode="wait">
+          <motion.span
+            key={personaName}
+            initial={reduce ? { opacity: 1 } : { opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
+            transition={{ duration: 0.18, ease: EASE_OUT_EXPO }}
+            style={{
+              display: 'inline-block',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
+            {personaName}
+          </motion.span>
+        </AnimatePresence>
+        <ChevronDown
+          size={13} strokeWidth={2.75}
+          style={{
+            flexShrink: 0,
+            color: 'var(--text-ghost)',
+            transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+            transition: 'transform 200ms var(--ease-out-quart)',
+          }}
+        />
+      </button>
+
+      {/* + add a new agent */}
+      {onAdd && (
+        <motion.button
+          type="button"
+          whileHover={disabled ? undefined : { scale: 1.08 }}
+          whileTap={disabled ? undefined : { scale: 0.92 }}
+          onClick={() => { if (!disabled) { setOpen(false); onAdd(); } }}
+          disabled={disabled}
+          aria-label="Add a new agent"
+          title="Add a new agent"
+          style={{
+            width: 24, height: 24, borderRadius: 7,
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            background: 'transparent', border: 'none',
+            color: 'var(--text-secondary)',
+            cursor: disabled ? 'not-allowed' : 'pointer',
+            flexShrink: 0,
+            transition: 'background 150ms var(--ease-out-quart), color 150ms var(--ease-out-quart)',
+          }}
+          onMouseEnter={(e) => { if (disabled) return; e.currentTarget.style.background = 'var(--glass-bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+        >
+          <Plus size={15} strokeWidth={2.75} />
+        </motion.button>
+      )}
+
+      {/* Roster list — portaled to <body> so it escapes the InputBar's
+          `overflow: hidden` glass capsule (which otherwise clips it to inside
+          the bar). Fixed-positioned just above the chip; opens UPWARD (bar sits
+          at the bottom). Near-opaque slate: a dropdown can't composite a second
+          backdrop blur over the bar's own, so it uses a solid surface. */}
+      {createPortal(
+        <AnimatePresence>
+          {open && menuPos && agents.length > 0 && (
+            <motion.ul
+              ref={listRef}
+              role="listbox"
+              initial={reduce ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reduce ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.97 }}
+              transition={{ duration: 0.16, ease: EASE_OUT_EXPO }}
+              style={{
+                position: 'fixed',
+                bottom: menuPos.bottom,
+                left: menuPos.left,
+                minWidth: menuPos.minWidth,
+                maxHeight: 264,
+                overflowY: 'auto',
+                margin: 0, padding: 5, listStyle: 'none',
+                transformOrigin: 'bottom left',
+                background: 'rgba(30, 36, 50, 0.98)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 12,
+                boxShadow: '0 12px 34px -8px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.3)',
+                zIndex: 1000,
+              }}
+            >
+            {agents.map((a) => {
+              const active = a.id === selectedAgentId;
+              return (
+                <li key={a.id} role="option" aria-selected={active}>
+                  <button
+                    type="button"
+                    onClick={() => pick(a.id)}
+                    style={{
+                      width: '100%', textAlign: 'left',
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '7px 9px', borderRadius: 8,
+                      fontSize: 13, fontWeight: active ? 600 : 500,
+                      letterSpacing: '0.01em',
+                      color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      background: active ? 'var(--glass-bg-hover)' : 'transparent',
+                      border: 'none', cursor: 'pointer',
+                      transition: 'background 120ms var(--ease-out-quart), color 120ms var(--ease-out-quart)',
+                    }}
+                    onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; }}
+                    onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
+                  >
+                    {/* Presence dot: filled+glowing when this agent is the live
+                        one, a hollow ring when idle. */}
+                    <span
+                      aria-hidden
+                      style={{
+                        width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                        background: active ? 'var(--live, #8cbf8a)' : 'transparent',
+                        border: active ? 'none' : '1.5px solid rgba(255,255,255,0.22)',
+                        boxShadow: active ? '0 0 6px rgba(140,191,138,0.6)' : 'none',
+                        transition: 'all 150ms var(--ease-out-quart)',
+                      }}
+                    />
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {a.name}
+                    </span>
+                    <span style={{
+                      flexShrink: 0,
+                      fontSize: 9.5, fontWeight: 600, letterSpacing: '0.06em',
+                      textTransform: 'uppercase',
+                      color: active ? 'var(--live, #8cbf8a)' : 'var(--text-ghost)',
+                    }}>
+                      {active ? 'Active' : 'Idle'}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </motion.ul>
+        )}
+        </AnimatePresence>,
+        document.body,
+      )}
+    </div>
   );
 }
 

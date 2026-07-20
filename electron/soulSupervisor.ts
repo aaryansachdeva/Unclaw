@@ -505,12 +505,16 @@ function spawnSoul(window: BrowserWindow): boolean {
   // exactly like a terminal-launched `./run_soul.sh` invocation.
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    // Dynamic backbuffer match via MatchViewportRes, the new MacInputHandler
-    // SetCommandHandler("Resolution.Width", ...) (UE plugin rebuild) handles
-    // the SDK's resize messages and runs r.SetRes WxHw. UE picks its own
-    // sensible default at boot (typically the host display dimensions in
-    // -RenderOffScreen), then resizes on demand as the browser fires.
-    UNCLAW_UE_RES_AUTO: process.env.UNCLAW_UE_RES_AUTO ?? '1',
+    // Boot UE at run_soul's small fixed resolution (720x1280) instead of
+    // letting -RenderOffScreen default to the HOST DISPLAY size. Dynamic
+    // resize still works: MatchViewportRes grows the stream to the pane's
+    // capped size right after connect. This '0' became load-bearing on
+    // 2026-07-19 when r.SceneRenderTargetResizeMethod=2 (grow-only scene
+    // textures) shipped: with RES_AUTO=1 a 5K display made UE boot with a
+    // 5120x2880 chain that grow-only then kept FOREVER (~2GB of dead Metal
+    // memory, found via MemReport + vmmap "owned unmapped (graphics)").
+    // Boot small; the floor becomes the frontend's real streamed size.
+    UNCLAW_UE_RES_AUTO: process.env.UNCLAW_UE_RES_AUTO ?? '0',
     // Flat dir of owned character paks. run_soul.sh stages any *.pak here into
     // the UE sandbox container's Saved/Paks at launch so purchased characters
     // boot-mount before BeginPlay. run_soul guards on the dir existing, so this

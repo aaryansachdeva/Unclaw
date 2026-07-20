@@ -888,10 +888,18 @@ function AppMain() {
         ? profile?.agent_name ?? AGENTS[0].name
         : (activeAgentId ? agentById[activeAgentId]?.name : null) ?? 'Grace');
 
-  // Ordered switcher carousel: every roster instance, then the Add slot.
-  const agentCarousel = useMemo(
-    () => [...agentStack.map((i) => i.id), ADD_SLOT],
-    [agentStack],
+  // Roster for the InputBar's dropdown switcher: each instance with its
+  // on-screen name (same derivation as `characterName`). The Add slot is NOT
+  // in this list — it's the separate + button.
+  const personaAgents = useMemo(
+    () => agentStack.map((i) => ({
+      id: i.id,
+      name: i.name?.trim()
+        || (i.id === BASE_INSTANCE_ID
+          ? (profile?.agent_name ?? AGENTS[0].name)
+          : (agentById[i.agentId]?.name ?? 'Grace')),
+    })),
+    [agentStack, profile?.agent_name, agentById],
   );
 
   // Dressing-chain generation counter. Every dress run claims a fresh epoch;
@@ -1009,14 +1017,6 @@ function AppMain() {
       if (inst) switchUeToAgent(inst.agentId, dir, inst.wardrobe);
     }
   }, [onAddSlot, agentStack, selectedInstanceId, emitAgentSwitch, switchUeToAgent]);
-
-  const stepAgent = useCallback((delta: 1 | -1) => {
-    if (agentCarousel.length === 0) return;
-    const idx = agentCarousel.indexOf(selectedInstanceId);
-    const base = idx < 0 ? 0 : idx;
-    const next = (base + delta + agentCarousel.length) % agentCarousel.length;
-    selectInstance(agentCarousel[next], delta);
-  }, [agentCarousel, selectedInstanceId, selectInstance]);
 
   const handlePickAgent = useCallback((agentId: string) => {
     const id = addInstance(agentId);
@@ -3298,11 +3298,6 @@ function AppMain() {
     }
   }, [activeWidget, refreshKey]);
 
-  // Chevron-prev / chevron-next for the AgentSwitcher row above the input bar.
-  // Steps through the roster carousel ([...roster, Add slot]).
-  const handlePrevPersona = useCallback(() => stepAgent(-1), [stepAgent]);
-  const handleNextPersona = useCallback(() => stepAgent(1), [stepAgent]);
-
   return (
     <div className={`relative flex-1 min-h-0 overflow-hidden${uiHidden ? ' unclaw-ui-hidden' : ''}`}>
       {/* Workspace, everything that should physically shrink when the
@@ -3696,9 +3691,10 @@ function AppMain() {
                   // every committed word a second time. Unconfirmed words are no
                   // longer drawn at all.
                   voiceActive={streaming.isActive || voice.isListening}
-                  onPrevPersona={handlePrevPersona}
-                  onNextPersona={handleNextPersona}
-                  onPersonaNameClick={() => selectInstance(ADD_SLOT, 1)}
+                  agents={personaAgents}
+                  selectedAgentId={selectedInstanceId}
+                  onSelectAgent={(id) => selectInstance(id, 1)}
+                  onAddAgent={() => selectInstance(ADD_SLOT, 1)}
                   personaDisabled={!isConnected}
                   onPasteImage={handlePasteImage}
                   onAttachImages={handleAttachImages}
