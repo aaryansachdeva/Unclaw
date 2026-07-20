@@ -399,6 +399,20 @@ export function Titlebar({
                 </div>
               )}
 
+              {/* Hairline divider: separates the claws balance from the action
+                  icons (discord / phone / pin) on its right. macOS only. */}
+              {isMacPlatform && clawsBalance !== undefined && (
+                <span
+                  aria-hidden
+                  style={{
+                    width: 1,
+                    height: 18,
+                    background: 'rgba(255, 255, 255, 0.16)',
+                    flex: '0 0 auto',
+                  }}
+                />
+              )}
+
               {/* Join-our-Discord: opens join.unclaw.io in the user's browser.
                   Flat-colored to match the other icon buttons (not blurple). */}
               <button
@@ -467,18 +481,6 @@ export function Titlebar({
                   stays in the right-cluster buttons array below. */}
               {isMacPlatform && (
                 <>
-                  {/* Hairline divider between the claws balance and the pin. */}
-                  {clawsBalance !== undefined && (
-                    <span
-                      aria-hidden
-                      style={{
-                        width: 1,
-                        height: 18,
-                        background: 'rgba(255, 255, 255, 0.16)',
-                        flex: '0 0 auto',
-                      }}
-                    />
-                  )}
                   <motion.button
                     type="button"
                     whileTap={reduce ? undefined : { scale: 0.88 }}
