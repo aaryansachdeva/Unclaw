@@ -3778,6 +3778,7 @@ function AppMain() {
         onResetSession={handleResetSession}
         onOpenSettings={() => setSettingsOpen(true)}
         clawsBalance={hasSession ? clawsBalance : undefined}
+        companionAuth={hasSession && authUser ? { token: authToken ?? null, userId: authUser.id } : null}
       />
 
       {/* New-account notice: this machine's previous API keys were cleared

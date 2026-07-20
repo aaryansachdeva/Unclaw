@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { Pin, PinOff, LogOut, Settings, Trash2, LogIn, UserCircle2, RotateCcw } from 'lucide-react';
+import { Pin, PinOff, LogOut, Settings, Trash2, LogIn, UserCircle2, RotateCcw, Smartphone } from 'lucide-react';
 import { getSoulBaseUrl } from '../services/soulBase';
 import { ClawsIcon } from './ClawsBalance';
+import { CompanionPanel } from './CompanionPanel';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -88,6 +89,10 @@ interface TitlebarProps {
   /** Claws balance shown as a pill just inboard of the profile cluster.
    *  undefined = hide it (signed out / minimal mode). */
   clawsBalance?: number | null;
+  /** Signed-in session, threaded to the "Connect your phone" popover so it
+   *  can pair the desktop (mint credential -> soul /pair/install). null hides
+   *  the phone button (guest / signed out). */
+  companionAuth?: { token: string | null; userId: string | null } | null;
 }
 
 function userInitials(user: TitlebarUser): string {
@@ -112,12 +117,16 @@ export function Titlebar({
   onResetSession,
   onOpenSettings,
   clawsBalance,
+  companionAuth = null,
   minimalMode = false,
   leftSlot,
 }: TitlebarProps) {
   const reduce = useReducedMotion() ?? false;
   const [pinned, setPinned] = useState(true);
   const [profileOpen, setProfileOpen] = useState(false);
+  // "Connect your phone" popover (phone icon in the right capsule).
+  const [companionOpen, setCompanionOpen] = useState(false);
+  const companionWrapRef = useRef<HTMLDivElement | null>(null);
   // Two-step confirm for the destructive "Reset all data" row. First
   // click flips this on (the row turns red and prompts to confirm);
   // second click runs onResetAccount. Reset to false on popover close.
@@ -179,6 +188,24 @@ export function Titlebar({
       document.removeEventListener('keydown', onKey);
     };
   }, [clawsInfoOpen]);
+
+  // Click-outside / Escape handler for the "Connect your phone" popover.
+  useEffect(() => {
+    if (!companionOpen) return undefined;
+    const onPointer = (e: MouseEvent) => {
+      const target = e.target instanceof Node ? e.target : null;
+      if (target && companionWrapRef.current && !companionWrapRef.current.contains(target)) {
+        setCompanionOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setCompanionOpen(false); };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [companionOpen]);
 
   // Disarm the reset confirms when the popover closes — otherwise the
   // user could open it again and a stray click would skip the confirm.
@@ -278,6 +305,44 @@ export function Titlebar({
                   capsule's left content. Hidden when undefined (signed out).
                   Clickable: opens a tiny explainer that claws can't be bought,
                   only earned by interacting with agents. */}
+              {/* Connect-your-phone: QR popover to pair the iOS companion.
+                  Sits just inboard of the claws pill. Shown only when signed
+                  in (a session is needed to pair). */}
+              {companionAuth && (
+                <div ref={companionWrapRef} style={{ position: 'relative', display: 'inline-flex' }}>
+                  <button
+                    type="button"
+                    onClick={() => setCompanionOpen((o) => !o)}
+                    aria-label="Connect your phone"
+                    aria-expanded={companionOpen}
+                    title="Connect your phone"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      width: 30, height: 30, borderRadius: 8,
+                      background: companionOpen ? 'var(--glass-bg-hover)' : 'transparent',
+                      border: 'none', padding: 0, cursor: 'pointer',
+                      color: companionOpen ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      transition: 'background 150ms var(--ease-out-quart), color 150ms var(--ease-out-quart)',
+                      WebkitAppRegion: 'no-drag',
+                    } as React.CSSProperties}
+                    onMouseEnter={(e) => { if (!companionOpen) e.currentTarget.style.background = 'var(--glass-bg-hover)'; }}
+                    onMouseLeave={(e) => { if (!companionOpen) e.currentTarget.style.background = 'transparent'; }}
+                  >
+                    <Smartphone size={17} strokeWidth={2} />
+                  </button>
+                  <AnimatePresence>
+                    {companionOpen && (
+                      <CompanionPanel
+                        key="companion"
+                        authToken={companionAuth.token}
+                        userId={companionAuth.userId}
+                        reduce={reduce}
+                      />
+                    )}
+                  </AnimatePresence>
+                </div>
+              )}
+
               {clawsBalance !== undefined && (
                 <div ref={clawsWrapRef} style={{ position: 'relative', display: 'inline-flex' }}>
                   <button
