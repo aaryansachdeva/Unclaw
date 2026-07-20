@@ -69,12 +69,26 @@ export function cameraCustomize(agentId?: string | null): CameraLoc {
 export type CameraMode = 'default' | 'waist' | 'full';
 export const CAMERA_MODES: CameraMode[] = ['default', 'waist', 'full'];
 
-/** Camera world-location for a character in a given framing mode. `waist` is
- *  the midpoint between the resting shot and the full-figure zoom-out. */
+// How far the `waist` shot sits from default toward full (0 = default, 1 =
+// full). Biased under 0.5 so the medium shot stays closer to the resting shot
+// than to the full zoom-out.
+const WAIST_BLEND = 0.30;
+// Extra height on the waist shot (added to z) so the medium framing sits a
+// little higher than a straight blend would put it.
+const WAIST_RAISE = 8;
+// Extra height (z) and pull-back (y) on the toggle's FULL shot only — NOT the
+// wardrobe/customize framing, which App drives from cameraCustomize directly.
+const FULL_RAISE = 16;
+const FULL_PULLBACK = 20;
+
+/** Camera world-location for a character in a given framing mode. `waist`
+ *  interpolates from the resting shot toward the full-figure zoom-out, weighted
+ *  toward default by WAIST_BLEND. */
 export function cameraForMode(agentId: string | null | undefined, mode: CameraMode): CameraLoc {
   const d = cameraDefaultFor(agentId);
   if (mode === 'default') return d;
   const f = cameraCustomize(agentId);
-  if (mode === 'full') return f;
-  return [(d[0] + f[0]) / 2, (d[1] + f[1]) / 2, (d[2] + f[2]) / 2];
+  if (mode === 'full') return [f[0], f[1] + FULL_PULLBACK, f[2] + FULL_RAISE];
+  const t = WAIST_BLEND;
+  return [d[0] + (f[0] - d[0]) * t, d[1] + (f[1] - d[1]) * t, d[2] + (f[2] - d[2]) * t + WAIST_RAISE];
 }
