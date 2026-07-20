@@ -219,6 +219,75 @@ export async function chatViaSoul(
 
 
 // ---------------------------------------------------------------------
+// Passthrough speak
+// ---------------------------------------------------------------------
+//
+// In passthrough mode UnClaw does no inference of its own; a user's
+// external coding agent (Claude Code, Codex, ...) sends text to voice via
+// soul's /passthrough/speak, which soul pushes to us over
+// /passthrough/ws. We then render it here: soul's /speak endpoint runs
+// the SAME TTS + lipsync + expression pipeline as /chat but with NO LLM
+// (the text is spoken verbatim). We supply our onboarding voice / TTS
+// provider / BYOK keys exactly like chatViaSoul, so soul never needs a
+// stored default. The returned job is dispatched to UE by the caller
+// (emitUIInteraction), identical to a normal chat turn.
+
+/** Render `text` verbatim through soul's /speak (no LLM). mood/behavior
+ *  are optional expression hints; actionName optionally fires a gesture
+ *  (e.g. 'give_a_kiss', 'do_dance', 'celebrate'). Resolves the user's
+ *  saved voice + TTS provider + BYOK key the same way chatViaSoul does. */
+export async function speakViaSoul(
+  text: string,
+  opts: {
+    mood?: string;
+    behavior?: string;
+    actionName?: string;
+    voiceId?: string;
+    voices?: SoulChatOptions['voices'];
+    lipsyncModel?: SoulChatOptions['lipsyncModel'];
+  } = {},
+): Promise<SoulChatResult> {
+  const body: Record<string, unknown> = { message: text };
+  if (opts.mood) body.mood = opts.mood;
+  if (opts.behavior) body.behavior = opts.behavior;
+  if (opts.actionName) body.action_name = opts.actionName;
+  if (opts.voiceId) body.voice_id = opts.voiceId;
+  if (opts.lipsyncModel) body.lipsync_model = opts.lipsyncModel;
+
+  // Voice + TTS provider + BYOK, same resolution as chatViaSoul. No LLM
+  // fields — /speak skips inference entirely.
+  try {
+    const keys = await fetchApiKeys();
+    body.tts_provider = keys.tts_provider;
+    if (keys.tts_provider === 'elevenlabs' && keys.elevenlabs_api_key) {
+      body.elevenlabs_api_key = keys.elevenlabs_api_key;
+    }
+    if (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'custom' && keys.kokoro_endpoint) {
+      body.kokoro_endpoint = keys.kokoro_endpoint;
+    }
+    if (!opts.voiceId) {
+      const voice = resolveVoiceId(keys, opts.voices);
+      if (voice) body.voice_id = voice;
+    }
+  } catch (err) {
+    console.warn('[speak] failed to read api keys', err);
+  }
+
+  const res = await fetch(`${getSoulBaseUrl()}/speak`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`soul /speak ${res.status}: ${errText.slice(0, 200)}`);
+  }
+  return (await res.json()) as SoulChatResult;
+}
+
+
+// ---------------------------------------------------------------------
 // Idle driver
 // ---------------------------------------------------------------------
 //

@@ -102,3 +102,11 @@ export function getSignallingPlayerUrl(): string {
   const p = cached ?? FALLBACK_PORTS;
   return `ws://127.0.0.1:${p.signallingPlayer}`;
 }
+
+/** WebSocket URL for one of soul's HTTP-port WS endpoints (e.g.
+ *  '/passthrough/ws', '/ws'). Same lazy semantics as getSoulBaseUrl. */
+export function getSoulWsUrl(path: string): string {
+  const p = cached ?? FALLBACK_PORTS;
+  const clean = path.startsWith('/') ? path : `/${path}`;
+  return `ws://127.0.0.1:${p.http}${clean}`;
+}

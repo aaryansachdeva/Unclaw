@@ -41,6 +41,7 @@ import {
   type TtsProviderId,
 } from '../services/apiKeys';
 import { Dropdown } from './Onboarding/Dropdown';
+import { usePassthroughPrefs } from '../hooks/usePassthroughPrefs';
 import { Slider } from './Onboarding/Slider';
 import { TZ_CATALOG } from './Onboarding/IdentityStep';
 import {
@@ -914,8 +915,45 @@ function VoiceFacet({ draft, update }: PaneContext) {
             )}
           </>
         )}
+
+        <PassthroughVoiceControls />
       </Stack>
     </Composition>
+  );
+}
+
+/** Passthrough talkativeness + mute. Same controls as the inline bar,
+ *  surfaced here for discoverability outside passthrough mode. Reads the
+ *  shared usePassthroughPrefs store so it stays in lockstep with the bar
+ *  and the render bridge (no prop threading). */
+function PassthroughVoiceControls() {
+  const { prefs, setVerbosity, toggleMuted } = usePassthroughPrefs();
+  return (
+    <>
+      <FieldStack
+        label="Passthrough talkativeness"
+        aside={<InlineHint>how much the avatar speaks when driven by /unclaw</InlineHint>}
+      >
+        <Dropdown
+          value={prefs.verbosity}
+          onChange={(v) => setVerbosity(v as 'quiet' | 'balanced' | 'chatty')}
+          options={[
+            { id: 'quiet',    label: 'Quiet , results + questions only' },
+            { id: 'balanced', label: 'Balanced , natural check-ins' },
+            { id: 'chatty',   label: 'Chatty , running monologue' },
+          ]}
+          placeholder="Talkativeness"
+        />
+      </FieldStack>
+      <FieldStack label="Mute avatar" aside={<InlineHint>silence speech, stay in passthrough</InlineHint>}>
+        <Lever
+          on={prefs.muted}
+          onChange={() => toggleMuted()}
+          onLabel="Muted"
+          offLabel="On"
+        />
+      </FieldStack>
+    </>
   );
 }
 

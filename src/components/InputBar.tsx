@@ -28,6 +28,7 @@ import {
 import {
   Plus, ArrowRight, ChevronDown,
   PanelRightOpen, PanelRightClose,
+  Volume2, VolumeX,
 } from 'lucide-react';
 
 import { SheetKey } from '../hooks/useSheet';
@@ -69,6 +70,21 @@ interface InputBarProps {
   personaName: string;
   isSending: boolean;
   disabled: boolean;
+  /** Passthrough mode: UnClaw takes spoken turns from a user's external
+   *  coding agent. The text field is replaced by a "Passthrough mode
+   *  enabled" label + Exit button; the rest of the bar (agent switcher,
+   *  widgets, customization) stays live. */
+  passthrough?: boolean;
+  /** Leave passthrough mode (backs the Exit button in the text field). */
+  onExitPassthrough?: () => void;
+  /** Talkativeness level shown in the inline passthrough control. */
+  passthroughVerbosity?: 'quiet' | 'balanced' | 'chatty';
+  /** Whether the avatar is muted (inline mute toggle state). */
+  passthroughMuted?: boolean;
+  /** Set talkativeness from the inline control. */
+  onSetPassthroughVerbosity?: (v: 'quiet' | 'balanced' | 'chatty') => void;
+  /** Toggle mute from the inline control. */
+  onTogglePassthroughMuted?: () => void;
   /** True when the user has at least one attachment staged (e.g. a
    *  screenshot). Lets send fire with empty text — the attachment
    *  itself becomes the message. */
@@ -158,6 +174,12 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   personaName,
   isSending,
   disabled,
+  passthrough = false,
+  onExitPassthrough,
+  passthroughVerbosity = 'balanced',
+  passthroughMuted = false,
+  onSetPassthroughVerbosity,
+  onTogglePassthroughMuted,
   hasAttachments = false,
   onSendMessage,
   onOpenSheet,
@@ -701,6 +723,169 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             width: '100%',
           }}
         >
+          {passthrough ? (
+            /* Passthrough mode: the text field is replaced by a status
+               label + an Exit button. The REST of the bar (agent switcher,
+               widgets, customization) stays live — only typed input is
+               off, since the avatar's words come from the user's agent. */
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                gap: 12,
+                minHeight: 22,
+              }}
+            >
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 9 }}>
+                <motion.span
+                  aria-hidden
+                  animate={reduce ? undefined : { opacity: [0.35, 0.9, 0.35] }}
+                  transition={{ duration: 2.6, repeat: Infinity, ease: 'easeInOut' }}
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: '50%',
+                    background: 'var(--accent)',
+                    boxShadow: '0 0 8px -1px var(--accent-glow)',
+                    flexShrink: 0,
+                  }}
+                />
+                <span
+                  style={{
+                    fontSize: 14,
+                    lineHeight: '22px',
+                    fontWeight: 700,
+                    letterSpacing: '0.01em',
+                    color: passthroughMuted ? 'var(--text-ghost)' : 'var(--text-primary)',
+                  }}
+                >
+                  {passthroughMuted ? 'Passthrough mode · muted' : 'Passthrough mode enabled'}
+                </span>
+              </span>
+
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                {/* Talkativeness , how often the avatar speaks. Three-stop
+                    segmented control; drives both the agent-facing hint
+                    (soul echoes it on each speak) and the bridge's hard
+                    queue cap. */}
+                <span
+                  role="group"
+                  aria-label="Talkativeness"
+                  title="How much the avatar speaks"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    padding: 2,
+                    borderRadius: 999,
+                    background: 'var(--glass-bg-hover)',
+                    border: '1px solid var(--stroke-soft, rgba(255,255,255,0.10))',
+                    opacity: passthroughMuted ? 0.5 : 1,
+                    pointerEvents: passthroughMuted ? 'none' : 'auto',
+                    transition: 'opacity 0.15s var(--ease-out-quart)',
+                  }}
+                >
+                  {(['quiet', 'balanced', 'chatty'] as const).map((v) => {
+                    const on = passthroughVerbosity === v;
+                    const label = v === 'quiet' ? 'Quiet' : v === 'balanced' ? 'Balanced' : 'Chatty';
+                    return (
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() => onSetPassthroughVerbosity?.(v)}
+                        aria-pressed={on}
+                        style={{
+                          height: 22,
+                          padding: '0 10px',
+                          borderRadius: 999,
+                          border: 'none',
+                          background: on ? 'var(--accent)' : 'transparent',
+                          color: on ? '#fff' : 'var(--text-secondary)',
+                          fontFamily: 'inherit',
+                          fontSize: 11.5,
+                          fontWeight: 600,
+                          letterSpacing: '0.01em',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s var(--ease-out-quart)',
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </span>
+
+                {/* Mute , silence the avatar without leaving passthrough. */}
+                <button
+                  type="button"
+                  onClick={onTogglePassthroughMuted}
+                  aria-pressed={passthroughMuted}
+                  title={passthroughMuted ? 'Unmute avatar' : 'Mute avatar'}
+                  style={{
+                    flexShrink: 0,
+                    width: 28,
+                    height: 28,
+                    borderRadius: 8,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: passthroughMuted ? 'var(--accent-glow)' : 'transparent',
+                    border: 'none',
+                    color: passthroughMuted ? 'var(--accent)' : 'var(--text-secondary)',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s var(--ease-out-quart)',
+                  }}
+                  onMouseEnter={(e) => {
+                    if (passthroughMuted) return;
+                    e.currentTarget.style.background = 'var(--glass-bg-hover)';
+                    e.currentTarget.style.color = 'var(--text-primary)';
+                  }}
+                  onMouseLeave={(e) => {
+                    if (passthroughMuted) return;
+                    e.currentTarget.style.background = 'transparent';
+                    e.currentTarget.style.color = 'var(--text-secondary)';
+                  }}
+                >
+                  {passthroughMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={onExitPassthrough}
+                  title="Exit passthrough mode"
+                  style={{
+                    flexShrink: 0,
+                    height: 26,
+                    padding: '0 12px',
+                    borderRadius: 999,
+                    background: 'transparent',
+                    border: '1px solid var(--stroke-soft, rgba(255,255,255,0.14))',
+                    color: 'var(--text-secondary)',
+                    fontFamily: 'inherit',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    letterSpacing: '0.01em',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s var(--ease-out-quart)',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'var(--glass-bg-hover)';
+                    e.currentTarget.style.color = 'var(--text-primary)';
+                    e.currentTarget.style.borderColor = 'var(--accent)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'transparent';
+                    e.currentTarget.style.color = 'var(--text-secondary)';
+                    e.currentTarget.style.borderColor = 'var(--stroke-soft, rgba(255,255,255,0.14))';
+                  }}
+                >
+                  Exit
+                </button>
+              </span>
+            </div>
+          ) : (
+          <>
           {/* Visible mirror overlay. Renders the textarea's committed text.
               Sits BEHIND the textarea (z-index < textarea) and shares
               font/line-height/padding so its wrapping matches the textarea's
@@ -828,6 +1013,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
                 {comingSoon ? comingSoonMessage : currentPrompt}
               </span>
             </div>
+          )}
+          </>
           )}
         </div>
 

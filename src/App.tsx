@@ -39,6 +39,8 @@ import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
 import { chatViaSoul, streamChatViaSoul, fireIdle, fetchCurrentBodyIdle, SoulBodyDirective, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
+import { startPassthroughBridge } from './services/passthrough';
+import { usePassthroughPrefs } from './hooks/usePassthroughPrefs';
 import { pollNextEscalation } from './services/escalation';
 import { sendListeningEvent } from './services/listening';
 import { listReminders } from './services/reminders';
@@ -454,6 +456,9 @@ function AppMain() {
   // agents, NOT per-instance). See src/hooks/useEnvironment.ts. Applied on every
   // switch + whenever it changes.
   const { environment, setEnvironment } = useEnvironment();
+  // Passthrough speech prefs (talkativeness + mute). Device-local + mirrored
+  // to soul so the external agent honors them. See usePassthroughPrefs.
+  const { prefs: passthroughPrefs, setVerbosity: setPassthroughVerbosity, toggleMuted: togglePassthroughMuted } = usePassthroughPrefs();
   // Selected carousel slot: a roster instance id, or ADD_SLOT for the picker.
   const [selectedInstanceId, setSelectedInstanceId] = useState<string>(BASE_INSTANCE_ID);
   const [addPickerOpen, setAddPickerOpen] = useState(false);
@@ -563,6 +568,15 @@ function AppMain() {
   // Settings modal, opened from Titlebar profile dropdown. Distinct
   // overlay from CustomizationOverlay so the two can't collide.
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Passthrough mode. When true, UnClaw does no inference of its own: a
+  // user's external coding agent (Claude Code, ...) drives the avatar by
+  // calling soul's /passthrough/speak, which the passthrough bridge (see
+  // effect below) renders + dispatches to UE. The InputBar swaps its
+  // composer for a "Passthrough mode enabled" banner. Session-only (never
+  // persisted) — entered/exited via the unclaw://passthrough deep link so
+  // a plain relaunch always comes back up in normal chat mode.
+  const [passthrough, setPassthrough] = useState(false);
 
   // Chat history side-pane. When true, the gray utility pane slides in
   // from the right and the workspace wrapper's right anchor animates
@@ -835,6 +849,13 @@ function AppMain() {
   );
 
   const onAddSlot = selectedInstanceId === ADD_SLOT;
+  // Live mirror of onAddSlot for async listeners (agentSwitchFailed, the
+  // reconcile reply). While the Add picker is open the stage is DELIBERATELY
+  // blank — reconcile/retry must NOT drive the last agent back onto it, or it
+  // reappears behind the picker AND leaves the state too tangled for Cancel to
+  // restore cleanly. Assigned in render so it's current before effects run.
+  const onAddSlotRef = useRef(onAddSlot);
+  onAddSlotRef.current = onAddSlot;
   const currentInstance = onAddSlot
     ? null
     : agentStack.find((i) => i.id === selectedInstanceId) ?? agentStack[0];
@@ -1187,9 +1208,17 @@ function AppMain() {
   // unclaw:// deep link from the Polar checkout-complete page -> refresh
   // entitlements immediately (polling is the fallback while the browser tab
   // is open). Also drains any link that arrived during cold start.
+  //
+  // Passthrough mode also enters via a deep link: the /unclaw skill runs
+  // `open "unclaw://passthrough"`, which cold-starts (or focuses) the app
+  // and lands here. `unclaw://passthrough?off` exits back to normal chat.
   useEffect(() => {
     const onLink = (url: string) => {
       if (/store|purchased|checkout/.test(url)) void refreshEntitlements();
+      if (/^unclaw:\/\/passthrough/.test(url)) {
+        setPassthrough(!/[?&]off\b/.test(url));
+        window.electronAPI?.focusWindow?.();
+      }
     };
     const off = window.electronAPI?.onDeepLink?.(onLink);
     void window.electronAPI?.getPendingDeepLink?.().then((u) => { if (u) onLink(u); });
@@ -2403,10 +2432,31 @@ function AppMain() {
   // are emitted only when the user has actually configured them, so an unset
   // environment leaves UE's authored studio light alone (same guard the dress
   // chain used to use).
+  // Last bgmode (backdrop material) UE was told, so applyEnvironment can skip
+  // re-sending an unchanged material (which would reset the backdrop color).
+  // Reset to undefined on disconnect so a reconnect re-asserts it once.
+  const lastAppliedBgmodeRef = useRef<number | null | undefined>(undefined);
   const applyEnvironment = useCallback(() => {
     if (!pixelStreaming) return;
     const e = environment;
-    // Backdrop.
+    // Backdrop. ORDER MATTERS: changeBGMaterial swaps the backdrop material,
+    // which resets its color parameter to the material's default — so the
+    // material MUST be applied BEFORE the color, or it wipes the color we just
+    // set (the "bg color reverts on save" bug: applyEnvironment ran the color
+    // then the material, and the material reset it).
+    // changeBGMaterial swaps/re-instantiates the backdrop material, which
+    // resets its color parameter to the material default (a frame later, even
+    // if we set the color right after). So send it ONLY when the material
+    // actually changed — never on a color-only re-apply, or it wipes the color.
+    // (Reset on disconnect so a reconnect re-asserts the material once.)
+    if (e.bgmode != null && e.bgmode !== lastAppliedBgmodeRef.current) {
+      pixelStreaming.emitUIInteraction({
+        EventType: 'changeBGMaterial',
+        bgmode: e.bgmode,
+        Timestamp: new Date().toISOString(),
+      });
+      lastAppliedBgmodeRef.current = e.bgmode;
+    }
     const bgRgb = e.bgColorHex
       ? hexToRgb01(e.bgColorHex)
       : (BG_COLORS[e.bgColorIndex ?? 0] ?? BG_COLORS[0]);
@@ -2418,13 +2468,6 @@ function AppMain() {
       value: round3(e.bgGlow ?? BG_GLOW_DEFAULT),
       Timestamp: new Date().toISOString(),
     });
-    if (e.bgmode != null) {
-      pixelStreaming.emitUIInteraction({
-        EventType: 'changeBGMaterial',
-        bgmode: e.bgmode,
-        Timestamp: new Date().toISOString(),
-      });
-    }
     // Key light.
     if (e.lightingAngle != null) {
       pixelStreaming.emitUIInteraction({
@@ -2449,10 +2492,17 @@ function AppMain() {
   }, [pixelStreaming, environment]);
   const applyEnvironmentRef = useRef(applyEnvironment);
   applyEnvironmentRef.current = applyEnvironment;
+  // Set by the reconcile driver when it initiates a fresh spawn (cold boot /
+  // reset / reconnect), so the NEXT characterReady re-asserts the global
+  // environment. A plain user character switch does NOT set it — the backdrop
+  // + light are persistent-level actors that survive a swap, so re-sending
+  // them on every switch would be pure redundancy.
+  const reapplyEnvOnNextReadyRef = useRef(false);
   // Re-apply the moment any environment setting changes (and once the stream is up).
   useEffect(() => {
     if (pixelStreaming) applyEnvironment();
   }, [environment, pixelStreaming, applyEnvironment]);
+
 
   // Mood-accent bleed. The GLOBAL key-light color the user picks
   // also seeps into the UI via two CSS vars (`--mood-accent`
@@ -2538,9 +2588,14 @@ function AppMain() {
       switchDispatchedRef.current = null;
       ueActiveAgentRef.current = spawned;
       setUeActiveAgentId(spawned);
-      // Re-assert the GLOBAL environment (backdrop + key light) on every spawn so
-      // it stays across agents.
-      applyEnvironmentRef.current?.();
+      // Re-assert the GLOBAL environment (backdrop + key light) ONLY when this
+      // spawn is part of a session (re)establishment (cold boot / reset /
+      // reconnect) — where UE came up at its default. A user-initiated
+      // character switch keeps the persistent backdrop, so we don't re-send it.
+      if (reapplyEnvOnNextReadyRef.current) {
+        reapplyEnvOnNextReadyRef.current = false;
+        applyEnvironmentRef.current?.();
+      }
       // Stale/racing-signal guard: only dress when the character UE actually
       // spawned (msg.agentId) matches the instance we're targeting.
       if (inst && typeof msg.agentId === 'string' && msg.agentId && inst.agentId !== msg.agentId) {
@@ -2589,6 +2644,10 @@ function AppMain() {
       try { parsed = JSON.parse(raw); } catch { return; }
       if (!parsed || typeof parsed !== 'object') return;
       if ((parsed as { EventType?: unknown }).EventType !== 'agentSwitchFailed') return;
+      // On the Add picker the stage is intentionally blank; UE rejecting the
+      // 'blank' agentSwitch is EXPECTED. Don't retry or reconcile — that would
+      // drag the last agent back onto the hidden stage. Cancel handles restore.
+      if (onAddSlotRef.current) return;
       const target = lastSwitchTargetRef.current;
       // If UE confirmed this swap DISPATCHED (agentSwitchSuccess) and it still
       // failed, the id was valid but the incoming class isn't a BP_CharacterBase
@@ -2660,6 +2719,9 @@ function AppMain() {
       if (!parsed || typeof parsed !== 'object') return;
       const msg = parsed as { EventType?: unknown; agentId?: unknown };
       if (msg.EventType !== 'fetchCurrentAgent') return;
+      // A late reply that lands while the Add picker is open must not drive a
+      // character onto the intentionally-blank stage.
+      if (onAddSlotRef.current) return;
       if (initialResolvedRef.current) return; // only the connect-time query acts
       initialResolvedRef.current = true;
       const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current)
@@ -2677,10 +2739,19 @@ function AppMain() {
         ueActiveAgentRef.current = live;  // already on-screen; no characterReady will fire
         setUeActiveAgentId(live);
         void applyInstanceWardrobe(inst.wardrobe, inst.agentId);
+        // Re-assert the GLOBAL environment (backdrop color + key light) too.
+        // No characterReady fires on this path, so without this the saved
+        // backdrop color silently reverts to UE's default on any reconcile
+        // that lands on an already-live character (warm reconnect, soul
+        // restart, reset) — read as "the bg color doesn't save".
+        applyEnvironmentRef.current?.();
       } else {
         // Blank or a different character: switch through the same path the
         // carousel uses, so the scene half (light + backdrop) applies while
-        // the character loads and characterReady finishes the outfit.
+        // the character loads and characterReady finishes the outfit. This is
+        // a session-(re)establishment spawn (cold boot / reset / reconnect),
+        // so flag the resulting characterReady to re-assert the environment.
+        reapplyEnvOnNextReadyRef.current = true;
         switchUeToAgent(inst.agentId, 1, inst.wardrobe);
       }
     };
@@ -2706,8 +2777,15 @@ function AppMain() {
       cancelScheduledIdleRevert();
       ueActiveAgentRef.current = null;
       setUeActiveAgentId(null);
+      // Fresh session will need the backdrop material re-asserted.
+      lastAppliedBgmodeRef.current = undefined;
       return;
     }
+    // On the Add picker the stage is intentionally blank. Don't drive a
+    // character in (a reconnect here should stay blank behind the picker);
+    // Cancel leaves ADD_SLOT first, which re-bumps the epoch and re-runs this
+    // driver with a real target.
+    if (onAddSlotRef.current) return;
     // Re-arm on every (re)connect AND every ueSessionEpoch bump (reset
     // session / reset account). A reset drops UE back to the blank stage
     // without dropping the stream, so we must clear the resolved flag and
@@ -2957,6 +3035,30 @@ function AppMain() {
   }, []);
 
   const isConnected = connectionState === 'connected';
+
+  // Passthrough bridge. While in passthrough mode + connected, subscribe
+  // to soul's /passthrough/ws and render every pushed speak through the
+  // no-LLM /speak endpoint (with THIS renderer's onboarding voice + BYOK
+  // keys), dispatching each finished job to UE exactly like a chat turn.
+  // Re-dials on a soul respawn (subscribeSoulPorts bumps portEpoch, which
+  // is folded into connectionState upstream, so the effect re-runs on
+  // reconnect). persona.voices is read per-speak inside the bridge so an
+  // agent switch mid-session voices the new character.
+  const personaVoicesRef = useRef(persona.voices);
+  personaVoicesRef.current = persona.voices;
+  // Refs so live talkativeness/mute changes take effect without restarting
+  // the bridge (which would drop + redial the WS).
+  const passthroughPrefsRef = useRef(passthroughPrefs);
+  passthroughPrefsRef.current = passthroughPrefs;
+  useEffect(() => {
+    if (!passthrough || !isConnected || !pixelStreaming) return undefined;
+    const stop = startPassthroughBridge({
+      onRendered: (result) => { dispatchChatResult(result); },
+      getVoices: () => personaVoicesRef.current,
+      getPrefs: () => passthroughPrefsRef.current,
+    });
+    return () => { stop(); };
+  }, [passthrough, isConnected, pixelStreaming, dispatchChatResult]);
 
   // Body-idle resync. A renderer refresh/crash tears down the stream
   // session and the fresh one starts on the default body-idle loop,
@@ -3662,6 +3764,12 @@ function AppMain() {
                   ref={inputBarRef}
                   personaName={characterName}
                   isSending={isSending}
+                  passthrough={passthrough}
+                  onExitPassthrough={() => setPassthrough(false)}
+                  passthroughVerbosity={passthroughPrefs.verbosity}
+                  passthroughMuted={passthroughPrefs.muted}
+                  onSetPassthroughVerbosity={setPassthroughVerbosity}
+                  onTogglePassthroughMuted={togglePassthroughMuted}
                   disabled={!isConnected}
                   hasAttachments={attachedImages.length > 0}
                   onSendMessage={handleSendMessage}
