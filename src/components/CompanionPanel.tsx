@@ -170,17 +170,18 @@ export function CompanionPanel({
               />
             )}
 
-            {/* Center logo badge — sits in the QR's high-EC reserved center. */}
+            {/* Center logo badge — covers ~10% of the code area, safely within
+                the 'H' error-correction budget (~30%), so the QR still scans. */}
             {!phoneConnected && (
               <div style={{
                 position: 'absolute',
-                width: 52, height: 52, borderRadius: 13,
+                width: 72, height: 72, borderRadius: 17,
                 background: '#f4f2ef',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                boxShadow: '0 1px 4px rgba(0,0,0,0.14)',
+                boxShadow: '0 1px 5px rgba(0,0,0,0.16)',
               }}>
-                <img src={logoUrl} alt="" width={38} height={38}
-                  style={{ display: 'block', width: 38, height: 38, objectFit: 'contain' }} />
+                <img src={logoUrl} alt="" width={54} height={54}
+                  style={{ display: 'block', width: 54, height: 54, objectFit: 'contain' }} />
               </div>
             )}
 
