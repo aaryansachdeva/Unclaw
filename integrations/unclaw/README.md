@@ -36,16 +36,20 @@ the agent self-adjusts.
 
 ## What it does per agent (all verified against official docs)
 
-| Agent | MCP registration | Guidance |
-|---|---|---|
-| **Codex CLI** | `codex mcp add` → `~/.codex/config.toml` | `~/.codex/AGENTS.md` |
-| **opencode** | `~/.config/opencode/opencode.json` (`mcp`, `type:"local"`) | `~/.config/opencode/AGENTS.md` |
-| **Gemini CLI** | `~/.gemini/settings.json` (`mcpServers`) | `~/.gemini/GEMINI.md` |
-| **Claude Code** | `claude mcp add --scope user` | `~/.claude/CLAUDE.md` (+ the `/unclaw` skill) |
-| **Cursor** | `~/.cursor/mcp.json` (`type:"stdio"`) | tool description |
-| **Cline** | VS Code globalStorage `cline_mcp_settings.json` (`autoApprove`) | tool description |
-| **Roo Code** | globalStorage `mcp_settings.json` (`alwaysAllow`) | tool description |
-| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` | tool description |
+| Agent | MCP registration | Guidance | `/unclaw` command |
+|---|---|---|---|
+| **Codex CLI** | `codex mcp add` → `~/.codex/config.toml` | `~/.codex/AGENTS.md` | `/prompts:unclaw` (deprecated feature) |
+| **opencode** | `~/.config/opencode/opencode.json` (`mcp`, `type:"local"`) | `~/.config/opencode/AGENTS.md` | `/unclaw` |
+| **Gemini CLI** | `~/.gemini/settings.json` (`mcpServers`) | `~/.gemini/GEMINI.md` | `/unclaw` |
+| **Claude Code** | `claude mcp add --scope user` | `~/.claude/CLAUDE.md` | `/unclaw` skill |
+| **Cursor** | `~/.cursor/mcp.json` (`type:"stdio"`) | tool description | — (no user commands) |
+| **Cline** | VS Code globalStorage `cline_mcp_settings.json` (`autoApprove`) | tool description | — |
+| **Roo Code** | globalStorage `mcp_settings.json` (`alwaysAllow`) | tool description | — |
+| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` | tool description | — |
+
+Agents that support user slash-commands get a native **`/unclaw`** that launches
+passthrough + switches on the `speak` tool , matching Claude Code's skill. The
+rest rely on the `launch_unclaw` MCP tool (and auto-launch on first `speak`).
 
 Notes baked in from the research pass:
 - The runtime is copied to a stable `~/.unclaw/bin/unclaw-speak.mjs` so configs

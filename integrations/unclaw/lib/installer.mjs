@@ -10,7 +10,7 @@
 // new agent = one adapter file; this core never changes. Config schemas were
 // verified against each tool's official docs (see agents/*.mjs headers).
 
-import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,6 +48,19 @@ function stripJsonc(s) {
 export function writeJson(path, obj) {
   ensureDir(dirname(path));
   writeFileSync(path, JSON.stringify(obj, null, 2) + '\n');
+}
+
+/** Write a text file (creates parent dirs). Used for native /unclaw command
+ *  files (TOML / Markdown). */
+export function writeText(path, content) {
+  ensureDir(dirname(path));
+  writeFileSync(path, content);
+  return { ok: true, detail: `command → ${path.replace(homedir(), '~')}` };
+}
+
+/** Delete a file if present (for unregister). */
+export function rmFile(path) {
+  try { if (existsSync(path)) rmSync(path); } catch { /* ignore */ }
 }
 
 /** Merge the unclaw server into a `{ [rootKey]: { unclaw: server } }` JSON
@@ -122,6 +135,25 @@ export function installRuntime() {
 }
 
 // ---- shared guidance -----------------------------------------------------
+
+// The `/unclaw` command prompt (dropped as a native slash-command for agents
+// that support one , Gemini CLI, Codex, opencode , so they match Claude
+// Code's `/unclaw` skill). Injected when the user types /unclaw.
+export const COMMAND_BODY = [
+  "Turn on the UnClaw avatar so you can voice replies aloud through the user's",
+  '3D character.',
+  '',
+  '1. Launch UnClaw in passthrough mode: call the `launch_unclaw` tool (from the',
+  '   `unclaw` MCP server). If that tool is unavailable, run the shell command',
+  '   `unclaw-speak --launch`.',
+  '2. From now on, use the `speak` tool for anything meant to be heard ,',
+  '   greetings, the headline result, reactions, questions. Keep spoken lines',
+  '   short and conversational; never speak code, logs, or paths. Honor the',
+  '   `verbosity`/`muted` each speak returns. Your normal written output is',
+  '   unchanged , speak is *in addition* to it.',
+  '',
+  "Tell the user UnClaw is starting and you'll speak your replies aloud from now on.",
+].join('\n');
 
 export const INSTRUCTIONS_BODY = [
   '## UnClaw voice',
