@@ -1008,6 +1008,14 @@ function AppMain() {
         : selectedInstanceId;
       setSelectedInstanceId(ADD_SLOT);
       setAddPickerOpen(true);
+      // Going blank is DELIBERATE: UE can't cast "blank" to a BP_CharacterBase
+      // so it fires agentSwitchFailed — which must NOT trigger the retry/replay
+      // (that would drag the last agent back onto the stage behind the Add
+      // picker). Clear all pending-switch state before emitting.
+      lastSwitchTargetRef.current = null;
+      switchRetryRef.current = 0;
+      switchDispatchedRef.current = null;
+      pendingSwitchRef.current = null;
       emitAgentSwitch('blank', dir); // "blank" card (empty class) -> UE clears the stage. NOT "none" (reserved FName == NAME_None, hits SwapToCharacter's IsNone guard)
       ueActiveAgentRef.current = null; // stage is clearing; nothing is live
     } else {
