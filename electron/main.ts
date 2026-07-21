@@ -11,6 +11,7 @@ import {
   nativeImage,
   globalShortcut,
   desktopCapturer,
+  systemPreferences,
   Display,
   IpcMainEvent,
 } from 'electron';
@@ -559,6 +560,47 @@ ipcMain.on('window:close', () => app.quit());
 // without leaving Unclaw to type the command themselves. Uses osascript
 // (AppleScript) rather than `open -a Terminal` so we can inject the
 // command into a fresh tab and avoid clobbering any existing session.
+// Microphone permission. Continuous voice mode + push-to-talk both need mic
+// access. On macOS, getUserMedia hard-fails with NotAllowedError if the OS
+// hasn't granted mic access to this app — and that failure is otherwise
+// invisible. These let the renderer (a) proactively trigger the macOS prompt
+// via the proper Electron API before touching getUserMedia, (b) read the
+// current status to message the user, and (c) jump straight to the Privacy
+// pane when access was previously denied (macOS won't re-prompt then).
+ipcMain.handle('mic:get-status', () => {
+  if (process.platform !== 'darwin') return 'granted';
+  try {
+    return systemPreferences.getMediaAccessStatus('microphone');
+  } catch {
+    return 'unknown';
+  }
+});
+
+ipcMain.handle('mic:request', async () => {
+  if (process.platform !== 'darwin') return true;
+  try {
+    // 'not-determined' → shows the system prompt and resolves with the choice.
+    // 'granted' → resolves true immediately. 'denied'/'restricted' → resolves
+    // false WITHOUT a prompt (macOS only prompts once; after that it's Settings).
+    return await systemPreferences.askForMediaAccess('microphone');
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.handle('mic:open-settings', async () => {
+  try {
+    if (process.platform === 'darwin') {
+      await shell.openExternal(
+        'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+      );
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
 ipcMain.handle('terminal:open-with-command', async (_event, command: string) => {
   if (typeof command !== 'string' || !command.trim()) {
     return { ok: false, error: 'no command provided' };

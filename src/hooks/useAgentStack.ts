@@ -11,7 +11,10 @@ import type { WardrobeSettings } from '../services/userSettings';
 const KEY = 'unclaw.agentStack.v2';
 /** The permanent base instance (always present, always first, never removable). */
 export const BASE_INSTANCE_ID = 'base-grace';
-export const BASE_AGENT = 'grace';
+/** The base instance's character. Grace is now the custom build: the legacy
+ *  non-custom `grace` is deprecated and everyone folds onto `grace_custom`
+ *  (see migrateInstance). */
+export const BASE_AGENT = 'grace_custom';
 
 export interface AgentInstance {
   /** Stable unique id for this slot in the roster. */
@@ -45,6 +48,19 @@ function isInstance(x: unknown): x is AgentInstance {
     && typeof (x as AgentInstance).agentId === 'string';
 }
 
+/** One-way migration of a persisted instance's character id, applied on every
+ *  load + cloud restore so old rosters converge:
+ *   - legacy non-custom `grace` folds onto the custom `grace_custom` build. Its
+ *     saved outfit is dropped (the restricted base-six wardrobe doesn't map to
+ *     the full custom catalog), so customizations reset until re-set.
+ *   - `syd_custom` is pulled from the roster (not shipping yet) -> null = drop.
+ *  Returns null to remove the instance entirely. */
+function migrateInstance(i: AgentInstance): AgentInstance | null {
+  if (i.agentId === 'grace') return { ...i, agentId: 'grace_custom', wardrobe: undefined };
+  if (i.agentId === 'syd_custom') return null;
+  return i;
+}
+
 /** Validate + canonicalize an arbitrary roster array: drop malformed
  *  instances and guarantee the permanent base instance is present + first.
  *  Returns the default stack when nothing valid survives. Shared by `load`
@@ -52,7 +68,11 @@ function isInstance(x: unknown): x is AgentInstance {
  *  invariants. */
 function normalize(arr: unknown): AgentInstance[] {
   if (Array.isArray(arr) && arr.every(isInstance) && arr.length > 0) {
-    const list = arr as AgentInstance[];
+    const list = (arr as AgentInstance[])
+      .map(migrateInstance)
+      .filter((i): i is AgentInstance => i !== null);
+    // The permanent base instance always survives migration (grace -> grace_custom);
+    // if it was somehow dropped, recreate it on the current base character.
     const base = list.find((i) => i.id === BASE_INSTANCE_ID)
       ?? { id: BASE_INSTANCE_ID, agentId: BASE_AGENT };
     const rest = list.filter((i) => i.id !== BASE_INSTANCE_ID);

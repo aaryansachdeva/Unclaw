@@ -10,7 +10,7 @@ export type Personality = CharacterProfile;
  *  from `./characters`, which keys by the stable agent id. */
 export function personalityFor(displayName: string, customName?: string | null): CharacterProfile {
   const base = CHARACTERS.find((c) => c.displayName === displayName);
-  return characterFor(base?.id ?? 'grace', customName);
+  return characterFor(base?.id ?? 'grace_custom', customName);
 }
 
 export { CHARACTERS as PERSONALITIES, characterFor };

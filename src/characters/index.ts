@@ -4,7 +4,6 @@
 // memory + voice + persona follow the character, not the label the user chose.
 
 import type { CharacterProfile, CharacterVoices } from './types';
-import { grace } from './grace';
 import { mark } from './mark';
 import { ava } from './ava';
 import { goblin } from './goblin';
@@ -12,21 +11,22 @@ import { chris } from './chris';
 import { joi } from './joi';
 import { grace_custom } from './grace_custom';
 import { kevin_custom } from './kevin_custom';
-import { syd_custom } from './syd_custom';
 
 export type { CharacterProfile, CharacterVoices } from './types';
 
-/** Ordered list (matches the AGENTS catalog order). */
+/** Ordered list (matches the AGENTS catalog order). Grace is now the custom
+ *  build only (grace_custom, displayName "Grace"); the legacy non-custom
+ *  `grace` and `syd_custom` were retired. Any lingering `grace` id resolves to
+ *  grace_custom via FALLBACK, which is the same persona. */
 export const CHARACTERS: CharacterProfile[] = [
-  grace, mark, ava, goblin, chris, joi,
-  grace_custom, kevin_custom, syd_custom,
+  grace_custom, mark, ava, goblin, chris, joi, kevin_custom,
 ];
 
 /** id -> profile. */
 export const CHARACTERS_BY_ID: Record<string, CharacterProfile> =
   Object.fromEntries(CHARACTERS.map((c) => [c.id, c]));
 
-const FALLBACK = grace;
+const FALLBACK = grace_custom;
 
 /** Apply a custom display name to a profile. Swaps every whole-word
  *  occurrence of the original name in the persona + displayName, but leaves

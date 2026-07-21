@@ -19,5 +19,8 @@ export const AGENT_PORTRAITS: Record<string, string> = {
 };
 
 export function agentPortrait(agentId: string): string | undefined {
-  return AGENT_PORTRAITS[agentId];
+  // Custom builds reuse their base character's portrait (grace_custom -> grace),
+  // mirroring the camera's `_custom` suffix-strip. Unknown ids -> undefined ->
+  // lettered placeholder.
+  return AGENT_PORTRAITS[agentId] ?? AGENT_PORTRAITS[agentId.replace(/_custom$/, '')];
 }

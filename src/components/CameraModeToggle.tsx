@@ -34,8 +34,8 @@ export function CameraModeToggle({ mode, onChange }: {
       title={`Switch to ${label} shot`}
       aria-label={`Switch camera to ${label} framing`}
       style={{
-        width: 34,
-        height: 34,
+        width: 44,
+        height: 44,
         borderRadius: 999,
         padding: 0,
         display: 'inline-flex',
@@ -59,7 +59,7 @@ export function CameraModeToggle({ mode, onChange }: {
           transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
           style={{ display: 'inline-flex' }}
         >
-          <Icon size={16} strokeWidth={1.9} />
+          <Icon size={20} strokeWidth={1.9} />
         </motion.span>
       </AnimatePresence>
     </motion.button>

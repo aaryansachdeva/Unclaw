@@ -19,7 +19,8 @@ import { CustomWardrobe } from './components/CustomWardrobe';
 import { CameraModeToggle } from './components/CameraModeToggle';
 import { StreamEffects } from './components/StreamEffects';
 import { dressCharacter, type DressScope } from './wardrobe/dressCharacter';
-import { cameraCustomize, cameraForMode, type CameraMode } from './wardrobe/camera';
+import { wardrobeDefaultsFor } from './wardrobe/catalog';
+import { cameraCustomize, cameraForMode, cameraDefaultFor, type CameraMode } from './wardrobe/camera';
 import { PulseGrid } from './components/PulseGrid';
 import { hexToRgb01, round3 } from './components/ColorPickerPanel';
 import { useEnvironment } from './hooks/useEnvironment';
@@ -985,26 +986,25 @@ function AppMain() {
     // Leaving a character obsoletes anything still being applied to it.
     dressEpochRef.current += 1;
     cancelScheduledIdleRevert();
-    // MERGED SWITCH+DRESS: agentSwitch now carries the wardrobe INDICES
-    // (top/bottom/shoes/hair/eyelash/eyebrow) so UE applies them inside the swap
-    // graph, right after SwapToCharacter completes — no async window where a
-    // separate initializeClothing could miss the character. Untouched slots go
-    // as -1, the "don't touch, keep the authored default" sentinel (UE skips the
-    // Update when index < 0). Absent on the base six for brows/lashes (they have
-    // none) → -1. Harmless to older UE builds that don't read these fields; the
-    // characterReady dress chain still runs for colors/blends (and as a
-    // belt-and-suspenders for indices) until we cut over.
-    const idx = (v?: number) => (v == null || !Number.isFinite(v) ? -1 : Math.floor(v));
+    // MERGED SWITCH+DRESS: agentSwitch carries the wardrobe INDICES
+    // (top/bottom/shoes/hair/eyelash/eyebrow) so UE can apply them inside the
+    // swap graph. An UNSAVED slot goes as the character's DEFAULT index
+    // (wardrobeDefaultsFor), not -1 — so a fresh character lands on its authored
+    // look. The reliable application still runs at characterReady via the
+    // changeWardrobeItem dress chain (which uses the same defaults).
+    const def = wardrobeDefaultsFor(agentId);
+    const idx = (v: number | undefined, fallback: number) =>
+      (v == null || !Number.isFinite(v) ? fallback : Math.floor(v));
     pixelStreaming?.emitUIInteraction({
       EventType: 'agentSwitch',
       agentId,
       slideDir: dir,
-      top:     idx(wardrobe?.topIndex),
-      bottom:  idx(wardrobe?.bottomIndex),
-      shoes:   idx(wardrobe?.shoesIndex),
-      hair:    idx(wardrobe?.hairIndex),
-      eyelash: idx(wardrobe?.lashIndex),
-      eyebrow: idx(wardrobe?.browIndex),
+      top:     idx(wardrobe?.topIndex,    def.top),
+      bottom:  idx(wardrobe?.bottomIndex, def.bottom),
+      shoes:   idx(wardrobe?.shoesIndex,  def.shoes),
+      hair:    idx(wardrobe?.hairIndex,   def.hair),
+      eyelash: idx(wardrobe?.lashIndex,   def.lash),
+      eyebrow: idx(wardrobe?.browIndex,   def.brow),
     });
   }, [pixelStreaming]);
 
@@ -2210,6 +2210,31 @@ function AppMain() {
     });
   }, [pixelStreaming]);
 
+  // Voice failures (mic permission, worklet, etc.) otherwise reject straight to
+  // the console where no user ever sees them. Surface them as a dismissible
+  // notice above the input bar; mic-permission ones offer a jump to Settings.
+  const [voiceNotice, setVoiceNotice] = useState<
+    { text: string; kind: 'mic' | 'generic' } | null
+  >(null);
+  const voiceNoticeTimer = useRef<number | null>(null);
+  const showVoiceNotice = useCallback(
+    (text: string, kind: 'mic' | 'generic') => {
+      setVoiceNotice({ text, kind });
+      if (voiceNoticeTimer.current) {
+        window.clearTimeout(voiceNoticeTimer.current);
+        voiceNoticeTimer.current = null;
+      }
+      // Mic notices are STICKY like the "set up your keys / model" warnings ,
+      // they need a user action (grant access), so they stay until dismissed or
+      // until voice actually starts (cleared by the effect below). Generic
+      // hiccups self-clear.
+      if (kind !== 'mic') {
+        voiceNoticeTimer.current = window.setTimeout(() => setVoiceNotice(null), 6000);
+      }
+    },
+    [],
+  );
+
   const voice = useVoiceAgent({
     onTranscript: (text) => {
       const trimmed = text.trim();
@@ -2278,8 +2303,48 @@ function AppMain() {
         }
       }, 1500);
     },
-    onError: (msg) => console.warn('[voice]', msg),
+    onError: (msg) => {
+      console.warn('[voice]', msg);
+      const denied = /permission denied|notallowed|not-?allowed/i.test(msg);
+      if (denied) {
+        showVoiceNotice(
+          'Microphone access is off, so voice mode can’t hear you.',
+          'mic',
+        );
+      } else {
+        showVoiceNotice('Voice mode hit a snag. Tap the mic to try again.', 'generic');
+      }
+    },
   });
+
+  // Toggle voice mode. Before STARTING, proactively confirm the OS mic grant so
+  // we trigger the macOS prompt (or a clear notice) instead of a silent
+  // getUserMedia NotAllowedError. Stopping is always allowed.
+  const handleVoiceToggle = useCallback(async () => {
+    if (!voice.isListening) {
+      try {
+        const ok = await window.electronAPI?.mic?.request?.();
+        if (ok === false) {
+          showVoiceNotice(
+            'Microphone access is off, so voice mode can’t hear you.',
+            'mic',
+          );
+          return;
+        }
+      } catch {
+        /* non-electron / older preload: fall through to voice.toggle */
+      }
+    }
+    void voice.toggle();
+  }, [voice, showVoiceNotice]);
+
+  // Voice started successfully → mic access is clearly fine, so retire any
+  // lingering mic warning.
+  useEffect(() => {
+    if (voice.isListening) {
+      setVoiceNotice((n) => (n?.kind === 'mic' ? null : n));
+    }
+  }, [voice.isListening]);
 
   // Listening reactions (backchannel): while the user speaks, ping soul so
   // the avatar visibly attends (brow flick on start, slow nods while they
@@ -2460,11 +2525,13 @@ function AppMain() {
     opts?: { scope?: DressScope; epoch?: number },
   ) => {
     if (!pixelStreaming) return;
-    if (!w) return;
+    // An instance with NO saved wardrobe still dresses: buildDressPayloads sends
+    // -1 for every slot (keep-authored-default), which resets the character on a
+    // switch instead of letting the previous character's outfit bleed through.
     const epoch = opts?.epoch ?? ++dressEpochRef.current;
     const isAlive = () => dressEpochRef.current === epoch;
     await dressCharacter({
-      wardrobe: w,
+      wardrobe: w ?? {},
       agentId: agentIdForWardrobe,
       scope: opts?.scope ?? 'full',
       emit: (payload) => {
@@ -2586,10 +2653,18 @@ function AppMain() {
   // with Get Number Field). Optionally pass an explicit agentId (e.g. from
   // characterReady, before activeAgentId state has caught up to the new spawn).
   const [cameraMode, setCameraMode] = useState<CameraMode>('default');
+  // While customizing, face-region panes (hair / eyebrow / eyelash) want the
+  // close resting shot instead of the full-figure pull-back, so the user can
+  // actually see the grooms they're editing. CustomWardrobe reports this per
+  // pane via onCloseUpChange. Defaults true because customization always opens
+  // on the hair pane.
+  const [customizeCloseUp, setCustomizeCloseUp] = useState(true);
   const applyCamera = useCallback((agentIdOverride?: string | null) => {
     if (!pixelStreaming) return;
     const aid = agentIdOverride ?? activeAgentId;
-    const [x, y, z] = customizationActive ? cameraCustomize(aid) : cameraForMode(aid, cameraMode);
+    const [x, y, z] = customizationActive
+      ? (customizeCloseUp ? cameraDefaultFor(aid) : cameraCustomize(aid))
+      : cameraForMode(aid, cameraMode);
     pixelStreaming.emitUIInteraction({
       EventType: 'updateCameraFromLocation',
       'locB.x': round3(x),
@@ -2597,7 +2672,7 @@ function AppMain() {
       'locB.z': round3(z),
       Timestamp: new Date().toISOString(),
     });
-  }, [pixelStreaming, activeAgentId, customizationActive, cameraMode]);
+  }, [pixelStreaming, activeAgentId, customizationActive, customizeCloseUp, cameraMode]);
   const applyCameraRef = useRef(applyCamera);
   applyCameraRef.current = applyCamera;
   // Re-frame whenever the active character, the customize mode, or the chosen
@@ -3186,6 +3261,9 @@ function AppMain() {
       // spans the whole workspace, not the pre-shrunk window.
       setActiveWidget(null);
       setChatPaneOpen(false);
+      // Opens on the hair pane, which is a close-up pane; reset so entry frames
+      // close instead of inheriting the last session's pane framing for a frame.
+      setCustomizeCloseUp(true);
       setCustomizationActive(prev => !prev);
       return;
     }
@@ -3492,13 +3570,11 @@ function AppMain() {
     };
   }, [isConnected, hasSession, streaming, voice.isListening]);
 
-  // Drive the textarea live as streaming partials arrive. ONLY the committed
-  // portion is ever shown: this is the single source of the on-screen
-  // transcript. Unconfirmed (tentative) text is deliberately NOT rendered , it
-  // is the unstable tail that LocalAgreement-2 rewrites until two inferences
-  // agree, so drawing it made words flicker and, because it was passed to
-  // InputBar as `display` (committed + tentative) while the textarea already
-  // held committed, it rendered every committed word a second time.
+  // Drive the textarea live as streaming partials arrive. The textarea
+  // (`message`) holds ONLY the committed portion; the unconfirmed tail is drawn
+  // separately as a dim ghost by the InputBar mirror (via the `tentative` prop
+  // above), so committed never renders twice — the bug that got the tail pulled
+  // the first time. This effect stays committed-only on purpose.
   useEffect(() => {
     if (!streaming.isActive) return;
     const baseline = voiceBaselineRef.current;
@@ -3645,6 +3721,7 @@ function AppMain() {
             onSave={handleSaveWardrobe}
             onCancel={handleExitCustomization}
             onEffect={setEffectPreview}
+            onCloseUpChange={setCustomizeCloseUp}
             bgMode={environment.bgmode}
             onBgMode={(m) => setEnvironment({ bgmode: m })}
           />
@@ -3961,7 +4038,7 @@ function AppMain() {
                     vadLevel: voice.vadLevel,
                     isUserSpeaking: voice.isUserSpeaking,
                     isTranscribing: voice.isTranscribing,
-                    toggle: () => { void voice.toggle(); },
+                    toggle: () => { void handleVoiceToggle(); },
                     start: () => { void voice.start(); },
                     stop: () => { void voice.stop(); },
                   }}
@@ -3978,6 +4055,12 @@ function AppMain() {
                   // every committed word a second time. Unconfirmed words are no
                   // longer drawn at all.
                   voiceActive={streaming.isActive || voice.isListening}
+                  // The unstable transcriber tail, shown as a dim ghost after
+                  // the committed text (which rides `message` via setText). The
+                  // InputBar mirror renders committed once + this once, so no
+                  // double-draw. Cleared to '' when not streaming so it never
+                  // lingers after finalize.
+                  tentative={streaming.isActive ? streaming.tentative : ''}
                   agents={personaAgents}
                   selectedAgentId={selectedInstanceId}
                   onSelectAgent={(id) => selectInstance(id, 1)}
@@ -4071,6 +4154,78 @@ function AppMain() {
       {/* New-account notice: this machine's previous API keys were cleared
           (keys are local secrets, never synced to an account). Nudge the user
           to re-enter them in Settings. Dismissible. */}
+      {/* Voice / mic warning — same top-banner treatment as the "re-enter your
+          keys" notice. Mic denials are accent-tinted and sticky with an Open
+          Settings action; generic voice hiccups are neutral and self-clear. */}
+      {voiceNotice && (
+        <div
+          role="alert"
+          style={{
+            position: 'absolute',
+            top: 46,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 59,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            maxWidth: 440,
+            padding: '9px 12px 9px 14px',
+            borderRadius: 12,
+            background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.66))',
+            border: `1px solid ${voiceNotice.kind === 'mic' ? 'color-mix(in srgb, var(--accent) 45%, transparent)' : 'rgba(255,255,255,0.12)'}`,
+            backdropFilter: 'var(--glass-blur)',
+            WebkitBackdropFilter: 'var(--glass-blur)',
+            boxShadow: '0 10px 28px -12px rgba(0,0,0,0.6)',
+            color: 'var(--text-primary)',
+            fontSize: 12.5,
+            lineHeight: 1.35,
+          }}
+        >
+          <span style={{ flex: 1 }}>{voiceNotice.text}</span>
+          {voiceNotice.kind === 'mic' && (
+            <button
+              type="button"
+              onClick={() => { void window.electronAPI?.mic?.openSettings?.(); }}
+              style={{
+                flex: '0 0 auto',
+                padding: '5px 10px',
+                borderRadius: 8,
+                border: '1px solid color-mix(in srgb, var(--accent) 55%, transparent)',
+                background: 'color-mix(in srgb, var(--accent) 20%, transparent)',
+                color: 'var(--text-primary)',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Open Settings
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setVoiceNotice(null)}
+            aria-label="Dismiss"
+            style={{
+              flex: '0 0 auto',
+              width: 22,
+              height: 22,
+              padding: 0,
+              borderRadius: '50%',
+              border: 'none',
+              background: 'transparent',
+              color: 'var(--text-ghost)',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <X size={14} strokeWidth={2.4} />
+          </button>
+        </div>
+      )}
+
       {apiKeysNotice && hasSession && (
         <div
           style={{

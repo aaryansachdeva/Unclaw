@@ -55,7 +55,7 @@
 
 import type { WardrobeSettings } from '../services/userSettings';
 import { round3 } from '../components/ColorPickerPanel';
-import { isCustomCharacter } from './catalog';
+import { isCustomCharacter, wardrobeDefaultsFor } from './catalog';
 
 export type DescriptorPayload = Record<string, unknown> & { EventType: string };
 
@@ -84,17 +84,42 @@ export function buildDressPayloads(
 ): DescriptorPayload[] {
   const out: DescriptorPayload[] = [];
 
-  // As of the merged-switch cutover, this switch-time chain carries ONLY body
-  // blends. Everything else moved:
-  //   * clothing INDICES (top/bottom/shoes/hair/eyelash/eyebrow) ride on the
-  //     merged `agentSwitch` descriptor (emitAgentSwitch), applied UE-side inside
-  //     the swap graph after the async spawn — no more initializeClothing.
-  //   * clothing COLORS are applied by App.tsx on the per-slot updateXSuccess
-  //     responses, because the garment mesh must exist before its DMI colour can
-  //     take (each Update async-loads the mesh).
+  // Wardrobe INDICES are applied here at characterReady via changeWardrobeItem,
+  // the PROVEN per-slot path (same one live customization edits use, which work
+  // in every cooked build). The merged `agentSwitch` also carries the indices as
+  // a fast path, but the cooked swap graph doesn't reliably apply them, so this
+  // is the reliable belt-and-suspenders: characterReady fires AFTER the async
+  // spawn, so the character exists and changeWardrobeItem lands. Double-applying
+  // with agentSwitch is idempotent (same mesh, no visible glitch).
+  //   * clothing COLORS still ride the per-slot updateXSuccess responses
+  //     (App.tsx) — each changeWardrobeItem async-loads its mesh, and the color
+  //     goes on once UE reports the slot is ready (the mesh must exist first).
   //   * the ENVIRONMENT (light + backdrop) is GLOBAL (App.tsx applyEnvironment).
-  // Body blends stay here: they act on the base body mesh, which exists at
-  // spawn, so they're safe at characterReady. Custom builds only.
+  // FULL outfit state, every slot, every time: a saved index applies that item;
+  // an UNSAVED slot sends the character's DEFAULT index (wardrobeDefaultsFor),
+  // not a -1 sentinel. Sending the explicit default matters on a switch
+  // A(customized) -> B(unsaved): B is told its own authored look for that slot,
+  // never inheriting A's. Legacy characters default to 0 all around; the custom
+  // builds carry their specific default groom/brow/lash.
+  if (scope !== 'scene') {
+    const def = wardrobeDefaultsFor(agentId);
+    const item = (cat: string, v: number | undefined, fallback: number) => {
+      const index = (v == null || !Number.isFinite(v)) ? fallback : Math.floor(v);
+      out.push({ EventType: 'changeWardrobeItem', wardrobeCategory: cat, wardrobeIndex: index });
+    };
+    item('hair',   w.hairIndex,   def.hair);
+    item('top',    w.topIndex,    def.top);
+    item('bottom', w.bottomIndex, def.bottom);
+    item('shoes',  w.shoesIndex,  def.shoes);
+    if (isCustomCharacter(agentId)) {
+      // Base/legacy characters have no selectable brows/lashes (one baked each).
+      item('eyebrow', w.browIndex, def.brow);
+      item('eyelash', w.lashIndex, def.lash);
+    }
+  }
+
+  // Body blends act on the base body mesh, which exists at spawn, so they're
+  // safe at characterReady. Custom builds only.
   if (scope !== 'scene' && isCustomCharacter(agentId)) {
     // Both axes home = the authored shape; re-asserting zeroes buys nothing.
     const h = w.heightBlend ?? 0;

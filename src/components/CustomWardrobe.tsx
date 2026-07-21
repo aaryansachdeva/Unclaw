@@ -1,7 +1,7 @@
 // CustomWardrobe — customization for the custom-pipeline characters
-// (grace_custom / kevin_custom / syd_custom), which carry 34 hair, 18 brows and
-// 6 lashes with real thumbnails. A blind stepper can't browse that; you need to
-// see them.
+// (grace_custom / kevin_custom), which carry 34 hair, 18 brows and 6 lashes
+// with real thumbnails. A blind stepper can't browse that; you need to see
+// them. (The legacy characters reuse this same UI with a restricted set.)
 //
 // THE SHAPE: A REEL, NOT A DRAWER
 // First attempt was a 336px drawer with a 4-column grid. Wrong on both counts:
@@ -73,8 +73,8 @@ function barHeight(pane: Pane): number {
   if (pane === 'body') return 182;
   // Environment holds light + backdrop (+ style) side by side.
   if (pane === 'environment') return 200;
-  // Effects is a reel + name/blurb + strength, like a garment pane.
-  if (pane === 'effects') return 178;
+  // Effects is a reel + a single name/strength row (no blurb).
+  if (pane === 'effects') return 150;
   return CUSTOM_COLORABLE.includes(pane as CustomCategory) ? 178 : 146;
 }
 
@@ -90,13 +90,17 @@ interface CustomWardrobeProps {
   /** Live-preview a post effect. Separate from onEmit because effects are
    *  composited in the renderer and never reach UE. */
   onEffect?: (fx: { effectId: string; effectStrength: number }) => void;
+  /** True when the active pane is a face-region edit (hair / eyebrow / eyelash)
+   *  and the camera should sit at the close resting shot instead of the
+   *  full-figure customization pull-back. App drives the camera from this. */
+  onCloseUpChange?: (closeUp: boolean) => void;
   /** GLOBAL backdrop style index (bgmode); backdrop is not per-instance. */
   bgMode?: number;
   /** Persist a new global backdrop style index. */
   onBgMode?: (index: number) => void;
 }
 
-export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onEffect, bgMode, onBgMode }: CustomWardrobeProps) {
+export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onEffect, onCloseUpChange, bgMode, onBgMode }: CustomWardrobeProps) {
   // The wardrobe surface for THIS character: which categories exist, their
   // items (per-character hair, shared/subset clothing), whether body blends
   // apply. Memoized on agentId so a switch mid-session re-resolves.
@@ -116,6 +120,13 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   useEffect(() => {
     if (!panes.includes(pane)) setPane(panes[0] ?? 'hair');
   }, [panes, pane]);
+
+  // Tell App whether the active pane is a face-region edit so it can frame the
+  // camera close (hair / eyebrow / eyelash) vs pull back to the whole figure
+  // for clothing / body / environment. Fires on mount + every pane change.
+  useEffect(() => {
+    onCloseUpChange?.(pane === 'hair' || pane === 'eyebrow' || pane === 'eyelash');
+  }, [pane, onCloseUpChange]);
 
   const [hair,    setHair]    = useState(() => clampAgentIndex(wardrobe.items.hair,    initial?.hairIndex));
   const [eyebrow, setEyebrow] = useState(() => clampAgentIndex(wardrobe.items.eyebrow, initial?.browIndex));
@@ -388,7 +399,12 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
       {/* The bar. Floating object, not a wall: inset on three sides, height
           animates to whatever the active pane actually needs. */}
       <motion.div
-        initial={{ y: 40, opacity: 0 }}
+        // Start at the pane's target height so entry is a pure slide+fade. If
+        // height is left to animate from its natural content height on mount it
+        // tweens simultaneously with the y-slide, which reads as a jitter as the
+        // bar comes up. Height still animates on later pane switches (animate
+        // updates while mounted; initial only applies on first mount).
+        initial={{ y: 40, opacity: 0, height: barHeight(pane) }}
         animate={{ y: 0, opacity: 1, height: barHeight(pane) }}
         transition={{ type: 'spring', stiffness: 460, damping: 42 }}
         style={{
@@ -661,9 +677,7 @@ function Reel({ items, selected, onPick }: {
           padding: '9px 6px 7px',
           overflowX: 'auto',
           overflowY: 'hidden',
-          scrollbarWidth: 'none',
-          scrollSnapType: 'x proximity',
-        }}
+          scrollbarWidth: 'none',        }}
       >
       {items.map((item) => {
         const isSel = item.index === selected;
@@ -687,9 +701,7 @@ function Reel({ items, selected, onPick }: {
               padding: 0,
               borderRadius: 9,
               overflow: 'hidden',
-              cursor: 'pointer',
-              scrollSnapAlign: 'center',
-              background: 'rgba(255,255,255,0.03)',
+              cursor: 'pointer',              background: 'rgba(255,255,255,0.03)',
               border: isSel
                 ? '1px solid var(--accent, #c44444)'
                 : '1px solid rgba(255,255,255,0.10)',
@@ -821,9 +833,7 @@ function EffectsPane({ effectId, strength, onPick, onStrength }: {
           display: 'flex', alignItems: 'center', gap: 7,
           padding: '9px 6px 7px',
           overflowX: 'auto', overflowY: 'hidden',
-          scrollbarWidth: 'none',
-          scrollSnapType: 'x proximity',
-        }}
+          scrollbarWidth: 'none',        }}
       >
         {STREAM_EFFECTS.map((e) => {
           const sel = e.id === effectId;
@@ -845,7 +855,7 @@ function EffectsPane({ effectId, strength, onPick, onStrength }: {
                 flex: '0 0 auto',
                 width: FRAME, height: FRAME,
                 padding: 0, borderRadius: 9, overflow: 'hidden',
-                cursor: 'pointer', scrollSnapAlign: 'center',
+                cursor: 'pointer',
                 background: 'rgba(255,255,255,0.03)',
                 border: sel ? '1px solid var(--accent, #c44444)' : '1px solid rgba(255,255,255,0.10)',
                 boxShadow: sel ? '0 6px 16px -6px rgba(196,68,68,0.6)' : 'none',
@@ -873,57 +883,45 @@ function EffectsPane({ effectId, strength, onPick, onStrength }: {
       <ReelArrow dir="right" active={edges.canRight} onClick={() => scroll(1)} />
       </div>
 
-      {/* Name + what it does. The blurb earns its place here because an
-          effect's name never tells you what it looks like. */}
+      {/* Name + strength on ONE row: label at left, slider at right. The
+          strength slider fades out with nothing applied (meaningless at None)
+          but keeps its space so the name doesn't jump when you switch to it. */}
       <div style={{
-        flex: '0 0 auto', height: 30,
-        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        gap: 1, padding: '0 16px',
+        flex: '0 0 auto',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        gap: 14, padding: '4px 16px 12px',
       }}>
         <AnimatePresence mode="wait">
-          <motion.div
+          <motion.span
             key={fx.id}
             initial={{ opacity: 0, y: 2 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -2 }}
             transition={{ duration: 0.14, ease: EASE_OUT_EXPO }}
-            style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}
-          >
-            <span style={{
+            style={{
               fontSize: 11, fontWeight: 600,
               color: 'var(--text-primary, #fafafa)', letterSpacing: '-0.005em',
-            }}>
-              {fx.name}
-            </span>
-            <span style={{
-              fontSize: 9.5, color: 'var(--text-ghost)',
-              letterSpacing: '-0.005em', whiteSpace: 'nowrap',
-            }}>
-              {fx.blurb}
-            </span>
-          </motion.div>
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {fx.name}
+          </motion.span>
         </AnimatePresence>
-      </div>
-
-      {/* Strength is meaningless with nothing applied, so it goes away rather
-          than sitting there greyed out. */}
-      <div style={{
-        flex: '0 0 auto',
-        display: 'flex', justifyContent: 'center',
-        padding: '2px 16px 10px',
-        opacity: isNone ? 0 : 1,
-        pointerEvents: isNone ? 'none' : 'auto',
-        transition: 'opacity 180ms var(--ease-out-quart)',
-      }}>
-        <ValueSlider
-          value={strength}
-          onChange={onStrength}
-          min={0}
-          max={1}
-          step={0.01}
-          width={200}
-          label="Effect strength"
-        />
+        <div style={{
+          opacity: isNone ? 0 : 1,
+          pointerEvents: isNone ? 'none' : 'auto',
+          transition: 'opacity 180ms var(--ease-out-quart)',
+        }}>
+          <ValueSlider
+            value={strength}
+            onChange={onStrength}
+            min={0}
+            max={1}
+            step={0.01}
+            width={170}
+            label="Effect strength"
+          />
+        </div>
       </div>
     </>
   );
@@ -1290,16 +1288,26 @@ function Dots({ colors, activeIndex, customHex, onPick, onCustom }: {
         label="Custom color"
         active={!!customHex}
         dashed={!customHex}
+        rainbow
         onClick={(rect) => onCustom(rect)}
       />
     </div>
   );
 }
 
-function Dot({ hex, label, active, dashed, onClick }: {
-  hex: string; label: string; active: boolean; dashed?: boolean;
+// The color-wheel fill for the custom-color swatch when nothing's picked yet:
+// a full-spectrum ring reads as "pick any color" at a glance.
+const RAINBOW_SWATCH =
+  'conic-gradient(from 0deg, #ff4d4d, #ffd24d, #7dff4d, #4dffd2, #4d9dff, #7d4dff, #ff4dd2, #ff4d4d)';
+
+function Dot({ hex, label, active, dashed, rainbow, onClick }: {
+  hex: string; label: string; active: boolean; dashed?: boolean; rainbow?: boolean;
   onClick: (rect: DOMRect) => void;
 }) {
+  // The unset custom swatch shows the rainbow wheel (if requested) instead of a
+  // dashed placeholder, so it reads as a color picker; once a color is chosen it
+  // shows that color like any other dot.
+  const showWheel = dashed && rainbow;
   return (
     <motion.button
       type="button"
@@ -1312,9 +1320,10 @@ function Dot({ hex, label, active, dashed, onClick }: {
       onClick={(e) => onClick(e.currentTarget.getBoundingClientRect())}
       style={{
         width: 18, height: 18, borderRadius: '50%', padding: 0, cursor: 'pointer',
-        background: dashed ? 'rgba(255,255,255,0.06)' : hex,
+        background: showWheel ? RAINBOW_SWATCH : dashed ? 'rgba(255,255,255,0.06)' : hex,
         border: active
           ? '2px solid rgba(255,255,255,0.92)'
+          : showWheel ? '1px solid rgba(255,255,255,0.22)'
           : dashed ? '1px dashed rgba(255,255,255,0.34)' : '1px solid rgba(255,255,255,0.16)',
         boxShadow: active && !dashed ? `0 0 9px -1px ${hex}` : 'none',
         transition: 'border-color 160ms var(--ease-out-quart), box-shadow 160ms var(--ease-out-quart)',

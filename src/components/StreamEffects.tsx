@@ -94,22 +94,25 @@ const ALL_STREAM_EFFECTS: StreamEffectDef[] = [
     name: 'Grain',
     blurb: 'Heavy stock, pushed two stops.',
     // Grain reads as grain because the image behind it is contrasty. Flat
-    // footage plus noise just looks dirty.
-    backdrop: (s) => `contrast(${(1 + s * 0.35).toFixed(2)}) saturate(${(1 - s * 0.25).toFixed(2)})`,
+    // footage plus noise just looks dirty. Pushed hard: this is the heavy stock,
+    // so the noise sits high in the mix even at low strength.
+    backdrop: (s) => `contrast(${(1 + s * 0.5).toFixed(2)}) saturate(${(1 - s * 0.28).toFixed(2)})`,
     layer: (s) => ({
       backgroundImage: GRAIN_URI,
       // overlay agitates lights and darks and leaves midtones, which is what
       // silver halide does. `normal` would just fog the picture grey.
       mixBlendMode: 'overlay',
-      opacity: 0.25 + s * 0.75,
+      opacity: 0.55 + s * 0.85,
       // steps() not linear: grain JUMPS frame to frame, it doesn't slide.
       animation: 'unclaw-fx-grain 240ms steps(3, end) infinite',
     }),
     layer2: (s) => ({
       backgroundImage: GRAIN_URI,
       backgroundSize: '260px 260px',
-      mixBlendMode: 'soft-light',
-      opacity: s * 0.55,
+      // overlay (not soft-light) so the second layer bites instead of just
+      // hazing, doubling the visible grain density.
+      mixBlendMode: 'overlay',
+      opacity: 0.3 + s * 0.7,
       // A second, coarser layer on a different beat. One noise layer looks like
       // a texture; two out of sync look alive.
       animation: 'unclaw-fx-grain 370ms steps(2, end) infinite reverse',
@@ -400,6 +403,7 @@ const ALL_STREAM_EFFECTS: StreamEffectDef[] = [
 // exported, so a saved reference to one falls back to 'none' via effectFor).
 const RETIRED_EFFECT_IDS = new Set([
   'vignette', 'ember', 'grid', 'scanner', 'hologram', 'vhs', 'glitch',
+  'interference', 'thermal', 'dream',
 ]);
 export const STREAM_EFFECTS: StreamEffectDef[] =
   ALL_STREAM_EFFECTS.filter((e) => !RETIRED_EFFECT_IDS.has(e.id));

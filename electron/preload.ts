@@ -30,6 +30,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openTerminalWithCommand: (command: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('terminal:open-with-command', command),
 
+  /** Microphone permission (macOS). `requestMic` proactively triggers the OS
+   *  prompt (or resolves false if already denied) BEFORE getUserMedia so voice
+   *  mode never fails silently. `getMicStatus` reads current access, and
+   *  `openMicSettings` jumps to the Privacy > Microphone pane. */
+  mic: {
+    getStatus: (): Promise<'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown'> =>
+      ipcRenderer.invoke('mic:get-status'),
+    request: (): Promise<boolean> => ipcRenderer.invoke('mic:request'),
+    openSettings: (): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('mic:open-settings'),
+  },
+
   // ----------------------------------------------------------------------
   // Screenshot, main-window facing.
   // The main React app calls `triggerScreenshot()` to fire the overlay

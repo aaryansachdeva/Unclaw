@@ -18,6 +18,14 @@ interface ElectronAPI {
    *  SettingsPanel's Claude Code subscription card to fire
    *  `claude setup-token` in a fresh tab. */
   openTerminalWithCommand: (command: string) => Promise<{ ok: boolean; error?: string }>;
+  /** Microphone permission (macOS). `request` triggers the OS prompt (or
+   *  resolves false if already denied); `getStatus` reads current access;
+   *  `openSettings` jumps to Privacy > Microphone. */
+  mic: {
+    getStatus: () => Promise<'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown'>;
+    request: () => Promise<boolean>;
+    openSettings: () => Promise<{ ok: boolean; error?: string }>;
+  };
 
   /** TEMP(revert): Cmd+H all-chrome hide toggle. Returns an unsubscribe fn. */
   onTempToggleUi?: (cb: () => void) => () => void;

@@ -14,23 +14,26 @@ export interface Agent {
   optimized?: boolean;
 }
 
-// The selectable characters. Grace ships baked into the base game; Mark is a
-// free download; the rest are paid DLC paks. In dev every pak is baked into
-// the UE .app so all are switchable. Availability gating (driven by UE's
-// `installedCharacters` reply) lands when the DLC download flow ships.
+// The selectable characters.
 //
-// The `*_custom` trio are the custom-pipeline builds. They're separate agentIds
-// (not variants of the originals) because UE resolves the DA_Character card by
-// this exact string — grace_custom is a different character to UE than grace,
-// and their chat memory + wardrobe hang off the id too.
+// Grace is now the fully-customizable build: her card spawns `grace_custom`
+// (the legacy non-custom `grace` is deprecated and folded into it, see
+// useAgentStack's migration). Kevin is the other custom build. Mark is a free
+// download; ava/goblin/chris/joi are the legacy characters shipped as paid DLC
+// paks. In dev every pak is baked into the UE .app so all are switchable.
+// Availability gating (driven by UE's `installedCharacters` reply) lands when
+// the DLC download flow ships.
+//
+// `*_custom` agentIds are separate strings (not variants of the originals)
+// because UE resolves the DA_Character card by this exact string, and chat
+// memory + wardrobe hang off the id too. AGENTS[0] must stay Grace (App.tsx
+// reads AGENTS[0].name as the default agent name).
 export const AGENTS: Agent[] = [
-  { id: 0, name: 'Grace', agentId: 'grace' },
-  { id: 1, name: 'Mark', agentId: 'mark' },
-  { id: 2, name: 'Ava', agentId: 'ava' },
+  { id: 0, name: 'Grace', agentId: 'grace_custom', custom: true, optimized: true },
+  { id: 1, name: 'Mark',  agentId: 'mark' },
+  { id: 2, name: 'Ava',   agentId: 'ava' },
   { id: 3, name: 'Goblin', agentId: 'goblin' },
   { id: 4, name: 'Chris', agentId: 'chris' },
-  { id: 5, name: 'Joi', agentId: 'joi' },
-  { id: 6, name: 'Grace', agentId: 'grace_custom', custom: true, optimized: true },
-  { id: 7, name: 'Kevin', agentId: 'kevin_custom', custom: true, optimized: true },
-  { id: 8, name: 'Syd',   agentId: 'syd_custom',   custom: true, optimized: true },
+  { id: 5, name: 'Joi',   agentId: 'joi' },
+  { id: 6, name: 'Kevin', agentId: 'kevin_custom', custom: true, optimized: true },
 ];

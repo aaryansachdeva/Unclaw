@@ -46,6 +46,11 @@ export interface EnvironmentSettings {
   effectStrength?: number;
 }
 
+// New-user backdrop default: Ink (BG_COLORS index 1, #101014) at a low 0.2 glow
+// — a dark, near-flat room so the character reads first. Only applied when there
+// is NO saved blob; anyone who has already set a backdrop keeps theirs.
+const DEFAULT_ENVIRONMENT: EnvironmentSettings = { bgColorIndex: 1, bgGlow: 0.2 };
+
 function load(): EnvironmentSettings {
   try {
     const raw = localStorage.getItem(KEY);
@@ -54,7 +59,7 @@ function load(): EnvironmentSettings {
       if (v && typeof v === 'object') return v as EnvironmentSettings;
     }
   } catch { /* corrupt / unavailable -> defaults */ }
-  return {};
+  return { ...DEFAULT_ENVIRONMENT };
 }
 
 function save(next: EnvironmentSettings) {

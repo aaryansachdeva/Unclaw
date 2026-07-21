@@ -13,6 +13,7 @@
 import {
   BARGE_IN_FRAMES,
   BARGE_IN_PROB,
+  FRAME_SIZE,
   MIN_UTTERANCE_PEAK,
   PRE_ROLL_MS,
   RING_BUFFER_SAMPLES,
@@ -75,6 +76,24 @@ export class VoiceController {
   private node: AudioWorkletNode | null = null;
   private mediaStream: MediaStream | null = null;
   private worklet = new Worklet(); // wraps the message handler closure
+
+  // Rate adaptation. Silero VAD (and the streaming transcriber we feed) both
+  // require exactly 16 kHz. We ASK the AudioContext for 16 kHz, but some Core
+  // Audio setups ignore the hint — notably this Mac's UnclawSilentSink driver,
+  // which forces 48 kHz. So when the context comes back at another rate we
+  // resample worklet frames to 16 kHz on the fly (continuous linear resampler,
+  // identical to streamingClient's), then RE-CHUNK to exactly FRAME_SIZE (512)
+  // samples before handing them to processFrame — vadEngine.probe() throws on
+  // any other length. Previously this class hard-threw on a non-16 kHz context,
+  // which is why continuous voice mode was dead on this machine.
+  private _rsNeed = false;   // true when the context isn't 16 kHz
+  private _rsStep = 1;       // input samples consumed per 16 kHz output sample
+  private _rsPos = 0;        // fractional read index carried across frames
+  private _rsPrev = 0;       // last sample of the previous frame (edge interp)
+  // 16 kHz accumulator: resampled samples pile up here and drain out in
+  // exact 512-sample frames.
+  private _acc = new Float32Array(FRAME_SIZE * 8);
+  private _accLen = 0;
 
   // Ring buffer of last RING_BUFFER_SAMPLES samples (Float32, [-1, 1]).
   private ring = new Float32Array(RING_BUFFER_SAMPLES);
@@ -188,17 +207,21 @@ export class VoiceController {
         console.warn('[voice] 16kHz AudioContext rejected, falling back:', err);
         this.ctx = new AudioContext({ latencyHint: 'interactive' });
       }
-      console.info('[voice] AudioContext at', this.ctx.sampleRate, 'Hz');
-      if (this.ctx.sampleRate !== SAMPLE_RATE) {
-        // Silero v5 requires exactly 16 kHz frames. If we couldn't get a
-        // 16 kHz context, the worklet will produce mismatched-rate frames
-        // and VAD output will be garbage. Bail with a clear message rather
-        // than silently misbehave.
-        throw new Error(
-          `voice: AudioContext is at ${this.ctx.sampleRate} Hz, ` +
-          `need ${SAMPLE_RATE} Hz. This OS/browser combo refused our 16 kHz hint.`,
-        );
-      }
+      // The context may not honor the 16 kHz hint (this Mac's UnclawSilentSink
+      // driver forces 48 kHz). Rather than bail — which killed continuous voice
+      // mode entirely — set up an on-the-fly resampler to 16 kHz. Frames get
+      // resampled + re-chunked to exactly FRAME_SIZE in the worklet onmessage
+      // handler below. Reset the resampler state for this session.
+      const actualRate = this.ctx.sampleRate;
+      this._rsNeed = actualRate !== SAMPLE_RATE;
+      this._rsStep = actualRate / SAMPLE_RATE;
+      this._rsPos = 0;
+      this._rsPrev = 0;
+      this._accLen = 0;
+      console.info(
+        '[voice] AudioContext at', actualRate, 'Hz',
+        this._rsNeed ? `→ resampling to ${SAMPLE_RATE}Hz` : '(native 16k)',
+      );
 
       try {
         // RELATIVE path (`./`), not absolute (`/`). See vadEngine.ts +
@@ -227,9 +250,10 @@ export class VoiceController {
           // Telemetry: prove frames are flowing without spamming the log.
           if (frameCount === 1) console.info('[voice] first audio frame');
           else if (frameCount % 150 === 0) console.debug('[voice] frame', frameCount);
-          this.worklet.handleFrame(msg.samples).catch((err) => {
-            this.emit({ kind: 'error', message: `frame handler: ${err}` });
-          });
+          // Resample to 16 kHz if the context isn't already there, then drain
+          // exact FRAME_SIZE (512-sample) frames into processFrame.
+          const in16k = this._rsNeed ? this.resampleTo16k(msg.samples) : msg.samples;
+          this.feed16k(in16k);
         }
       };
 
@@ -272,6 +296,66 @@ export class VoiceController {
   /** Caller can mark "AI just finished" to enable cold-start grace. */
   notifyAIFinished(): void {
     this.lastAIFinishedAtMs = performance.now();
+  }
+
+  // -------------------------------------------------------------------
+  //  Rate adaptation (48 kHz → 16 kHz + exact FRAME_SIZE re-chunking)
+  // -------------------------------------------------------------------
+
+  /** Continuous linear resampler from the context rate to 16 kHz. `_rsPos`
+   *  carries the fractional read position across frames and `_rsPrev` holds
+   *  the previous frame's last sample for interpolation across the boundary.
+   *  Identical to streamingClient's so both audio consumers agree. */
+  private resampleTo16k(frame: Float32Array): Float32Array {
+    const step = this._rsStep;
+    const n = frame.length;
+    const out = new Float32Array(Math.ceil((n - this._rsPos) / step) + 1);
+    let k = 0;
+    let pos = this._rsPos;
+    while (pos < n) {
+      const i = Math.floor(pos);
+      const frac = pos - i;
+      const a = i < 0 ? this._rsPrev : frame[i];
+      const j = i + 1;
+      const b = j < 0 ? this._rsPrev : (j < n ? frame[j] : frame[n - 1]);
+      out[k++] = a + (b - a) * frac;
+      pos += step;
+    }
+    this._rsPos = pos - n;          // carry remainder into next frame
+    this._rsPrev = frame[n - 1];
+    return out.subarray(0, k);
+  }
+
+  /** Append 16 kHz samples and drain exact FRAME_SIZE (512-sample) frames into
+   *  processFrame. Silero VAD throws on any other length, and the streaming
+   *  transcriber (fed via pushFrame inside processFrame) expects 16 kHz too.
+   *  Whether the context is native 16 kHz or resampled, everything downstream
+   *  sees identical 512-sample frames at a steady ~32 ms cadence. */
+  private feed16k(samples: Float32Array): void {
+    if (this._accLen + samples.length > this._acc.length) {
+      const grown = new Float32Array(
+        Math.max(this._acc.length * 2, this._accLen + samples.length),
+      );
+      grown.set(this._acc.subarray(0, this._accLen));
+      this._acc = grown;
+    }
+    this._acc.set(samples, this._accLen);
+    this._accLen += samples.length;
+
+    let off = 0;
+    while (this._accLen - off >= FRAME_SIZE) {
+      // slice() copies — processFrame + pushFrame retain the buffer, so it must
+      // not be aliased to the accumulator we're about to compact.
+      const frame = this._acc.slice(off, off + FRAME_SIZE);
+      off += FRAME_SIZE;
+      this.worklet.handleFrame(frame).catch((err) => {
+        this.emit({ kind: 'error', message: `frame handler: ${err}` });
+      });
+    }
+    if (off > 0) {
+      this._acc.copyWithin(0, off, this._accLen);
+      this._accLen -= off;
+    }
   }
 
   // -------------------------------------------------------------------

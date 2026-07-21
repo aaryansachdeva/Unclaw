@@ -7,7 +7,6 @@
 // this bar, and `/news`, `/weather`, `/stocks`, `/reminders`, `/dance`,
 // `/kiss`, `/hello`, `/celebrate`, `/clear` all work from the input.
 
-import Strands from './Strands';
 import {
   forwardRef,
   KeyboardEvent as ReactKeyboardEvent,
@@ -112,6 +111,11 @@ interface InputBarProps {
    *  directly in the same surface the user types into, no separate
    *  view. */
   voiceActive?: boolean;
+  /** The unstable "tentative" tail from the streaming transcriber, shown as a
+   *  dim ghost after the committed text while `voiceActive`. Rendered in the
+   *  mirror (not the textarea `message`), so committed text is never drawn
+   *  twice — the bug that got the tail removed the first time. */
+  tentative?: string;
   /** Persona switcher — the roster as a dropdown list, plus a + button to add.
    *  `agents` is every roster instance in carousel order. */
   agents: Array<{ id: string; name: string }>;
@@ -189,6 +193,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onExpress,
   voice,
   voiceActive = false,
+  tentative = '',
   agents,
   selectedAgentId,
   onSelectAgent,
@@ -893,15 +898,17 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               transparent characters occupy the same columns as the mirror's
               visible ones, so the cursor caret lands in the right spot.
 
-              While speaking this shows ONLY committed transcript. It used to
-              also append a gray "tentative" span, but App fed that span
-              `streaming.display` (which is committed + tentative), while
-              `message` already held the committed text — so every committed
-              word rendered TWICE, once dark and once gray. Unconfirmed words
-              are now simply not drawn: LocalAgreement-2 promotes text to
-              committed as soon as two inferences agree, so committed is already
-              fast, and not drawing the unstable tail also removes the flicker
-              it caused as words got promoted. */}
+              While speaking, `message` holds the COMMITTED transcript and the
+              dim `tentative` span below appends the unstable tail flush after
+              it. This is the corrected version of the tail we removed once: the
+              old bug fed the span `committed + tentative` while `message` also
+              held committed, drawing every committed word twice. Now the span
+              carries ONLY `tentative` (App passes `streaming.tentative`), so
+              committed renders exactly once (dark) and the unconfirmed tail
+              trails it in dim ghost text — the same flush-suffix trick the
+              slash-completion ghost uses. LocalAgreement-2 rewrites the tail
+              until two inferences agree, so it shimmers slightly as words
+              settle into committed; that shimmer IS the live-dictation feel. */}
           <div
             aria-hidden
             style={{
@@ -926,6 +933,15 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             }}
           >
             {message}
+            {/* Tentative (unconfirmed) voice tail — dim ghost after the
+                committed text. A leading space only when we're joining two
+                non-empty, non-space-bounded pieces so words don't glue. */}
+            {voiceActive && tentative.trim() && (
+              <span style={{ color: 'rgba(255, 255, 255, 0.4)' }}>
+                {message.length > 0 && !/\s$/.test(message) ? ' ' : ''}
+                {tentative.trim()}
+              </span>
+            )}
             {/* Slash-command ghost-text autocomplete. Only shows when
                 there's a single best match the user is in the middle
                 of typing — sits flush against the typed text so the
@@ -1470,18 +1486,12 @@ function PlusButton({
 }
 
 // ---------------------------------------------------------------------
-// Voice button — circular control. Shows wave glyph at rest; mini-bars
-// when voice mode is active; phase-offset wave keyframe when transcribing.
+// Voice button — circular control for continuous voice mode. A single mic
+// glyph that scales + glows smoothly with the live VAD level while you speak
+// (no WebGL). Inactive = white pill with a dark mic; active = dark orb with a
+// light mic; transcribing = warm accent. Motion carries the "listening"
+// signal, hue is spent only at the one moment of attention (DESIGN.md).
 // ---------------------------------------------------------------------
-
-const NUM_BARS = 4;
-const BAR_GAP = 2;
-const BAR_W = 2;
-const BAR_MIN = 2;
-const BAR_MAX = 12;
-const BAR_FALLOFF = 0.18;
-const WAVE_DELAYS = [0, 90, 90, 0];
-const WAVE_DURATION_MS = 900;
 
 function VoiceButton({
   voice,
@@ -1492,53 +1502,31 @@ function VoiceButton({
   isSending: boolean;
   reduce: boolean;
 }) {
-  // Monochrome by default. The accent is precious (DESIGN.md): it appears only
-  // at the one real moment of attention, the AI transcribing/speaking. Listening
-  // is conveyed by MOTION (the strands ripple with your voice), not by hue , the
-  // old green/teal read as neon and fought the stream for attention.
-  const ringColor = voice.isTranscribing
-    ? 'var(--accent)'
-    : 'rgba(255,255,255,0.35)';
-  const barColor = voice.isTranscribing
-    ? 'rgba(40, 20, 20, 0.85)'
-    : 'rgba(20, 20, 20, 0.78)';
+  const active = voice.active;
+  const transcribing = voice.isTranscribing;
 
-  // Mode drives the bar visuals:
-  //   - 'transcribing' → phase-offset wave keyframe (CSS animation)
-  //   - 'live' → bar heights driven by VAD probability
-  //   - 'idle' → static decorative pattern (centered EQ shape)
-  const mode: BarMode = voice.isTranscribing
-    ? 'transcribing'
-    : voice.active
-      ? 'live'
-      : 'idle';
-
-  // When voice mode is active the orb fills with reactive Strands instead of
-  // the EQ bars. Energy drives the strands' amplitude/speed/brightness so they
-  // physically ripple with the user's voice (mic VAD level). While the AI is
-  // transcribing there's no mic signal, so hold a steady lively baseline.
-  const strandEnergy = Math.max(
+  // The ONLY thing that moves the bars is real signal: the live VAD level while
+  // listening (so they rise as you actually speak), and a gentle constant while
+  // she's transcribing (no mic then, but the bars shouldn't look dead). Silent =
+  // resting fan, nothing animating. No decorative keyframe — that read as random.
+  const energy = Math.max(
     0,
-    Math.min(1, voice.isTranscribing ? 0.7 : voice.vadLevel),
+    Math.min(1, active ? (transcribing ? 0.3 : voice.vadLevel) : 0),
   );
-  // Frosted-slate monochrome. The strands read as light, not as a colour, so the
-  // orb sits in the chrome instead of competing with the stream. Listening is
-  // communicated by how they MOVE (amplitude/speed follow vadLevel above), which
-  // is the signal that actually matters; hue added nothing but noise.
-  const strandColors = ['#e8ecf4', '#b8c2d4', '#8892a6'];
 
-  // Plain button — visibility is owned by the parent wrapper div's
-  // opacity transition. Mixing framer-motion's initial/animate/exit
-  // here was causing a flicker on every re-render of the parent
-  // (wrapper opacity going to 0 + button still trying to scale-in).
-  // The breathing animation for `isSending` lives as a CSS animation
-  // instead so it's parent-state-independent.
+  // Dark bars at rest; warm red (--accent) while recording — the mic is live
+  // and capturing, so the bars glow red the whole time voice mode is on.
+  const barColor = active ? 'var(--accent)' : 'rgba(20, 20, 20, 0.85)';
+
+  // The pill stays light in every state (no dark orb) and carries no ring/
+  // outline — the bars alone signal state. Only the resting `isSending` breathe
+  // remains, as a CSS animation so it's parent-state-independent.
   return (
     <button
       type="button"
       onClick={voice.toggle}
       disabled={voice.disabled}
-      aria-label={voice.active ? 'Stop voice mode' : 'Start voice mode'}
+      aria-label={active ? 'Stop voice mode' : 'Start voice mode'}
       className="glass-btn"
       style={{
         flexShrink: 0,
@@ -1546,76 +1534,43 @@ function VoiceButton({
         height: 36,
         borderRadius: '50%',
         position: 'relative',
-        // Active = dark orb so the glowing strands read; inactive = white pill.
         overflow: 'hidden',
-        background: voice.active ? 'rgba(14, 11, 13, 0.95)' : 'rgba(255,255,255,0.92)',
-        border: `1px solid ${voice.active ? ringColor : 'rgba(255,255,255,0)'}`,
-        boxShadow: voice.active
-          ? `0 0 0 2px color-mix(in srgb, ${ringColor} 35%, transparent), 0 2px 8px rgba(0,0,0,0.25)`
-          : '0 2px 8px rgba(0,0,0,0.20)',
+        background: 'rgba(255,255,255,0.92)',
+        border: 'none',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.20)',
         opacity: voice.disabled ? 0.4 : 1,
         cursor: voice.disabled ? 'not-allowed' : 'pointer',
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
         padding: 0,
-        // Breathe only on the RESTING pill while she replies. When voice mode is
-        // active the strands are already animating; pulsing the whole orb on top
-        // of them just read as jitter.
-        animation: isSending && !voice.active && !reduce
+        animation: isSending && !active && !reduce
           ? 'voice-breathing 1.6s ease-in-out infinite'
           : undefined,
-        transition:
-          'background 0.25s var(--ease-out-quart), box-shadow 0.25s var(--ease-out-quart), border-color 0.25s var(--ease-out-quart)',
+        transition: 'box-shadow 0.25s var(--ease-out-quart)',
       }}
     >
-      {voice.active ? (
-        <Strands
-          style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
-          colors={strandColors}
-          count={4}
-          speed={0.45 + strandEnergy * 1.1}
-          amplitude={0.9 + strandEnergy * 2.6}
-          waviness={1.15}
-          thickness={1.1}
-          glow={3.0}
-          taper={2.2}
-          spread={1}
-          intensity={0.5 + strandEnergy * 0.5}
-          // 1.0 = leave the (already monochrome) colours alone. The old 1.3
-          // pumped saturation, which is what made the strands read as neon.
-          saturation={1.0}
-          opacity={1}
-          scale={1.4}
-        />
-      ) : (
-        <MiniBars
-          mode={mode}
-          vadLevel={voice.vadLevel}
-          color={barColor}
-        />
-      )}
+      <VoiceBars energy={energy} color={barColor} />
     </button>
   );
 }
 
-type BarMode = 'idle' | 'live' | 'transcribing';
+// Equalizer bars for the voice orb. A center-tall fan that grows with the live
+// VAD `energy`: at rest it sits at a low resting height (BARS_REST), and each
+// bar's height rises smoothly toward its full weight as your voice level climbs.
+// Movement is driven entirely by `energy` (a CSS height transition lerps between
+// the ~60fps VAD updates), so the bars react to speech instead of animating on a
+// timer. No WebGL.
+// Steep center-tall fan: the middle bars dominate, edges fall off fast.
+const BAR_WEIGHTS = [0.35, 0.85, 1.0, 0.85, 0.35];
+const BARS_MAX_H = 24;
+const BARS_MIN_H = 3;
+const BARS_REST = 0.5; // resting fan height as a fraction of full, with no voice
+const BARS_GAP = 1.5;  // tight horizontal spacing between bars
 
-// Static "soundwave" pattern shown at rest. Decorative — reads as
-// audio bars even when no signal is driving them. Center bars taller,
-// edges shorter; combined with the BAR_FALLOFF math gives a tight
-// fan shape.
-const IDLE_PATTERN = [0.45, 0.85, 0.85, 0.45];
-
-function MiniBars({
-  mode, vadLevel, color,
-}: {
-  mode: BarMode;
-  vadLevel: number;
-  color: string;
-}) {
-  const totalW = NUM_BARS * BAR_W + (NUM_BARS - 1) * BAR_GAP;
-  const center = (NUM_BARS - 1) / 2;
+function VoiceBars({ energy, color }: { energy: number; color: string }) {
+  const e = Math.max(0, Math.min(1, energy));
+  const level = BARS_REST + (1 - BARS_REST) * e; // 0.4 (silent) → 1.0 (loud)
   return (
     <div
       aria-hidden
@@ -1623,44 +1578,23 @@ function MiniBars({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: BAR_GAP,
-        height: BAR_MAX,
-        width: totalW,
+        gap: BARS_GAP,
+        height: BARS_MAX_H,
       }}
     >
-      {Array.from({ length: NUM_BARS }).map((_, i) => {
-        const distance = Math.abs(i - center) / center;
-        let height: number;
-        if (mode === 'transcribing') {
-          // CSS keyframe scales these full-height bars; height stays fixed.
-          height = BAR_MAX;
-        } else if (mode === 'live') {
-          const local = Math.max(0, Math.min(1, vadLevel - distance * BAR_FALLOFF));
-          height = BAR_MIN + local * (BAR_MAX - BAR_MIN);
-        } else {
-          // idle — static decorative pattern.
-          const idle = IDLE_PATTERN[i] ?? 0.5;
-          height = BAR_MIN + idle * (BAR_MAX - BAR_MIN);
-        }
-        return (
-          <div
-            key={i}
-            style={{
-              width: BAR_W,
-              height,
-              borderRadius: 1,
-              background: color,
-              transformOrigin: 'center',
-              animation: mode === 'transcribing'
-                ? `voice-bar-wave ${WAVE_DURATION_MS}ms ease-in-out ${WAVE_DELAYS[i]}ms infinite`
-                : undefined,
-              transition: mode === 'transcribing'
-                ? 'background 250ms var(--ease-out-quart)'
-                : 'height 200ms var(--ease-out-quart), background 250ms var(--ease-out-quart)',
-            }}
-          />
-        );
-      })}
+      {BAR_WEIGHTS.map((w, i) => (
+        <div
+          key={i}
+          style={{
+            width: 2.5,
+            height: BARS_MIN_H + (BARS_MAX_H - BARS_MIN_H) * w * level,
+            borderRadius: 1.5,
+            background: color,
+            flexShrink: 0,
+            transition: 'height 120ms var(--ease-out-quart), background 220ms var(--ease-out-quart)',
+          }}
+        />
+      ))}
     </div>
   );
 }

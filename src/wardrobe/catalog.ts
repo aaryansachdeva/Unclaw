@@ -1,5 +1,5 @@
-// Wardrobe catalog for the CUSTOM characters (grace_custom / kevin_custom /
-// syd_custom). These builds expose far more than the original six: 34 hair, 18
+// Wardrobe catalog for the CUSTOM characters (grace_custom / kevin_custom).
+// These builds expose far more than the legacy characters: 34 hair, 18
 // brows, 6 lashes, plus the original clothing slots.
 //
 // `index` is the ONLY thing UE cares about — it's the array index into the
@@ -311,4 +311,21 @@ export function clampAgentIndex(items: WardrobeItem[], value: number | undefined
   const max = items.length;
   if (value == null || !Number.isFinite(value) || max === 0) return 0;
   return Math.max(0, Math.min(max - 1, Math.floor(value)));
+}
+
+/** The authored DEFAULT wardrobe indices a character ships with, per slot. Used
+ *  to dress a slot the user never saved (we send the character's default index,
+ *  NOT a -1 sentinel), so an uncustomized character lands on its intended look.
+ *  Legacy/base characters are 0 across the board (and have no brows/lashes). The
+ *  custom builds carry a specific default groom + brow + lash. */
+export interface WardrobeDefaults {
+  top: number; bottom: number; shoes: number; hair: number; brow: number; lash: number;
+}
+const LEGACY_WARDROBE_DEFAULTS: WardrobeDefaults = { top: 0, bottom: 0, shoes: 0, hair: 0, brow: 0, lash: 0 };
+const WARDROBE_DEFAULTS: Record<string, WardrobeDefaults> = {
+  grace_custom: { top: 0, bottom: 0, shoes: 0, hair: 31, brow: 1, lash: 2 },
+  kevin_custom: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0 },
+};
+export function wardrobeDefaultsFor(agentId?: string | null): WardrobeDefaults {
+  return (agentId && WARDROBE_DEFAULTS[agentId]) || LEGACY_WARDROBE_DEFAULTS;
 }
