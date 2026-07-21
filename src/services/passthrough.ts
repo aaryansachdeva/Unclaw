@@ -47,6 +47,10 @@ export interface PassthroughBridgeOptions {
    *  connect so the `speak` shim can gate on it (a passthrough session can be
    *  connected while still on the sign-in / setup screen). */
   getReady?: () => boolean;
+  /** The external coding agent driving passthrough, pushed by soul from the
+   *  shim's MCP handshake (name = "Claude Code" / "Codex" / ...; project =
+   *  the agent's cwd basename). null clears it. For the "Connected to X" UI. */
+  onAgent?: (agent: { name: string; project?: string | null } | null) => void;
   /** Optional: connection state changes, for a status pill. */
   onStatus?: (state: 'connecting' | 'open' | 'closed') => void;
 }
@@ -160,13 +164,16 @@ export function startPassthroughBridge(opts: PassthroughBridgeOptions): Passthro
       reportReady(opts.getReady?.() ?? false);
     };
     sock.onmessage = (ev) => {
-      let msg: PassthroughSpeakMsg;
+      let msg: { type?: string; name?: string; project?: string | null } & Partial<PassthroughSpeakMsg>;
       try {
-        msg = JSON.parse(ev.data as string) as PassthroughSpeakMsg;
+        msg = JSON.parse(ev.data as string);
       } catch {
         return;
       }
-      if (msg?.type === 'speak') enqueueSpeak(msg);
+      if (msg?.type === 'speak') enqueueSpeak(msg as PassthroughSpeakMsg);
+      else if (msg?.type === 'agent') {
+        opts.onAgent?.(msg.name ? { name: msg.name, project: msg.project ?? null } : null);
+      }
     };
     sock.onerror = () => {
       // onclose fires next; reconnect is handled there.

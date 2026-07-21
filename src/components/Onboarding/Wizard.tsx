@@ -401,34 +401,9 @@ export function Wizard({
     else setStep(stepOrder[stepIdx + 1]);
   };
 
-  const handleFinish = async () => {
-    if (!hasName) {
-      setStep('identity');
-      setError('Please enter your name.');
-      return;
-    }
-    if (missingKeyFields.length > 0) {
-      // Route the user back to whichever step holds the missing field
-      // so they can fix it. LLM-related fields (provider, model, key,
-      // agentic) live on the LLM page; everything else (voice provider
-      // or its install state) lives on the voice page.
-      const targetStep: StepKey = missingKeyFields.some((f) =>
-        f === 'LLM provider' || f === 'Model'
-        || f.endsWith('API key') && f !== 'ElevenLabs API key'
-        || f === 'Agentic model' || f === 'OpenAI key for agentic',
-      ) ? 'llm' : 'voice';
-      setStep(targetStep);
-      setError(`Please add: ${missingKeyFields.join(', ')}`);
-      return;
-    }
-    if (!keysValidated) {
-      // Fields are filled but the user hasn't pressed Verify (or
-      // they edited a key after a prior successful check). The voice
-      // page is the last one and hosts the verify panel.
-      setStep('voice');
-      setError('Press Verify before finishing.');
-      return;
-    }
+  // Save the profile + whatever BYOK keys are present, then complete. Shared by
+  // the gated Finish and the "Skip for now" path (which bypasses the key gate).
+  const finishOnboarding = async () => {
     setSubmitting(true);
     setError(null);
     try {
@@ -469,6 +444,49 @@ export function Wizard({
       setSubmitting(false);
       setError(err instanceof Error ? err.message : 'Save failed');
     }
+  };
+
+  const handleFinish = async () => {
+    if (!hasName) {
+      setStep('identity');
+      setError('Please enter your name.');
+      return;
+    }
+    if (missingKeyFields.length > 0) {
+      // Route the user back to whichever step holds the missing field
+      // so they can fix it. LLM-related fields (provider, model, key,
+      // agentic) live on the LLM page; everything else (voice provider
+      // or its install state) lives on the voice page.
+      const targetStep: StepKey = missingKeyFields.some((f) =>
+        f === 'LLM provider' || f === 'Model'
+        || f.endsWith('API key') && f !== 'ElevenLabs API key'
+        || f === 'Agentic model' || f === 'OpenAI key for agentic',
+      ) ? 'llm' : 'voice';
+      setStep(targetStep);
+      setError(`Please add: ${missingKeyFields.join(', ')}`);
+      return;
+    }
+    if (!keysValidated) {
+      // Fields are filled but the user hasn't pressed Verify (or
+      // they edited a key after a prior successful check). The voice
+      // page is the last one and hosts the verify panel.
+      setStep('voice');
+      setError('Press Verify before finishing.');
+      return;
+    }
+    await finishOnboarding();
+  };
+
+  // "Skip for now" on the LLM / voice steps: finish onboarding WITHOUT the key
+  // gate. Whatever keys the user did enter are still saved; the rest they set up
+  // later in Settings (the apiKeysNotice nudges them). Name is still required.
+  const handleSkipSetup = () => {
+    if (!hasName) {
+      setStep('identity');
+      setError('Please enter your name.');
+      return;
+    }
+    void finishOnboarding();
   };
 
   const onWizardKey = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -837,6 +855,28 @@ export function Wizard({
               );
             })}
           </div>
+
+          {/* Skip setup — on the BYOK steps (LLM / voice), let the user finish
+              without keys and configure later in Settings. Quiet secondary link
+              sitting just left of the primary action. */}
+          {(step === 'llm' || step === 'voice') && (
+            <button
+              type="button"
+              onClick={handleSkipSetup}
+              disabled={submitting}
+              style={{ ...footerLinkStyle, flexShrink: 0 }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.color = 'var(--text-primary)';
+                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = 'var(--text-secondary)';
+                e.currentTarget.style.background = 'transparent';
+              }}
+            >
+              Skip for now
+            </button>
+          )}
 
           {!isLastStep ? (
             <motion.button

@@ -86,6 +86,59 @@ function soulHttpBase() {
   return `http://${host}:${ports.http}`;
 }
 
+// --- connected-agent identity ---------------------------------------------
+//
+// The MCP client identifies itself in the `initialize` handshake
+// (clientInfo.name , "claude-code", "codex", "opencode", "openclaw", ...). We
+// surface that to the UnClaw UI ("Connected to Claude Code") via a best-effort
+// POST on connect + on every speak. process.cwd() is the agent's working dir
+// (usually its project), a lightweight session hint since MCP carries no
+// session id.
+
+let AGENT_NAME = null;    // friendly label, e.g. "Claude Code"
+let AGENT_PROJECT = null; // basename of the agent's cwd, e.g. "UnClaw"
+
+const AGENT_LABELS = {
+  'claude-code': 'Claude Code', claude: 'Claude Code',
+  codex: 'Codex', 'codex-cli': 'Codex',
+  opencode: 'opencode',
+  openclaw: 'OpenClaw',
+  gemini: 'Gemini CLI', 'gemini-cli': 'Gemini CLI',
+  cursor: 'Cursor', cline: 'Cline',
+  roo: 'Roo Code', 'roo-code': 'Roo Code',
+  windsurf: 'Windsurf',
+};
+
+function friendlyAgent(name) {
+  if (!name || typeof name !== 'string') return null;
+  return AGENT_LABELS[name.trim().toLowerCase()] || name.trim().slice(0, 40);
+}
+
+/** basename of the agent's cwd, if it's informative (not home/root/our dir). */
+function projectName() {
+  try {
+    const cwd = process.cwd();
+    if (!cwd || cwd === homedir()) return null;
+    const base = cwd.split(/[/\\]/).filter(Boolean).pop() || '';
+    return base && base !== '.unclaw' ? base.slice(0, 40) : null;
+  } catch { return null; }
+}
+
+/** Tell soul who's driving, before the first speak (best-effort , no-op if
+ *  UnClaw isn't up yet, in which case the first speak carries it instead). */
+async function postAgent() {
+  const base = soulHttpBase();
+  if (!base || !AGENT_NAME) return;
+  try {
+    await fetch(`${base}/passthrough/agent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent: AGENT_NAME, project: AGENT_PROJECT }),
+      signal: AbortSignal.timeout(4_000),
+    });
+  } catch { /* best-effort */ }
+}
+
 // --- HTTP calls -----------------------------------------------------------
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -99,7 +152,7 @@ async function speakOnce({ text, mood, action }) {
     res = await fetch(`${base}/passthrough/speak`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, mood: mood || null, action: action || null }),
+      body: JSON.stringify({ text, mood: mood || null, action: action || null, agent: AGENT_NAME, project: AGENT_PROJECT }),
       signal: AbortSignal.timeout(10_000),
     });
   } catch (e) {
@@ -270,6 +323,11 @@ function mcpServer() {
   async function handle(msg) {
     const { id, method, params } = msg;
     if (method === 'initialize') {
+      // Remember who connected (surfaced in the UnClaw UI). clientInfo.name is
+      // the agent id per the MCP handshake.
+      AGENT_NAME = friendlyAgent(params?.clientInfo?.name) || AGENT_NAME;
+      AGENT_PROJECT = projectName();
+      void postAgent(); // announce now if UnClaw is already up
       send({
         jsonrpc: '2.0', id,
         result: {

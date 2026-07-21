@@ -170,16 +170,48 @@ function isReminderAction(name: string | undefined): boolean {
  *  Talking via the TalkingTime timer, gestures via montage consume).
  *  Only doIdle persists, which is the point of idle rotation. */
 let idleRevertTimer: number | null = null;
-/** Drop a scheduled idle-revert. Called on character switch / reset so a
- *  timer armed for the PREVIOUS character can't fire a doIdle onto the next
- *  one (the revert idle number is character-agnostic in shape but was chosen
- *  for the body that scheduled it). */
+let talkRevertTimer: number | null = null;
+
+// Forced talk-exit. UE's own TalkingTime timer intermittently fails to leave the
+// Talking state and loops the clip unbounded (until the next idle beat happens
+// to break it, ~37s later). Rather than trust that exit, we OWN it: send a long
+// talkTime so UE never self-exits early, then drive the return to idle ourselves
+// after a randomized window. A doIdle is a hard state change UE can't ignore, so
+// the gesture can never loop past our window. The randomized 2-5s reads as a
+// natural "gesture for a bit, then settle" (Aryan's talk-body intent) and adds
+// variety so it doesn't feel metronomic.
+const TALK_HOLD_TIME_S = 10;       // talkTime we send; > TALK_REVERT_MAX so UE holds
+const TALK_REVERT_MIN_MS = 2000;
+const TALK_REVERT_MAX_MS = 5000;
+
+/** Drop scheduled idle/talk reverts. Called on character switch / reset so a
+ *  timer armed for the PREVIOUS character can't fire a doIdle onto the next one
+ *  (the revert idle number was chosen for the body that scheduled it). */
 function cancelScheduledIdleRevert(): void {
   if (idleRevertTimer !== null) {
     window.clearTimeout(idleRevertTimer);
     idleRevertTimer = null;
   }
+  if (talkRevertTimer !== null) {
+    window.clearTimeout(talkRevertTimer);
+    talkRevertTimer = null;
+  }
 }
+
+/** Force the body back to idle. Prefers soul's canonical current idle (which is
+ *  the home loop right after a talk) and falls back to the default idle so the
+ *  exit is guaranteed even if the fetch fails. */
+function forceBodyIdle(ps: { emitUIInteraction: (descriptor: object) => void }): void {
+  void fetchCurrentBodyIdle()
+    .then((idle) => {
+      if (idle && idle.length) dispatchBodyToUE(ps, idle);
+      else ps.emitUIInteraction({ EventType: 'doIdle', idleNum: 0, Timestamp: new Date().toISOString() });
+    })
+    .catch(() => {
+      ps.emitUIInteraction({ EventType: 'doIdle', idleNum: 0, Timestamp: new Date().toISOString() });
+    });
+}
+
 function dispatchBodyToUE(
   ps: { emitUIInteraction: (descriptor: object) => void },
   body: SoulBodyDirective[] | undefined,
@@ -187,19 +219,37 @@ function dispatchBodyToUE(
   if (!body?.length) return;
   for (const d of body) {
     const { event, clip, revertAfterS, revertIdleNum, ...fields } = d;
+    // Any fresh directive supersedes a pending revert (idle pick or talk-exit),
+    // so a stale timer can't fire a doIdle onto whatever's playing now.
     if (event === 'doIdle' && idleRevertTimer !== null) {
-      // A fresh idle pick supersedes any scheduled return-home.
       window.clearTimeout(idleRevertTimer);
       idleRevertTimer = null;
     }
+    if (talkRevertTimer !== null) {
+      window.clearTimeout(talkRevertTimer);
+      talkRevertTimer = null;
+    }
+    // Override talkTime so UE holds the Talking pose well past our revert window
+    // (we own the exit, below). Every other field / event passes through as-is.
+    const outFields = event === 'doTalking'
+      ? { ...fields, talkTime: TALK_HOLD_TIME_S }
+      : fields;
     ps.emitUIInteraction({
       EventType: event,
-      ...fields,
+      ...outFields,
       Timestamp: new Date().toISOString(),
     });
-    // Short idle VISITS carry a revert: after revertAfterS the body
-    // returns to the home loop (idle is the one state UE never exits
-    // on its own, and 5-10s is far finer than the idle-beat period).
+    // Talking: drive our own return to idle after a randomized 2-5s so UE can
+    // never loop the clip regardless of whether its TalkingTime exit fires.
+    if (event === 'doTalking') {
+      const delay = TALK_REVERT_MIN_MS + Math.random() * (TALK_REVERT_MAX_MS - TALK_REVERT_MIN_MS);
+      talkRevertTimer = window.setTimeout(() => {
+        talkRevertTimer = null;
+        forceBodyIdle(ps);
+      }, delay);
+    }
+    // Short idle VISITS carry a revert: after revertAfterS the body returns to
+    // the home loop (idle is the one state UE never exits on its own).
     if (event === 'doIdle'
         && typeof revertAfterS === 'number' && revertAfterS > 0
         && typeof revertIdleNum === 'number') {
@@ -581,6 +631,9 @@ function AppMain() {
   // persisted) — entered/exited via the unclaw://passthrough deep link so
   // a plain relaunch always comes back up in normal chat mode.
   const [passthrough, setPassthrough] = useState(false);
+  // Which external agent is driving passthrough (Claude Code / Codex / ...),
+  // pushed by soul from the shim's MCP handshake. Shown in the InputBar banner.
+  const [passthroughAgent, setPassthroughAgent] = useState<{ name: string; project?: string | null } | null>(null);
 
   // Chat history side-pane. When true, the gray utility pane slides in
   // from the right and the workspace wrapper's right anchor animates
@@ -1533,6 +1586,10 @@ function AppMain() {
    *  animation action (kiss/dance/hello), reminder-panel refresh, and
    *  the speaking-finished timer for the voice barge-in gate. Used both
    *  for the primary /chat response AND for each polled escalation step. */
+  // Set below (near applyCamera); called when a big body animation fires so the
+  // camera briefly pulls back to reveal it. A ref so the earlier chat callbacks
+  // can reach the later-defined camera helper.
+  const triggerActionCameraRef = useRef<(() => void) | null>(null);
   const dispatchChatResult = useCallback((result: SoulChatResult) => {
     let addedTurn: Turn | null = null;
     if (result.response) {
@@ -1599,6 +1656,7 @@ function AppMain() {
 
       if (isAnimAction && action) {
         dispatchActionToUE(pixelStreaming, action, result.response);
+        triggerActionCameraRef.current?.();
       }
       if (pixelStreaming) {
         dispatchBodyToUE(pixelStreaming, result.body);
@@ -1674,6 +1732,7 @@ function AppMain() {
         || action.name === 'celebrate';
       if (isAnim) {
         dispatchActionToUE(pixelStreaming, action, chunk.response);
+        triggerActionCameraRef.current?.();
       }
       if (isReminderAction(action.name)) {
         setRefreshKey(k => k + 1);
@@ -2208,6 +2267,8 @@ function AppMain() {
       Response: '',
       Timestamp: new Date().toISOString(),
     });
+    // Same reveal-then-return camera move as the chat-driven actions.
+    triggerActionCameraRef.current?.();
   }, [pixelStreaming]);
 
   // Voice failures (mic permission, worklet, etc.) otherwise reject straight to
@@ -2675,6 +2736,34 @@ function AppMain() {
   }, [pixelStreaming, activeAgentId, customizationActive, customizeCloseUp, cameraMode]);
   const applyCameraRef = useRef(applyCamera);
   applyCameraRef.current = applyCamera;
+
+  // Action camera. When a big body animation fires (kiss / dance / hello /
+  // celebrate / star-wars), briefly pull the camera back to the medium (waist)
+  // shot to reveal the whole gesture, hold ~1.5s, then return to the live
+  // framing. Skipped while customizing (that owns its own framing) and when
+  // already at the full pull-back (a move to waist would zoom IN). Re-arming
+  // (a second action) restarts the hold; the restore reads the CURRENT mode via
+  // applyCameraRef, so a manual toggle mid-action is honored.
+  const ACTION_CAMERA_HOLD_MS = 1500;
+  const actionCameraTimerRef = useRef<number | null>(null);
+  const triggerActionCamera = useCallback(() => {
+    if (!pixelStreaming || customizationActive || cameraMode === 'full') return;
+    const [x, y, z] = cameraForMode(activeAgentId, 'waist');
+    pixelStreaming.emitUIInteraction({
+      EventType: 'updateCameraFromLocation',
+      'locB.x': round3(x),
+      'locB.y': round3(y),
+      'locB.z': round3(z),
+      Timestamp: new Date().toISOString(),
+    });
+    if (actionCameraTimerRef.current !== null) window.clearTimeout(actionCameraTimerRef.current);
+    actionCameraTimerRef.current = window.setTimeout(() => {
+      actionCameraTimerRef.current = null;
+      applyCameraRef.current?.();
+    }, ACTION_CAMERA_HOLD_MS);
+  }, [pixelStreaming, activeAgentId, customizationActive, cameraMode]);
+  triggerActionCameraRef.current = triggerActionCamera;
+
   // Re-frame whenever the active character, the customize mode, or the chosen
   // camera mode changes (and once the stream is up). characterReady also nudges
   // this (below) so a fresh cold-boot spawn — which the connect-time emit races
@@ -3306,10 +3395,23 @@ function AppMain() {
       getVoices: () => personaVoicesRef.current,
       getPrefs: () => passthroughPrefsRef.current,
       getReady: () => (!!authTokenRef.current && !!profileRef.current),
+      onAgent: (a) => setPassthroughAgent(a),
     });
     passthroughBridgeRef.current = bridge;
-    return () => { bridge.stop(); passthroughBridgeRef.current = null; };
+    return () => { bridge.stop(); passthroughBridgeRef.current = null; setPassthroughAgent(null); };
   }, [passthrough, isConnected, pixelStreaming, dispatchChatResult]);
+
+  // Voice input and passthrough are mutually exclusive: in passthrough the
+  // user's coding agent drives the avatar (the app does no inference of its
+  // own), so a hot mic makes no sense , and its accent border + halo
+  // (voiceActive) would otherwise linger over the composer even after exiting
+  // passthrough. Stop any active voice/streaming the moment passthrough turns
+  // on; the guards make repeat runs a no-op.
+  useEffect(() => {
+    if (!passthrough) return;
+    if (voice.isListening) void voice.stop();
+    if (streaming.isActive) { streaming.stop(); streaming.reset(); }
+  }, [passthrough, voice, streaming]);
   // Re-report readiness if the user signs in / finishes onboarding while a
   // passthrough session is already open (bridge stays connected).
   useEffect(() => {
@@ -4014,6 +4116,11 @@ function AppMain() {
                   isSending={isSending}
                   passthrough={passthrough}
                   onExitPassthrough={() => setPassthrough(false)}
+                  passthroughAgent={passthroughAgent
+                    ? (passthroughAgent.project
+                        ? `${passthroughAgent.name} · ${passthroughAgent.project}`
+                        : passthroughAgent.name)
+                    : null}
                   passthroughVerbosity={passthroughPrefs.verbosity}
                   passthroughMuted={passthroughPrefs.muted}
                   onSetPassthroughVerbosity={setPassthroughVerbosity}
@@ -4054,7 +4161,7 @@ function AppMain() {
                   // (committed + tentative) as a gray overlay, which re-rendered
                   // every committed word a second time. Unconfirmed words are no
                   // longer drawn at all.
-                  voiceActive={streaming.isActive || voice.isListening}
+                  voiceActive={!passthrough && (streaming.isActive || voice.isListening)}
                   // The unstable transcriber tail, shown as a dim ghost after
                   // the committed text (which rides `message` via setText). The
                   // InputBar mirror renders committed once + this once, so no

@@ -74,6 +74,10 @@ interface InputBarProps {
    *  enabled" label + Exit button; the rest of the bar (agent switcher,
    *  widgets, customization) stays live. */
   passthrough?: boolean;
+  /** The external agent driving passthrough, e.g. "Claude Code" or
+   *  "Claude Code · UnClaw". When set, the banner reads "Connected to <agent>"
+   *  instead of the generic "Passthrough mode enabled". */
+  passthroughAgent?: string | null;
   /** Leave passthrough mode (backs the Exit button in the text field). */
   onExitPassthrough?: () => void;
   /** Talkativeness level shown in the inline passthrough control. */
@@ -179,6 +183,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   isSending,
   disabled,
   passthrough = false,
+  passthroughAgent = null,
   onExitPassthrough,
   passthroughVerbosity = 'balanced',
   passthroughMuted = false,
@@ -766,7 +771,9 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
                     color: passthroughMuted ? 'var(--text-ghost)' : 'var(--text-primary)',
                   }}
                 >
-                  {passthroughMuted ? 'Passthrough mode · muted' : 'Passthrough mode enabled'}
+                  {passthroughAgent
+                    ? (passthroughMuted ? `${passthroughAgent} · muted` : `Connected to ${passthroughAgent}`)
+                    : (passthroughMuted ? 'Passthrough mode · muted' : 'Passthrough mode enabled')}
                 </span>
               </span>
 
