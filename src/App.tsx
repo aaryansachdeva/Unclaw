@@ -41,6 +41,7 @@ import { useChatMemory, type Turn } from './hooks/useChatMemory';
 import { fetchCloudChat, pushCloudChat, gatherLocalChat, restoreLocalChat, deleteCloudChat } from './services/chatSync';
 import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
+import { detectEcho } from './voice/echoGuard';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
 import { chatViaSoul, streamChatViaSoul, fireIdle, fetchCurrentBodyIdle, SoulBodyDirective, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
 import { startPassthroughBridge } from './services/passthrough';
@@ -1502,6 +1503,57 @@ function AppMain() {
   // mode uses this to gate VAD and to detect barge-in.
   const isAISpeakingRef = useRef(false);
 
+  // Absolute deadline (performance.now() ms) through which the AI is
+  // considered to still be speaking. The boolean above is a coarse flag
+  // set at dispatch; this is the part that actually has to be right,
+  // because everything the mic hears before it is the avatar, not the
+  // user.
+  //
+  // Why a deadline instead of the single setTimeout this used to have:
+  // that timer was sized from `result.duration ?? 4` / `total_duration
+  // ?? 4000`. On any reply where soul reported no duration the gate
+  // closed after 4 s while the avatar kept talking, and every remaining
+  // word was transcribed and sent back as a user prompt. A deadline that
+  // each dispatched chunk pushes forward by its OWN duration can't drift
+  // that way: it always covers the audio actually scheduled.
+  const aiSpeakingUntilRef = useRef(0);
+
+  /** Hold the AI-speaking gate open for at least `ms` more. Monotonic —
+   *  never brings the deadline in, so an early/short chunk can't reopen
+   *  the mic while a later chunk is still queued to play. */
+  const holdAISpeaking = useCallback((ms: number) => {
+    if (!(ms > 0)) return;
+    const until = performance.now() + ms;
+    if (until > aiSpeakingUntilRef.current) aiSpeakingUntilRef.current = until;
+    isAISpeakingRef.current = true;
+  }, []);
+
+  /** Close the gate — but only if the audio we scheduled has actually
+   *  finished. A backstop timer sized from an early estimate must never
+   *  win over chunks that later extended the deadline; if it fires too
+   *  soon it re-arms itself for the remaining time instead of opening
+   *  the mic into the middle of a reply. */
+  const releaseAISpeaking = useCallback(() => {
+    const remaining = aiSpeakingUntilRef.current - performance.now();
+    if (remaining > 0) {
+      window.setTimeout(() => releaseAISpeaking(), Math.ceil(remaining));
+      return;
+    }
+    isAISpeakingRef.current = false;
+    aiSpeakingUntilRef.current = 0;
+    notifyAIFinishedRef.current();
+  }, []);
+
+  /** Close the gate NOW, deadline and all. For paths where the audio is
+   *  known not to be playing: aborted stream, provider error, user
+   *  cancel. Unlike releaseAISpeaking this must not wait, or a failed
+   *  turn would keep the mic shut for the duration of a reply that is
+   *  never going to be spoken. */
+  const forceReleaseAISpeaking = useCallback(() => {
+    isAISpeakingRef.current = false;
+    aiSpeakingUntilRef.current = 0;
+  }, []);
+
   // Forward declaration for cross-references between voice and chat.
   const notifyAIFinishedRef = useRef<() => void>(() => {});
 
@@ -1680,14 +1732,19 @@ function AppMain() {
       setRefreshKey(k => k + 1);
     }
 
-    isAISpeakingRef.current = true;
+    // Hold the gate for the reply's real audio length. The `?? 4` here
+    // used to be the whole story: on a reply soul reported no duration
+    // for, the mic reopened after 4 s and transcribed the rest of the
+    // avatar. Now the fallback is only the FLOOR — holdAISpeaking is
+    // monotonic, so a later, better estimate can still extend it, and
+    // releaseAISpeaking below refuses to close early.
     const speakSec = (result as { duration?: number }).duration ?? 4;
+    holdAISpeaking(speakSec * 1000 + 300);
     window.setTimeout(() => {
-      isAISpeakingRef.current = false;
-      notifyAIFinishedRef.current();
-    }, Math.round(speakSec * 1000));
+      releaseAISpeaking();
+    }, Math.round(speakSec * 1000) + 300);
     return addedTurn;
-  }, [pixelStreaming, memory]);
+  }, [pixelStreaming, memory, holdAISpeaking, releaseAISpeaking]);
 
   /** Dispatch ONE streaming chunk to UE. Mirrors the descriptor shape
    *  dispatchChatResult sends but skips memory + the speak-finished
@@ -1702,6 +1759,14 @@ function AppMain() {
    *  the authority on when each chunk plays. */
   const dispatchChatChunk = useCallback((chunk: SoulChatChunk) => {
     if (!pixelStreaming) return;
+    // This chunk's audio starts playing about now and runs for its own
+    // duration. Push the mic gate past it (plus a margin for the WebRTC
+    // hop and speaker decay) so the avatar's voice is never treated as
+    // the user's. Extending per chunk is what makes the gate track the
+    // real reply length instead of a single up-front estimate.
+    if (typeof chunk.duration === 'number' && chunk.duration > 0) {
+      holdAISpeaking(chunk.duration * 1000 + 300);
+    }
     pixelStreaming.emitUIInteraction({
       EventType: 'respond_with_mood_server',
       JobId: chunk.id,
@@ -1741,7 +1806,7 @@ function AppMain() {
     if (chunk.chunk_idx === 0 && pixelStreaming) {
       dispatchBodyToUE(pixelStreaming, chunk.body);
     }
-  }, [pixelStreaming]);
+  }, [pixelStreaming, holdAISpeaking]);
 
   /** Start a 1.2s poll loop against /escalation/{id}/next. Each polled
    *  result is dispatched through the same UE pipeline a primary /chat
@@ -1957,12 +2022,11 @@ function AppMain() {
       });
       // Gate /idle while the face plays, same pattern as the chat
       // result path.
-      isAISpeakingRef.current = true;
       const speakSec = result.duration ?? 3;
+      holdAISpeaking(speakSec * 1000 + 300);
       window.setTimeout(() => {
-        isAISpeakingRef.current = false;
-        notifyAIFinishedRef.current();
-      }, Math.round(speakSec * 1000));
+        releaseAISpeaking();
+      }, Math.round(speakSec * 1000) + 300);
     } catch (err) {
       console.warn('[express] failed', err);
     }
@@ -2004,7 +2068,7 @@ function AppMain() {
     // an escalation mid-flight just means the answer never arrives,
     // not that the visible activity should be erased.
     lastToolLabelRef.current = '';
-    isAISpeakingRef.current = false;
+    forceReleaseAISpeaking();
 
     // If a barge-in fired and resulted in this send, un-mute audio
     // (it was muted when barge-in started) and cancel the false-
@@ -2187,14 +2251,19 @@ function AppMain() {
           // hook fires and the voice agent can resume.
           const gapsMs = Math.max(0, totalChunks - 1) * interChunkGapMs;
           const speakMs = (totalDuration > 0 ? totalDuration * 1000 : 4000) + gapsMs;
+          // Floor only. Each dispatched chunk already pushed the gate past
+          // its own audio, so if this cumulative estimate is short (the
+          // 4000 fallback on a long reply, the case that leaked the whole
+          // tail of the avatar into the transcriber) releaseAISpeaking
+          // waits out the real deadline instead of opening the mic.
+          holdAISpeaking(speakMs);
           const timerId = window.setTimeout(() => {
             pendingChunkTimeoutsRef.current.delete(timerId);
             // Backstop only: the final chunk's dispatch normally closes the
             // utterance already. This covers a missing is_final / dropped final
             // chunk so the plugin never holds the speaking pose. Idempotent.
             endUtteranceOnce();
-            isAISpeakingRef.current = false;
-            notifyAIFinishedRef.current();
+            releaseAISpeaking();
           }, Math.round(speakMs));
           pendingChunkTimeoutsRef.current.add(timerId);
         }
@@ -2210,7 +2279,7 @@ function AppMain() {
         // Balance any open utterance so the plugin doesn't hold the speaking
         // pose (the plugin also self-heals after MaxHoldSeconds, but be tidy).
         endUtteranceOnce();
-        isAISpeakingRef.current = false;
+        forceReleaseAISpeaking();
       } finally {
         if (streamAbortRef.current === ac) streamAbortRef.current = null;
         setIsSending(false);
@@ -2244,11 +2313,11 @@ function AppMain() {
       if ((err as { name?: string })?.name !== 'AbortError') {
         setPipelineError(friendlyPipelineError(err));
       }
-      isAISpeakingRef.current = false;
+      forceReleaseAISpeaking();
     } finally {
       setIsSending(false);
     }
-  }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream, awardClawForInteraction]);
+  }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream, awardClawForInteraction, holdAISpeaking, releaseAISpeaking, forceReleaseAISpeaking]);
 
   // Slash-command animation dispatcher, hands a ready-to-go UE
   // descriptor to the dock so it can fire `/dance`, `/kiss`, `/hello`
@@ -2300,6 +2369,36 @@ function AppMain() {
     onTranscript: (text) => {
       const trimmed = text.trim();
       if (!trimmed) return;
+
+      // Echo guard. The timing gate can't be trusted: nothing observes
+      // real playback (UE never reports back), and the barge-in detector
+      // opens the gate mid-reply because the avatar's leaked voice IS
+      // confident speech. So check content instead — we know exactly what
+      // the avatar is saying, and a transcript made of its words is echo
+      // no matter what the clock thinks.
+      //
+      // `pendingInterruptedRef` holds the reply text captured at barge-in;
+      // `lastResponseRef` the most recent reply. Check both: the first
+      // covers a barge-in-opened gate, the second a gate that closed early
+      // on the 4 s fallback while the avatar was still talking.
+      const aiSpeech = pendingInterruptedRef.current || lastResponseRef.current || '';
+      const verdict = detectEcho(trimmed, aiSpeech);
+      if (verdict.isEcho) {
+        console.info(
+          `[voice] dropped echo of the avatar (${verdict.reason}): "${trimmed}"`,
+        );
+        // False barge-in: the avatar interrupted itself. Clear the
+        // pending-interrupt so the next real turn isn't told it cut off a
+        // reply that in fact ran to completion. The gate is untouched —
+        // barge-in no longer moves it, and its own timer still owns it.
+        if (pendingInterruptedRef.current !== null) {
+          pendingInterruptedRef.current = null;
+          clearBargeInTimer();
+        }
+        streaming.reset();
+        return;
+      }
+
       // Mirror the PTT visual: drop the final transcription into the
       // textarea so the user briefly sees what was heard, then send.
       // The InputBar's send path will clear the textarea on its way
@@ -2320,7 +2419,12 @@ function AppMain() {
         streaming.reset();
       }, 0);
     },
-    isAISpeaking: () => isAISpeakingRef.current,
+    // Gate is open while EITHER the coarse flag is set or the deadline
+    // hasn't passed. The deadline is the reliable half; the flag covers
+    // the window between deciding to speak and the first chunk arriving
+    // with a real duration.
+    isAISpeaking: () =>
+      isAISpeakingRef.current || performance.now() < aiSpeakingUntilRef.current,
     whisperPrompt: () => `Conversation with ${persona.displayName}.`,
     // Continuous voice mode pipes through the same Moonshine streaming
     // transcriber as push-to-talk, so the input bar shows partial
@@ -2335,14 +2439,30 @@ function AppMain() {
     },
     onBargeIn: () => {
       // Stage 1: tentative interruption, we've heard ~256 ms of
-      // confident user speech while the AI is talking. Mute audio
-      // immediately so the user has silence to talk into; cache
-      // what was being said so the next chat (if it actually
-      // fires) can pass it to the LLM as "you were interrupted
-      // saying X" context.
-      const v = document.querySelector('video');
-      if (v) v.muted = true;
-      isAISpeakingRef.current = false;
+      // confident speech while the AI is talking. Cache what was being
+      // said so the next chat (if it actually fires) can pass it to the
+      // LLM as "you were interrupted saying X" context.
+      //
+      // NOT muting the video and NOT clearing isAISpeakingRef here, both
+      // of which this used to do. On macOS neither is sound:
+      //
+      //   * Muting the <video> doesn't silence the avatar. The audible
+      //     copy is rendered by the Unreal process itself; the WebRTC
+      //     stream in this window is a second copy. Muting it changes
+      //     nothing you can hear.
+      //   * Clearing isAISpeakingRef opened the mic gate mid-reply, and
+      //     since the un-cancellable UE audio is what tripped barge-in in
+      //     the first place, the rest of the reply went straight into the
+      //     transcriber and back to the agent as a user prompt. The
+      //     detector was opening the gate against the very echo the gate
+      //     exists to block.
+      //
+      // VAD-based barge-in can only be trusted when the avatar's audio is
+      // cancellable, i.e. when it is rendered by this process. Until UE's
+      // local output is silenced on macOS (see _LocalAudioMuteMonitor,
+      // Windows-only), the detector cannot tell the user from the avatar,
+      // so it must not be allowed to unlock anything. The gate now closes
+      // only on its own timer.
       pendingInterruptedRef.current = lastResponseRef.current || null;
 
       // Stage 2: false-alarm guard, if no transcription comes
@@ -2356,8 +2476,10 @@ function AppMain() {
         // Only resume if no real chat fired in the meantime.
         if (pendingInterruptedRef.current !== null) {
           pendingInterruptedRef.current = null;
+          // Stage 1 no longer mutes, so there is nothing to unmute; this
+          // stays only to undo a mute left by an older build mid-session.
           const v2 = document.querySelector('video');
-          if (v2) v2.muted = false;
+          if (v2 && v2.muted) v2.muted = false;
           // Don't flip isAISpeakingRef back to true, the audio
           // was already in flight and its natural duration timer
           // (set in dispatchChatResult) will clear it normally.

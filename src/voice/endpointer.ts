@@ -29,6 +29,7 @@ import {
   VAD_DEACTIVATION_PROB,
   VAD_ACTIVATION_FRAMES,
   MAX_UTTERANCE_MS,
+  DEAD_BAND_TRAILING_FRAMES,
 } from './constants';
 import type { ProsodySnapshot } from './prosodyEngine';
 
@@ -64,12 +65,16 @@ export class Endpointer {
   private trailingStartTimeMs = 0;
   private currentMs = 0;
   private lastSilenceRequiredMs = ENDPOINT_BASE_MS;
+  /** Consecutive frames in `speech` whose prob never reached ACTIVATION.
+   *  Drives the dead-band escape — see DEAD_BAND_TRAILING_FRAMES. */
+  private subActivationFrames = 0;
 
   reset(): void {
     this.state = 'idle';
     this.armingFrames = 0;
     this.speechStartTimeMs = 0;
     this.trailingStartTimeMs = 0;
+    this.subActivationFrames = 0;
     this.lastSilenceRequiredMs = ENDPOINT_BASE_MS;
     // Note: currentMs is not reset — it's monotonic so timing math
     // (speech-start, trailing-start) stays valid across utterances.
@@ -111,9 +116,25 @@ export class Endpointer {
         break;
       }
       case 'speech': {
-        if (below) {
+        // Track how long we've gone without a confidently-speech frame.
+        // A dip below ACTIVATION isn't enough to leave `speech` (that's
+        // the hysteresis), but it must not be free either: without this
+        // counter a probability parked in the (DEACTIVATION, ACTIVATION)
+        // dead band holds `speech` open forever and the turn is never
+        // delivered to the agent.
+        if (above) this.subActivationFrames = 0;
+        else this.subActivationFrames += 1;
+
+        if (below || this.subActivationFrames >= DEAD_BAND_TRAILING_FRAMES) {
           this.state = 'trailing';
-          this.trailingStartTimeMs = this.currentMs;
+          // Anchor the trailing timer at the moment we actually stopped
+          // hearing confident speech, not at the frame the dead-band
+          // watchdog happened to trip. Otherwise the user pays for the
+          // watchdog window twice: once waiting it out, then again on
+          // the full silenceRequiredMs.
+          this.trailingStartTimeMs =
+            this.currentMs - this.subActivationFrames * FRAME_MS;
+          this.subActivationFrames = 0;
         }
         // Force endpoint if we've been speaking continuously past the cap.
         if (this.currentMs - this.speechStartTimeMs >= MAX_UTTERANCE_MS) {
@@ -127,6 +148,7 @@ export class Endpointer {
           // User resumed — clear trailing, return to speech.
           this.state = 'speech';
           this.trailingStartTimeMs = 0;
+          this.subActivationFrames = 0;
         } else {
           const elapsed = this.currentMs - this.trailingStartTimeMs;
           if (elapsed >= silenceRequiredMs) {
