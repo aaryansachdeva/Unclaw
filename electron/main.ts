@@ -1245,8 +1245,18 @@ function handleDeepLink(url: string | undefined | null) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('deep-link', url);
     if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+    // Passthrough links are machine-generated: the agent's `speak` shim
+    // opens unclaw://passthrough to make sure a session exists, which can
+    // happen at any moment while the user is typing in their terminal.
+    // Show the window, but do NOT take key status , see the matching note
+    // in App.tsx's deep-link handler. Every other link (checkout return,
+    // OAuth, user-initiated) is a deliberate hand-off and does focus.
+    if (/^unclaw:\/\/passthrough/.test(url)) {
+      mainWindow.showInactive();
+    } else {
+      mainWindow.show();
+      mainWindow.focus();
+    }
   } else {
     // Cold start: the renderer pulls this once it mounts.
     pendingDeepLink = url;
@@ -1265,7 +1275,9 @@ if (!gotSingleInstanceLock) {
     if (link) handleDeepLink(link);
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
+      // Same rule as handleDeepLink: a passthrough relaunch must not pull
+      // the user out of whatever they were typing in.
+      if (!link || !/^unclaw:\/\/passthrough/.test(link)) mainWindow.focus();
     }
   });
 }

@@ -1347,7 +1347,13 @@ function AppMain() {
       if (/store|purchased|checkout/.test(url)) void refreshEntitlements();
       if (/^unclaw:\/\/passthrough/.test(url)) {
         setPassthrough(!/[?&]off\b/.test(url));
-        window.electronAPI?.focusWindow?.();
+        // Deliberately NO focusWindow() here. This link fires whenever the
+        // agent's shim (re)launches passthrough , including mid-session, on
+        // a speak that raced a socket reconnect. Stealing key status then
+        // yanks the user out of the terminal they are working in, which is
+        // the whole point of an always-on-top companion NOT doing. The
+        // window is already floating above everything, so it is visible
+        // without being frontmost.
       }
     };
     const off = window.electronAPI?.onDeepLink?.(onLink);

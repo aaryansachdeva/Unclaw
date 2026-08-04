@@ -235,12 +235,24 @@ async function passthroughStatus() {
 
 // --- launch ---------------------------------------------------------------
 
-function launchPassthrough() {
-  // macOS: `open` the deep link. This cold-starts UnClaw (or focuses it if
-  // already running) and the app enters passthrough mode via its
-  // unclaw://passthrough deep-link handler.
+async function launchPassthrough() {
+  // Already live? Then there is nothing to launch, and re-opening the deep
+  // link would only churn window activation. This matters because agents
+  // call launch_unclaw defensively (the skill lists it as step 1) and the
+  // speak path retries it whenever a line lands during a socket reconnect.
+  const s = await passthroughStatus();
+  if (s.connected) return { ok: true, alreadyRunning: true };
+
+  // macOS: `open` the deep link, which cold-starts UnClaw (or wakes it) into
+  // passthrough via its unclaw://passthrough handler.
+  //
+  // `-g` (do not bring the application to the foreground) is load-bearing.
+  // Without it LaunchServices ACTIVATES UnClaw, ripping key-window status
+  // away from the terminal the user is working in , mid-keystroke, every
+  // time the agent speaks. UnClaw's window is always-on-top, so it is
+  // already visible; it does not need to be frontmost to be seen.
   return new Promise((resolve) => {
-    const child = spawn('open', ['unclaw://passthrough'], { stdio: 'ignore', detached: true });
+    const child = spawn('open', ['-g', 'unclaw://passthrough'], { stdio: 'ignore', detached: true });
     child.on('error', (e) => resolve({ ok: false, error: e.message }));
     child.on('spawn', () => { child.unref(); resolve({ ok: true }); });
   });
@@ -363,7 +375,9 @@ function mcpServer() {
         }
       } else if (name === 'launch_unclaw') {
         const r = await launchPassthrough();
-        text = r.ok ? 'UnClaw launching in passthrough mode.' : `Launch failed: ${r.error}`;
+        text = !r.ok ? `Launch failed: ${r.error}`
+          : r.alreadyRunning ? 'UnClaw is already live in passthrough mode , go ahead and speak.'
+          : 'UnClaw launching in passthrough mode.';
       } else if (name === 'unclaw_status') {
         const s = await passthroughStatus();
         text = !s.running ? 'UnClaw is not running , launch it first (launch_unclaw).'
@@ -403,7 +417,9 @@ async function main() {
 
   if (args.launch) {
     const r = await launchPassthrough();
-    console.log(r.ok ? 'UnClaw launching in passthrough mode.' : `Launch failed: ${r.error}`);
+    console.log(!r.ok ? `Launch failed: ${r.error}`
+      : r.alreadyRunning ? 'UnClaw already live in passthrough mode.'
+      : 'UnClaw launching in passthrough mode.');
     process.exit(r.ok ? 0 : 1);
   }
 
