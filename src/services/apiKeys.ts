@@ -14,6 +14,7 @@ export type LLMProviderId =
   | 'ollama'      // Local Ollama daemon — any locally-pulled model
   | 'deepseek'    // DeepSeek API (OpenAI-compatible) — deepseek-chat, -reasoner
   | 'xai'         // xAI Grok (OpenAI-compatible) — grok-2-latest, grok-beta
+  | 'cerebras'    // Cerebras Inference (OpenAI-compatible) — gpt-oss-120b, gemma-4-31b
   | 'glm'         // GLM / Zhipu z.ai (OpenAI-compatible) — glm-4.6, glm-4.5 family
   | 'anthropic'   // Anthropic Claude (OpenAI-compat shim) — claude-3.x family
   | 'gemini'      // Google Gemini (OpenAI-compat shim) — gemini-2.x family
@@ -323,6 +324,13 @@ export const LLM_PROVIDERS: ProviderInfo[] = [
     models: [],
   },
   {
+    id: 'cerebras',
+    label: 'Cerebras',
+    signupUrl: 'https://cloud.cerebras.ai/',
+    requiresApiKey: true,
+    models: [],
+  },
+  {
     id: 'glm',
     label: 'GLM (Zhipu)',
     signupUrl: 'https://z.ai/manage-apikey/apikey-list',
@@ -486,6 +494,13 @@ export function filterChatModels(
         // GLM / Zhipu z.ai. /models lists `glm-4.6`, `glm-4.5`,
         // `glm-4.5-air`, `glm-4-flash`, etc. All chat-capable.
         return lower.startsWith('glm-');
+
+      case 'cerebras':
+        // Cerebras serves only text LLMs (gpt-oss-120b, gemma-4-31b,
+        // zai-glm-4.7 as of 2026-07) and the lineup turns over fast —
+        // no stable name prefix to key on, so accept everything and
+        // just reject the non-chat families if they ever appear.
+        return !['whisper', 'embedding', 'tts', 'guard'].some((r) => lower.includes(r));
 
       case 'ollama':
         // Local Ollama tags vary wildly. Anything the user pulled
@@ -842,6 +857,7 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
           : ap === 'gemini' ? 'Gemini'
           : ap === 'deepseek' ? 'DeepSeek'
           : ap === 'xai' ? 'xAI'
+          : ap === 'cerebras' ? 'Cerebras'
           : ap === 'glm' ? 'GLM'
           : 'OpenAI';
         missing.push(`${providerLabel} key for agentic`);
