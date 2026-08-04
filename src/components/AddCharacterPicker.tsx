@@ -13,13 +13,18 @@
 
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { ArrowLeft, Plus, X, Pencil, Lock, Download } from 'lucide-react';
+import { ArrowLeft, Plus, X, Pencil, Lock, Download, ScanFace } from 'lucide-react';
 import { AGENTS, type Agent } from '../types';
 import type { AgentInstance } from '../hooks/useAgentStack';
 import { agentPortrait } from '../assets/agents';
 import { ClawsIcon } from './ClawsBalance';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
+
+/** Photo->custom-character capture flow. NOT ship-ready (local-inference dev
+ *  path only): the tile renders as "Coming soon" and the flow is unreachable
+ *  until this flips. */
+const CUSTOM_CAPTURE_ENABLED = false;
 
 /** One character row in the store grid, with its ownership + install state. */
 export interface StoreEntry {
@@ -46,11 +51,19 @@ interface AddCharacterPickerProps {
   onRename: (instanceId: string, name: string) => void;
   onRemove: (instanceId: string) => void;
   onCancel: () => void;
+  /** Opens the photo-capture flow (QR -> Unclaw Scan -> custom character). */
+  onAddCustom: () => void;
+  /** Saved photo-identity characters (roster instances on the generic host),
+   *  rendered as pickable cards after the catalog. */
+  customInstances?: { instanceId: string; name: string }[];
+  /** Switch to an EXISTING custom instance (vs onPick which adds a new one). */
+  onPickInstance?: (instanceId: string) => void;
 }
 
 export function AddCharacterPicker({
   entries, bundle, roster, agentById, baseInstanceId,
-  onPick, onBuy, onDownload, onRename, onRemove, onCancel,
+  onPick, onBuy, onDownload, onRename, onRemove, onCancel, onAddCustom,
+  customInstances, onPickInstance,
 }: AddCharacterPickerProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -168,6 +181,15 @@ export function AddCharacterPicker({
             onDownload={() => onDownload(e.agent.agentId)}
           />
         ))}
+        {(customInstances ?? []).map((c, i) => (
+          <CustomInstanceCard
+            key={c.instanceId}
+            name={c.name}
+            delay={0.12 + (entries.length + i) * 0.05}
+            onClick={() => onPickInstance?.(c.instanceId)}
+          />
+        ))}
+        <AddCustomCard delay={0.12 + (entries.length + (customInstances?.length ?? 0)) * 0.05} onClick={onAddCustom} />
       </div>
 
       {/* unlock-all bundle */}
@@ -519,6 +541,197 @@ function CharacterCard({
       }}>
         {agent.name}
       </span>
+    </motion.button>
+  );
+}
+
+// A saved photo-identity character: nameplate-style card (no authored
+// portrait) with the C badge, picking switches to the EXISTING instance.
+function CustomInstanceCard({ name, delay, onClick }: { name: string; delay: number; onClick: () => void }) {
+  return (
+    <motion.button
+      type="button"
+      onClick={onClick}
+      initial={{ opacity: 0, y: 10, scale: 0.96 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ duration: 0.5, ease: EASE_OUT_EXPO, delay }}
+      whileHover={{ y: -3, scale: 1.03 }}
+      whileTap={{ scale: 0.97 }}
+      style={{
+        pointerEvents: 'auto',
+        position: 'relative',
+        width: 116,
+        height: 148,
+        padding: 0,
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'stretch',
+        justifyContent: 'flex-end',
+        background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.55))',
+        border: '1px solid rgba(255, 255, 255, 0.10)',
+        borderRadius: 14,
+        backdropFilter: 'var(--glass-blur)',
+        WebkitBackdropFilter: 'var(--glass-blur)',
+        cursor: 'pointer',
+        color: 'var(--text-primary)',
+        boxShadow: '0 10px 28px -12px rgba(0,0,0,0.6)',
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          position: 'absolute',
+          inset: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '0 10px 22px',
+          textAlign: 'center',
+          fontSize: name.length > 5 ? 13 : 15,
+          fontWeight: 700,
+          letterSpacing: '0.2em',
+          textIndent: '0.2em',
+          textTransform: 'uppercase',
+          lineHeight: 1.3,
+          color: 'rgba(255,255,255,0.5)',
+          textShadow: '0 1px 6px rgba(0,0,0,0.7)',
+          background:
+            'radial-gradient(ellipse at 50% 42%, rgba(196,68,68,0.16) 0%, rgba(196,68,68,0.05) 42%, transparent 72%)',
+        }}
+      >
+        {name}
+      </span>
+      <span style={{ position: 'absolute', top: 7, left: 7, display: 'inline-flex', gap: 4, zIndex: 2 }}>
+        <TraitBadge letter="C" tint="var(--accent, #c44444)" title="Custom character" />
+      </span>
+      <span style={{
+        position: 'absolute', top: 7, right: 7,
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        width: 20, height: 20, borderRadius: '50%',
+        background: 'rgba(8,10,14,0.55)', border: '1px solid rgba(255,255,255,0.18)',
+        color: 'rgba(255,255,255,0.92)',
+        backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
+      }}>
+        <Plus size={12} strokeWidth={2.4} />
+      </span>
+      <span
+        aria-hidden
+        style={{
+          position: 'absolute', left: 0, right: 0, bottom: 0, height: 58,
+          background: 'linear-gradient(to top, rgba(8,10,14,0.86) 0%, rgba(8,10,14,0.45) 55%, transparent 100%)',
+        }}
+      />
+      <span style={{
+        position: 'relative',
+        padding: '0 12px 11px',
+        textAlign: 'left',
+        fontSize: 14,
+        fontWeight: 700,
+        letterSpacing: '0.03em',
+        textShadow: '0 1px 4px rgba(0,0,0,0.7)',
+      }}>
+        {name}
+      </span>
+    </motion.button>
+  );
+}
+
+// The "make your own" tile at the end of the store grid. Same footprint as a
+// CharacterCard but deliberately quieter: dashed hairline, no portrait, a
+// scan glyph over the same warm radial wash the nameplate fallback uses — it
+// reads as an invitation, not another character.
+function AddCustomCard({ delay, onClick }: { delay: number; onClick: () => void }) {
+  const enabled = CUSTOM_CAPTURE_ENABLED;
+  return (
+    <motion.button
+      type="button"
+      onClick={enabled ? onClick : undefined}
+      disabled={!enabled}
+      initial={{ opacity: 0, y: 10, scale: 0.96 }}
+      animate={{ opacity: enabled ? 1 : 0.55, y: 0, scale: 1 }}
+      transition={{ duration: 0.5, ease: EASE_OUT_EXPO, delay }}
+      whileHover={enabled ? { y: -3, scale: 1.03 } : undefined}
+      whileTap={enabled ? { scale: 0.97 } : undefined}
+      style={{
+        pointerEvents: 'auto',
+        position: 'relative',
+        width: 116,
+        height: 148,
+        padding: 0,
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 10,
+        background: 'var(--glass-bg, rgba(40, 48, 65, 0.38))',
+        border: '1px dashed rgba(255, 255, 255, 0.18)',
+        borderRadius: 14,
+        backdropFilter: 'var(--glass-blur)',
+        WebkitBackdropFilter: 'var(--glass-blur)',
+        cursor: enabled ? 'pointer' : 'default',
+        color: 'var(--text-primary)',
+        boxShadow: '0 10px 28px -12px rgba(0,0,0,0.6)',
+        transition: 'border-color 200ms var(--ease-out-quart)',
+      }}
+      onMouseEnter={enabled ? (e) => { e.currentTarget.style.borderColor = 'color-mix(in srgb, var(--accent, #c44444) 55%, transparent)'; } : undefined}
+      onMouseLeave={enabled ? (e) => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.18)'; } : undefined}
+    >
+      <span
+        aria-hidden
+        style={{
+          position: 'absolute',
+          inset: 0,
+          background:
+            'radial-gradient(ellipse at 50% 42%, rgba(196,68,68,0.14) 0%, rgba(196,68,68,0.04) 42%, transparent 72%)',
+        }}
+      />
+      <ScanFace
+        size={26}
+        strokeWidth={1.6}
+        style={{ position: 'relative', color: 'var(--text-secondary)', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))' }}
+      />
+      <span style={{
+        position: 'relative',
+        fontSize: 10.5,
+        fontWeight: 700,
+        letterSpacing: '0.14em',
+        textIndent: '0.14em',
+        textTransform: 'uppercase',
+        color: 'var(--text-secondary)',
+        textShadow: '0 1px 3px rgba(0,0,0,0.6)',
+      }}>
+        Add custom
+      </span>
+      {enabled ? (
+        <span style={{
+          position: 'relative',
+          margin: '0 12px',
+          fontSize: 9,
+          lineHeight: 1.45,
+          color: 'var(--text-ghost)',
+          textShadow: '0 1px 2px rgba(0,0,0,0.55)',
+        }}>
+          From a photo of you
+        </span>
+      ) : (
+        <span style={{
+          position: 'relative',
+          padding: '3px 9px',
+          borderRadius: 999,
+          fontSize: 8.5,
+          fontWeight: 700,
+          letterSpacing: '0.16em',
+          textIndent: '0.16em',
+          textTransform: 'uppercase',
+          color: 'color-mix(in srgb, var(--accent, #c44444) 45%, #ffffff)',
+          background: 'color-mix(in srgb, var(--accent, #c44444) 16%, rgba(8, 10, 14, 0.6))',
+          border: '1px solid color-mix(in srgb, var(--accent, #c44444) 40%, transparent)',
+        }}>
+          Coming soon
+        </span>
+      )}
     </motion.button>
   );
 }

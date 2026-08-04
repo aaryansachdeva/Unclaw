@@ -23,6 +23,7 @@ import { startSoul, stopSoul, restartSoul, getSoulSnapshot, getSoulPorts, writeS
 import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent, installedPakVersions } from './setupCoordinator';
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
+import { runLocalIdentityInference, runLocalPhotoInference, type GroomArgs } from './identityInference';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
 
 // Cap Chromium's GPU memory budget. By default Chromium scales its tile /
@@ -1289,6 +1290,32 @@ ipcMain.handle('deep-link:get-pending', () => {
   pendingDeepLink = null;
   return link;
 });
+
+// IPC: local photo->identity inference (DEV). The renderer downloads the
+// phone's capture.zip (it holds the auth token) and passes the bytes here;
+// main runs take-fabrication + the headless UE identity job and stages the
+// dna/blob artifacts into the UE container. Progress streams on
+// 'identity:progress'.
+ipcMain.handle(
+  'identity:run-inference',
+  async (_event, args: { sessionId: string; zipBytes: Uint8Array; groom?: GroomArgs }) => {
+    if (!args?.sessionId || !args?.zipBytes?.length) {
+      return { ok: false, error: 'invalid_args' };
+    }
+    return runLocalIdentityInference(mainWindow, args.sessionId, args.zipBytes, args.groom);
+  },
+);
+
+// IPC: photo-only tier -- any flat JPEG/PNG, depth synthesized by the ML stack.
+ipcMain.handle(
+  'identity:run-inference-photo',
+  async (_event, args: { localId: string; photoBytes: Uint8Array; ext: 'jpg' | 'png'; groom?: GroomArgs }) => {
+    if (!args?.localId || !args?.photoBytes?.length || !['jpg', 'png'].includes(args?.ext)) {
+      return { ok: false, error: 'invalid_args' };
+    }
+    return runLocalPhotoInference(mainWindow, args.localId, args.photoBytes, args.ext, args.groom);
+  },
+);
 
 // IPC: download + extract a purchased character pak. The renderer fetches the
 // short-lived presigned URL from the store Worker (it holds the auth token)

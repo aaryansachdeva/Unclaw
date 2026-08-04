@@ -123,6 +123,22 @@ export const HAIR: WardrobeItem[] = groom('hair', [
   ['Hair_S_UpdoBuns', 'Updo Buns'],
 ]);
 
+/** Hair gender suitability by HAIR index (Aryan-authored, 2026-08-03). Used
+ *  to constrain the vision grooming pick to styles valid for the character's
+ *  gender; 'both' passes every filter. */
+export const HAIR_GENDER: ReadonlyArray<'m' | 'f' | 'both'> = [
+  'both', 'f', 'f', 'f', 'f', 'f', 'both', 'f', 'f',          // 0-8
+  'm', 'm', 'm', 'm', 'both',                                 // 9-13
+  'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', // 14-25
+  'm', 'm', 'm', 'm', 'm',                                    // 26-30
+  'f', 'f', 'f',                                              // 31-33
+];
+
+/** Hair items suitable for a gender ('both'-tagged items always included). */
+export function hairForGender(gender: 'm' | 'f'): WardrobeItem[] {
+  return HAIR.filter((h) => (HAIR_GENDER[h.index] ?? 'both') !== (gender === 'm' ? 'f' : 'm'));
+}
+
 export const BROWS: WardrobeItem[] = groom('brows', [
   ['Eyebrows_L_Scraggly', 'Scraggly'],
   ['Eyebrows_L_Shaded', 'Long Shaded'],
@@ -193,7 +209,9 @@ export function clampCustomIndex(cat: CustomCategory, value: number | undefined)
 
 /** True for the character ids that use this expanded wardrobe. */
 export function isCustomCharacter(agentId: string | null | undefined): boolean {
-  return !!agentId && agentId.endsWith('_custom');
+  // m_generic is the photo-identity host: a custom-pipeline build whose id
+  // deliberately has no _custom suffix (it is the shipped generic, not a user).
+  return !!agentId && (agentId.endsWith('_custom') || agentId === 'm_generic');
 }
 
 // ======================================================================
@@ -325,6 +343,8 @@ const LEGACY_WARDROBE_DEFAULTS: WardrobeDefaults = { top: 0, bottom: 0, shoes: 0
 const WARDROBE_DEFAULTS: Record<string, WardrobeDefaults> = {
   grace_custom: { top: 0, bottom: 0, shoes: 0, hair: 31, brow: 1, lash: 2 },
   kevin_custom: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0 },
+  // Same male grooming baseline as kevin until the generic gets authored looks.
+  m_generic: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0 },
 };
 export function wardrobeDefaultsFor(agentId?: string | null): WardrobeDefaults {
   return (agentId && WARDROBE_DEFAULTS[agentId]) || LEGACY_WARDROBE_DEFAULTS;

@@ -69,9 +69,10 @@ import { resetEverything } from './services/accountReset';
 import { fetchApiKeys, modelSupportsVision } from './services/apiKeys';
 import { Wizard } from './components/Onboarding/Wizard';
 import { characterFor } from './characters';
-import { AGENTS, type Agent } from './types';
-import { useAgentStack, BASE_AGENT, BASE_INSTANCE_ID } from './hooks/useAgentStack';
+import { AGENTS, GENERIC_MALE_AGENT, type Agent } from './types';
+import { useAgentStack, BASE_AGENT, BASE_INSTANCE_ID, type AgentInstance } from './hooks/useAgentStack';
 import { AddCharacterPicker, type StoreEntry } from './components/AddCharacterPicker';
+import { AddCustomOverlay } from './components/AddCustomOverlay';
 import { ClawsBalance } from './components/ClawsBalance';
 import { fetchClaws, earnClaws, spendOnCharacter, CHARACTER_CLAW_COST } from './services/claws';
 import {
@@ -506,7 +507,7 @@ function AppMain() {
   // switcher carousel is selected. The carousel is [...stack, ADD_SLOT]; the
   // ADD_SLOT opens the picker over a blank stage. `selectedInstanceId` holds a
   // real roster instance id or ADD_SLOT.
-  const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, resetStack, hydrateStack } = useAgentStack();
+  const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, resetStack, hydrateStack } = useAgentStack();
   // Global environment — backdrop + key light + post effect (persists across
   // agents, NOT per-instance). See src/hooks/useEnvironment.ts. Applied on every
   // switch + whenever it changes.
@@ -517,6 +518,10 @@ function AppMain() {
   // Selected carousel slot: a roster instance id, or ADD_SLOT for the picker.
   const [selectedInstanceId, setSelectedInstanceId] = useState<string>(BASE_INSTANCE_ID);
   const [addPickerOpen, setAddPickerOpen] = useState(false);
+  // Photo-capture flow (QR -> Unclaw Scan -> custom character), layered over
+  // the picker. Deliberately NOT gated on isConnected: losing the stream
+  // mid-capture must not tear down the session/QR.
+  const [addCustomOpen, setAddCustomOpen] = useState(false);
   // Which instance the switcher returns to when the Add picker is cancelled.
   const addReturnRef = useRef<string>(BASE_INSTANCE_ID);
   // Characters UE reports as actually loaded (mount-aware), via the
@@ -615,6 +620,10 @@ function AppMain() {
   // Full-screen customization mode, orthogonal to the rail sheets.
   // The wardrobe rail icon flips this; everything else stays.
   const [customizationActive, setCustomizationActive] = useState(false);
+  // Fresh photo-identity generation: agentId whose next characterReady should
+  // land the user in the customization UI (name + style the new character).
+  const customizeOnReadyRef = useRef<string | null>(null);
+  const openCustomizationRef = useRef<(() => void) | null>(null);
   // Live post-effect preview while customizing. Effects never reach UE (they're
   // composited over the <video> here), so they can't ride the descriptor path
   // like everything else. null = show whatever the instance has saved.
@@ -864,7 +873,12 @@ function AppMain() {
   // roster). "Available" = the whole catalog for now; the UE
   // `installedCharacters` reply will narrow this to downloaded characters.
   const agentById = useMemo(
-    () => Object.fromEntries(AGENTS.map((a) => [a.agentId, a] as const)) as Record<string, Agent>,
+    () => ({
+      ...(Object.fromEntries(AGENTS.map((a) => [a.agentId, a] as const)) as Record<string, Agent>),
+      // Resolvable for roster/name/wardrobe purposes, but never a store card
+      // (storeEntries maps AGENTS only).
+      [GENERIC_MALE_AGENT.agentId]: GENERIC_MALE_AGENT,
+    }),
     [],
   );
   // Store gating. A character is pickable only when OWNED (bought, or a free
@@ -1056,9 +1070,16 @@ function AppMain() {
       top:     idx(wardrobe?.topIndex,    def.top),
       bottom:  idx(wardrobe?.bottomIndex, def.bottom),
       shoes:   idx(wardrobe?.shoesIndex,  def.shoes),
-      hair:    idx(wardrobe?.hairIndex,   def.hair),
-      eyelash: idx(wardrobe?.lashIndex,   def.lash),
-      eyebrow: idx(wardrobe?.browIndex,   def.brow),
+      // GROOM SLOTS SHIP THE DEFAULTS, NEVER THE SAVED INDEX. Root cause of
+      // the hair-not-applied-on-switch bug: the merged switch AND the
+      // characterReady dress chain both applied the same saved groom index,
+      // and the two async groom loads raced across the spawn window (UE
+      // applies silently, no ack exists for groom slots, so the loss was
+      // undetectable). The character now spawns on its authored groom and the
+      // ready-dress chain is the SINGLE application path for saved grooming.
+      hair:    def.hair,
+      eyelash: def.lash,
+      eyebrow: def.brow,
     });
   }, [pixelStreaming]);
 
@@ -2729,6 +2750,41 @@ function AppMain() {
   }, [pixelStreaming, waitForAck]);
   applyInstanceWardrobeRef.current = applyInstanceWardrobe;
 
+  // PHOTO IDENTITY: send the instance's dna/blob/basecolor to UE. Called from
+  // BOTH spawn-completion paths (characterReady + the on-target reconcile),
+  // mirroring the wardrobe re-apply discipline: an identity, like an outfit,
+  // is renderer-owned state that must be re-asserted after every spawn.
+  const emitApplyIdentity = useCallback((inst?: AgentInstance | null) => {
+    const identity = inst?.identity;
+    if (!identity?.blobPath || !pixelStreaming) return;
+    pixelStreaming.emitUIInteraction({
+      EventType: 'applyIdentity',
+      dnaPath: identity.dnaPath ?? '',
+      blobPath: identity.blobPath,
+      baseColorPath: identity.baseColorPath ?? '',
+      Timestamp: new Date().toISOString(),
+    });
+    console.log('[identity] applyIdentity sent for', inst?.agentId, identity);
+  }, [pixelStreaming]);
+  const emitApplyIdentityRef = useRef(emitApplyIdentity);
+  emitApplyIdentityRef.current = emitApplyIdentity;
+
+  // Log UE's identityApplied ack (observability only; the apply is UE-side
+  // synchronous, nothing downstream blocks on this).
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const onResponse = (resp: string) => {
+      try {
+        const msg = JSON.parse(resp);
+        if (msg?.EventType === 'identityApplied') console.log('[identity] UE ack:', msg);
+      } catch { /* not ours */ }
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ps = pixelStreaming as any;
+    ps.addResponseEventListener?.('unclaw-identity-applied', onResponse);
+    return () => ps.removeResponseEventListener?.('unclaw-identity-applied');
+  }, [pixelStreaming]);
+
   // GLOBAL environment apply. The backdrop (changeBGColor + changeBGMaterial)
   // AND the key light (changeLightAngle + changeLightColor) are persistent-level
   // actors, not character-owned, so they're set once globally and re-asserted on
@@ -3011,6 +3067,20 @@ function AppMain() {
         pending.agentId === inst.agentId.toLowerCase() &&
         dressEpochRef.current === pending.epoch;
       if (continuesSwitch) pendingSwitchRef.current = null;
+      console.log('[dress] characterReady spawned=', spawned, 'inst=', inst?.id,
+        inst?.agentId, 'wardrobe=', JSON.stringify(inst?.wardrobe ?? null));
+      // Photo identity FIRST: the body just spawned (this is the only signal
+      // that the async load finished), so the dna/blob/basecolor descriptor
+      // lands on a real face before the outfit chain runs. Fire-and-forget:
+      // UE acks with identityApplied (logged below); the morph/DNA apply is
+      // synchronous UE-side so the dress chain can pipeline behind it.
+      emitApplyIdentityRef.current?.(inst);
+      // Fresh-generation landing: open the customization UI (name + style)
+      // once the newly created custom character is actually on stage.
+      if (customizeOnReadyRef.current && customizeOnReadyRef.current === spawned) {
+        customizeOnReadyRef.current = null;
+        openCustomizationRef.current?.();
+      }
       // Dress the per-character OUTFIT (clothing/colors/blends) now that the body
       // exists. Light + backdrop are GLOBAL and were re-asserted by
       // applyEnvironmentRef above, so they're not part of this per-instance
@@ -3180,6 +3250,9 @@ function AppMain() {
         const live = ueAgent || inst.agentId.toLowerCase();
         ueActiveAgentRef.current = live;  // already on-screen; no characterReady will fire
         setUeActiveAgentId(live);
+        // Identity before outfit, same as the characterReady path: this
+        // reconcile lands on an already-live character with no ready signal.
+        emitApplyIdentityRef.current?.(inst);
         void applyInstanceWardrobe(inst.wardrobe, inst.agentId);
         // Re-assert the GLOBAL environment (backdrop color + key light) too.
         // No characterReady fires on this path, so without this the saved
@@ -3489,6 +3562,16 @@ function AppMain() {
     setEffectPreview(null);
   }, []);
 
+  // Programmatic customization entry (fresh-generation landing): same setup
+  // the widget-rail toggle performs.
+  const openCustomization = useCallback(() => {
+    setActiveWidget(null);
+    setChatPaneOpen(false);
+    setCustomizeCloseUp(true);
+    setCustomizationActive(true);
+  }, []);
+  openCustomizationRef.current = openCustomization;
+
   const isConnected = connectionState === 'connected';
 
   // Passthrough bridge. While in passthrough mode + connected, subscribe
@@ -3510,10 +3593,17 @@ function AppMain() {
   // setup screen (where /speak can't render , no keys). Reported over the WS.
   const passthroughReady = !!authToken && !!profile;
   const passthroughBridgeRef = useRef<{ stop: () => void; reportReady: (r: boolean) => void } | null>(null);
+  // Read through a ref, like getVoices/getPrefs above. dispatchChatResult is a
+  // useCallback keyed on `memory`, so it gets a fresh identity after EVERY
+  // turn , having it in the dep array below tore down and re-dialled the WS
+  // constantly, which dropped the pending speak queue and (before soul made
+  // the agent sticky) wiped the "Connected to <agent>" label on each flap.
+  const dispatchChatResultRef = useRef(dispatchChatResult);
+  dispatchChatResultRef.current = dispatchChatResult;
   useEffect(() => {
     if (!passthrough || !isConnected || !pixelStreaming) return undefined;
     const bridge = startPassthroughBridge({
-      onRendered: (result) => { dispatchChatResult(result); },
+      onRendered: (result) => { dispatchChatResultRef.current(result); },
       getVoices: () => personaVoicesRef.current,
       getPrefs: () => passthroughPrefsRef.current,
       getReady: () => (!!authTokenRef.current && !!profileRef.current),
@@ -3521,7 +3611,7 @@ function AppMain() {
     });
     passthroughBridgeRef.current = bridge;
     return () => { bridge.stop(); passthroughBridgeRef.current = null; setPassthroughAgent(null); };
-  }, [passthrough, isConnected, pixelStreaming, dispatchChatResult]);
+  }, [passthrough, isConnected, pixelStreaming]);
 
   // Voice input and passthrough are mutually exclusive: in passthrough the
   // user's coding agent drives the avatar (the app does no inference of its
@@ -3948,6 +4038,10 @@ function AppMain() {
             onCloseUpChange={setCustomizeCloseUp}
             bgMode={environment.bgmode}
             onBgMode={(m) => setEnvironment({ bgmode: m })}
+            instanceName={currentInstance?.name ?? ''}
+            onRenameInstance={currentInstance?.agentId === 'm_generic' && currentInstance
+              ? (name) => renameInstance(currentInstance.id, name)
+              : undefined}
           />
         )}
       </AnimatePresence>
@@ -3969,6 +4063,43 @@ function AppMain() {
             onRename={renameInstance}
             onRemove={handleRemoveInstance}
             onCancel={handleCancelAdd}
+            onAddCustom={() => setAddCustomOpen(true)}
+            customInstances={agentStack
+              .filter((i) => i.agentId === 'm_generic')
+              .map((i) => ({ instanceId: i.id, name: i.name?.trim() || 'Custom' }))}
+            onPickInstance={(instanceId) => selectInstance(instanceId, 1)}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Photo-capture flow for a custom agent, layered over the picker. */}
+      <AnimatePresence>
+        {addCustomOpen && (
+          <AddCustomOverlay
+            key="add-custom"
+            authToken={authToken ?? null}
+            onClose={() => setAddCustomOpen(false)}
+            onIdentityReady={({ dnaPath, blobPath, baseColorPath, grooming }) => {
+              // The local pipeline produced the identity artifacts: create the
+              // custom instance on the generic host and switch to it. The
+              // characterReady handler sends applyIdentity once UE reports the
+              // spawn complete (and again on every future reconcile), then
+              // lands the user in the customization UI to name + style it.
+              const id = addInstance('m_generic');
+              setInstanceIdentity(id, { dnaPath, blobPath, baseColorPath, gender: grooming?.gender });
+              // Vision-picked grooming becomes the instance's starting
+              // wardrobe, so the character spawns with hair/brows/lashes
+              // matched to the photo instead of the generic's defaults.
+              const wardrobe: WardrobeSettings | null = grooming
+                ? { hairIndex: grooming.hairIndex, browIndex: grooming.browIndex, lashIndex: grooming.lashIndex }
+                : null;
+              if (wardrobe) setInstanceWardrobe(id, wardrobe);
+              setSelectedInstanceId(id);
+              setAddCustomOpen(false);
+              setAddPickerOpen(false);
+              customizeOnReadyRef.current = 'm_generic';
+              switchUeToAgent('m_generic', 1, wardrobe);
+            }}
           />
         )}
       </AnimatePresence>

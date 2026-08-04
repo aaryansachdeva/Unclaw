@@ -107,10 +107,16 @@ export function buildDressPayloads(
       const index = (v == null || !Number.isFinite(v)) ? fallback : Math.floor(v);
       out.push({ EventType: 'changeWardrobeItem', wardrobeCategory: cat, wardrobeIndex: index });
     };
-    item('hair',   w.hairIndex,   def.hair);
+    // Clothing FIRST, grooming LAST: a freshly spawned character is still
+    // initializing its groom system (runtime bindings) when characterReady
+    // fires, and a hair descriptor landing in that window was intermittently
+    // eaten (hair-not-applied-on-switch bug). Clothing slots are plain mesh
+    // swaps and tolerate the early window; grooming gets the extra
+    // milliseconds of chain time PLUS the ack-verified retry below.
     item('top',    w.topIndex,    def.top);
     item('bottom', w.bottomIndex, def.bottom);
     item('shoes',  w.shoesIndex,  def.shoes);
+    item('hair',   w.hairIndex,   def.hair);
     if (isCustomCharacter(agentId)) {
       // Base/legacy characters have no selectable brows/lashes (one baked each).
       item('eyebrow', w.browIndex, def.brow);
@@ -153,7 +159,7 @@ export async function dressCharacter(
     return true;
   };
 
-  // Arm the probe BEFORE the first send so a same-tick ack can't slip past.
+  // Arm the chain probe BEFORE the first send so a same-tick ack can't slip past.
   const probe = waitForAck(payloads[0].EventType, 1500);
   if (!fireAll()) return 'aborted';
 
@@ -165,6 +171,27 @@ export async function dressCharacter(
     // apply. No further waiting either way.
     console.warn(`[wardrobe] no ack for ${payloads[0].EventType}; re-firing ${scope} chain once`);
     fireAll();
+  }
+
+  // GROOM CONFIRMATION RE-SEND. UE applies groom slots silently -- there is
+  // NO updateHairSuccess-style ack in the shipped BP (verified in game.log),
+  // so a dropped hair application is undetectable in-band. What IS proven to
+  // recover it every time is a later re-send of the same index (that's why a
+  // refresh always fixed the hair bug: reconcile re-dresses long after the
+  // groom system settled). So: one deferred re-send of just the groom items,
+  // after the spawn window has definitely passed. Epoch-guarded; re-applying
+  // an already-correct groom is visually idempotent.
+  const groomPayloads = payloads.filter(
+    (p) => p.EventType === 'changeWardrobeItem'
+      && ['hair', 'eyebrow', 'eyelash'].includes(String(p.wardrobeCategory)),
+  );
+  if (groomPayloads.length > 0 && isAlive()) {
+    await new Promise((r) => setTimeout(r, 1400));
+    if (isAlive()) {
+      for (const p of groomPayloads) emit(p);
+      console.log('[wardrobe] groom confirmation re-send:',
+        groomPayloads.map((p) => `${p.wardrobeCategory}=${p.wardrobeIndex}`).join(' '));
+    }
   }
 
   const aborted = !isAlive();

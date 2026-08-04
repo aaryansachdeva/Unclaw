@@ -98,9 +98,13 @@ interface CustomWardrobeProps {
   bgMode?: number;
   /** Persist a new global backdrop style index. */
   onBgMode?: (index: number) => void;
+  /** Photo-identity agents only: current instance name + rename persister.
+   *  When provided, a "name your character" field renders in the toolbar. */
+  instanceName?: string;
+  onRenameInstance?: (name: string) => void;
 }
 
-export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onEffect, onCloseUpChange, bgMode, onBgMode }: CustomWardrobeProps) {
+export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onEffect, onCloseUpChange, bgMode, onBgMode, instanceName, onRenameInstance }: CustomWardrobeProps) {
   // The wardrobe surface for THIS character: which categories exist, their
   // items (per-character hair, shared/subset clothing), whether body blends
   // apply. Memoized on agentId so a switch mid-session re-resolves.
@@ -470,6 +474,32 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             flex: '0 0 auto', width: 1, height: 16,
             background: 'rgba(255,255,255,0.08)',
           }} />
+          {onRenameInstance && (
+            <input
+              defaultValue={instanceName ?? ''}
+              placeholder="Name your character"
+              maxLength={24}
+              onBlur={(e) => onRenameInstance(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+              }}
+              style={{
+                flex: '0 0 auto',
+                width: 150,
+                padding: '5px 10px',
+                borderRadius: 999,
+                background: 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.12)',
+                outline: 'none',
+                color: 'var(--text-primary)',
+                fontFamily: 'inherit',
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: '0.03em',
+              }}
+            />
+          )}
           <SaveButton onClick={handleSave} />
         </div>
 

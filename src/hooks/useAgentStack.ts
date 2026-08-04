@@ -27,6 +27,10 @@ export interface AgentInstance {
    *  every switch into this instance (see applyInstanceWardrobe). Absent
    *  = never customized; the character keeps its authored UE defaults. */
   wardrobe?: WardrobeSettings;
+  /** Photo-identity files (custom characters on the generic host). Re-sent
+   *  as an applyIdentity descriptor after every spawn/reconcile of this
+   *  instance, exactly like wardrobe. Paths are local absolute paths. */
+  identity?: { dnaPath: string; blobPath: string; baseColorPath?: string; gender?: 'm' | 'f' };
 }
 
 function makeId(): string {
@@ -136,6 +140,14 @@ export function useAgentStack() {
   /** Persist this instance's outfit (clothing indices + colors + lighting).
    *  Called by the customization overlay's save so the look follows the
    *  instance and is re-applied to UE every time it's switched back to. */
+  const setInstanceIdentity = useCallback((id: string, identity: AgentInstance['identity']) => {
+    setStack((prev) => {
+      const next = prev.map((i) => (i.id === id ? { ...i, identity } : i));
+      save(next);
+      return next;
+    });
+  }, []);
+
   const setInstanceWardrobe = useCallback((id: string, wardrobe: WardrobeSettings) => {
     setStack((prev) => {
       const next = prev.map((i) => (i.id === id ? { ...i, wardrobe } : i));
@@ -164,5 +176,5 @@ export function useAgentStack() {
     setStack(next);
   }, []);
 
-  return { stack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, resetStack, hydrateStack };
+  return { stack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, resetStack, hydrateStack };
 }
