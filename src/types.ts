@@ -37,3 +37,9 @@ export const AGENTS: Agent[] = [
   { id: 5, name: 'Joi',   agentId: 'joi' },
   { id: 6, name: 'Kevin', agentId: 'kevin_custom', custom: true, optimized: true },
 ];
+
+// The photo-identity host: spawns as the generic male, personalized at runtime
+// by the applyIdentity descriptor (dna + morph blob + basecolor). NOT in
+// AGENTS: it never appears as a store card; instances are created by the
+// Add-custom capture flow and live only in the roster.
+export const GENERIC_MALE_AGENT: Agent = { id: 100, name: 'Custom', agentId: 'm_generic', custom: true, optimized: true };

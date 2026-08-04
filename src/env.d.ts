@@ -195,6 +195,17 @@ interface ElectronAPI {
   // Character store. The renderer resolves the presigned pak URL from the
   // store Worker (it holds the auth token) and hands it here for the heavy
   // download/verify/extract into the runtime.
+  identity: {
+    runInference: (args: { sessionId: string; zipBytes: Uint8Array; groom?: unknown }) => Promise<{
+      ok: boolean; dnaPath?: string; blobPath?: string; baseColorPath?: string;
+      grooming?: { gender: 'm' | 'f'; hairIndex: number; browIndex: number; lashIndex: number }; error?: string;
+    }>;
+    runPhotoInference: (args: { localId: string; photoBytes: Uint8Array; ext: 'jpg' | 'png'; groom?: unknown }) => Promise<{
+      ok: boolean; dnaPath?: string; blobPath?: string; baseColorPath?: string;
+      grooming?: { gender: 'm' | 'f'; hairIndex: number; browIndex: number; lashIndex: number }; error?: string;
+    }>;
+    onProgress: (cb: (data: { stage: string; line: string }) => void) => () => void;
+  };
   characterStore: {
     /** Download + SHA-verify + extract a purchased pak. `url` is the
      *  short-lived presigned URL from the store Worker; main reads sha256 +

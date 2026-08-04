@@ -328,6 +328,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
+  // Photo identity (DEV local inference). Renderer downloads the capture zip
+  // (it holds the auth token) and hands the bytes here; main runs the local
+  // pipeline and returns UE-container paths for the applyIdentity descriptor.
+  identity: {
+    runInference: (args: { sessionId: string; zipBytes: Uint8Array; groom?: unknown }): Promise<{
+      ok: boolean; dnaPath?: string; blobPath?: string; baseColorPath?: string;
+      grooming?: { gender: 'm' | 'f'; hairIndex: number; browIndex: number; lashIndex: number }; error?: string;
+    }> => ipcRenderer.invoke('identity:run-inference', args),
+    runPhotoInference: (args: { localId: string; photoBytes: Uint8Array; ext: 'jpg' | 'png'; groom?: unknown }): Promise<{
+      ok: boolean; dnaPath?: string; blobPath?: string; baseColorPath?: string;
+      grooming?: { gender: 'm' | 'f'; hairIndex: number; browIndex: number; lashIndex: number }; error?: string;
+    }> => ipcRenderer.invoke('identity:run-inference-photo', args),
+    onProgress: (cb: (data: { stage: string; line: string }) => void): (() => void) => {
+      const handler = (_evt: IpcRendererEvent, data: { stage: string; line: string }) => cb(data);
+      ipcRenderer.on('identity:progress', handler);
+      return () => ipcRenderer.removeListener('identity:progress', handler);
+    },
+  },
+
   // Deep link (unclaw://...). onDeepLink fires for links that arrive while
   // running; getPendingDeepLink pulls one that arrived during cold start.
   onDeepLink: (cb: (url: string) => void): (() => void) => {
