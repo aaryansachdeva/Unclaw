@@ -12,9 +12,18 @@ import { RemindersPanel } from './components/Reminders';
 import { StocksPanel } from './components/Stocks';
 import { NewsPanel } from './components/News';
 import { WeatherPanel } from './components/Weather';
-import { CustomizationOverlay, ACCENT_COLORS, CLOTHING_COLORS } from './components/CustomizationOverlay';
+// Shared color/lighting constants live in CustomizationOverlay; the unified
+// customization surface itself is CustomWardrobe (drives every character now).
+import { ACCENT_COLORS, BG_COLORS, BG_GLOW_DEFAULT, LIGHT_INTENSITY_DEFAULT, CLOTHING_COLORS } from './components/CustomizationOverlay';
+import { CustomWardrobe } from './components/CustomWardrobe';
+import { CameraModeToggle } from './components/CameraModeToggle';
+import { StreamEffects } from './components/StreamEffects';
+import { dressCharacter, type DressScope } from './wardrobe/dressCharacter';
+import { wardrobeDefaultsFor } from './wardrobe/catalog';
+import { cameraCustomize, cameraForMode, cameraDefaultFor, type CameraMode } from './wardrobe/camera';
 import { PulseGrid } from './components/PulseGrid';
-import { hexToRgb01 } from './components/ColorPickerPanel';
+import { hexToRgb01, round3 } from './components/ColorPickerPanel';
+import { useEnvironment } from './hooks/useEnvironment';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SoulBootScreen } from './components/SoulBootScreen';
 import { SetupWizard } from './components/SetupWizard';
@@ -32,9 +41,13 @@ import { useChatMemory, type Turn } from './hooks/useChatMemory';
 import { fetchCloudChat, pushCloudChat, gatherLocalChat, restoreLocalChat, deleteCloudChat } from './services/chatSync';
 import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
+import { detectEcho } from './voice/echoGuard';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
-import { chatViaSoul, streamChatViaSoul, fireIdle, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
+import { chatViaSoul, streamChatViaSoul, fireIdle, fetchCurrentBodyIdle, SoulBodyDirective, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
+import { startPassthroughBridge } from './services/passthrough';
+import { usePassthroughPrefs } from './hooks/usePassthroughPrefs';
 import { pollNextEscalation } from './services/escalation';
+import { sendListeningEvent } from './services/listening';
 import { listReminders } from './services/reminders';
 import { expressFace } from './services/express';
 import { getStocks } from './services/stocks';
@@ -149,6 +162,110 @@ function isReminderAction(name: string | undefined): boolean {
     || name === 'mark_reminder_complete';
 }
 
+/** Forward soul's body-director directives (idle rotation, conviction-
+ *  gated talk loops, explicit body tokens) to the text2body AnimBP.
+ *  Each directive already carries its UIInteraction field names
+ *  (idleNum/talkNum+talkTime/actionNum/gestureNum). Fire-and-forget:
+ *  the AnimBP owns its own exits (ShouldPlay* bools are consume-flags
+ *  cleared on state entry; Action leaves via the automatic rule,
+ *  Talking via the TalkingTime timer, gestures via montage consume).
+ *  Only doIdle persists, which is the point of idle rotation. */
+let idleRevertTimer: number | null = null;
+let talkRevertTimer: number | null = null;
+
+// Forced talk-exit. UE's own TalkingTime timer intermittently fails to leave the
+// Talking state and loops the clip unbounded (until the next idle beat happens
+// to break it, ~37s later). Rather than trust that exit, we OWN it: send a long
+// talkTime so UE never self-exits early, then drive the return to idle ourselves
+// after a randomized window. A doIdle is a hard state change UE can't ignore, so
+// the gesture can never loop past our window. The randomized 2-5s reads as a
+// natural "gesture for a bit, then settle" (Aryan's talk-body intent) and adds
+// variety so it doesn't feel metronomic.
+const TALK_HOLD_TIME_S = 10;       // talkTime we send; > TALK_REVERT_MAX so UE holds
+const TALK_REVERT_MIN_MS = 2000;
+const TALK_REVERT_MAX_MS = 5000;
+
+/** Drop scheduled idle/talk reverts. Called on character switch / reset so a
+ *  timer armed for the PREVIOUS character can't fire a doIdle onto the next one
+ *  (the revert idle number was chosen for the body that scheduled it). */
+function cancelScheduledIdleRevert(): void {
+  if (idleRevertTimer !== null) {
+    window.clearTimeout(idleRevertTimer);
+    idleRevertTimer = null;
+  }
+  if (talkRevertTimer !== null) {
+    window.clearTimeout(talkRevertTimer);
+    talkRevertTimer = null;
+  }
+}
+
+/** Force the body back to idle. Prefers soul's canonical current idle (which is
+ *  the home loop right after a talk) and falls back to the default idle so the
+ *  exit is guaranteed even if the fetch fails. */
+function forceBodyIdle(ps: { emitUIInteraction: (descriptor: object) => void }): void {
+  void fetchCurrentBodyIdle()
+    .then((idle) => {
+      if (idle && idle.length) dispatchBodyToUE(ps, idle);
+      else ps.emitUIInteraction({ EventType: 'doIdle', idleNum: 0, Timestamp: new Date().toISOString() });
+    })
+    .catch(() => {
+      ps.emitUIInteraction({ EventType: 'doIdle', idleNum: 0, Timestamp: new Date().toISOString() });
+    });
+}
+
+function dispatchBodyToUE(
+  ps: { emitUIInteraction: (descriptor: object) => void },
+  body: SoulBodyDirective[] | undefined,
+): void {
+  if (!body?.length) return;
+  for (const d of body) {
+    const { event, clip, revertAfterS, revertIdleNum, ...fields } = d;
+    // Any fresh directive supersedes a pending revert (idle pick or talk-exit),
+    // so a stale timer can't fire a doIdle onto whatever's playing now.
+    if (event === 'doIdle' && idleRevertTimer !== null) {
+      window.clearTimeout(idleRevertTimer);
+      idleRevertTimer = null;
+    }
+    if (talkRevertTimer !== null) {
+      window.clearTimeout(talkRevertTimer);
+      talkRevertTimer = null;
+    }
+    // Override talkTime so UE holds the Talking pose well past our revert window
+    // (we own the exit, below). Every other field / event passes through as-is.
+    const outFields = event === 'doTalking'
+      ? { ...fields, talkTime: TALK_HOLD_TIME_S }
+      : fields;
+    ps.emitUIInteraction({
+      EventType: event,
+      ...outFields,
+      Timestamp: new Date().toISOString(),
+    });
+    // Talking: drive our own return to idle after a randomized 2-5s so UE can
+    // never loop the clip regardless of whether its TalkingTime exit fires.
+    if (event === 'doTalking') {
+      const delay = TALK_REVERT_MIN_MS + Math.random() * (TALK_REVERT_MAX_MS - TALK_REVERT_MIN_MS);
+      talkRevertTimer = window.setTimeout(() => {
+        talkRevertTimer = null;
+        forceBodyIdle(ps);
+      }, delay);
+    }
+    // Short idle VISITS carry a revert: after revertAfterS the body returns to
+    // the home loop (idle is the one state UE never exits on its own).
+    if (event === 'doIdle'
+        && typeof revertAfterS === 'number' && revertAfterS > 0
+        && typeof revertIdleNum === 'number') {
+      idleRevertTimer = window.setTimeout(() => {
+        idleRevertTimer = null;
+        ps.emitUIInteraction({
+          EventType: 'doIdle',
+          idleNum: revertIdleNum,
+          Timestamp: new Date().toISOString(),
+        });
+      }, revertAfterS * 1000);
+    }
+  }
+}
+
 /** Map a soul `action` payload to a UE descriptor and dispatch it. */
 function dispatchActionToUE(
   ps: { emitUIInteraction: (descriptor: object) => void },
@@ -203,10 +320,24 @@ export function App() {
     const api = window.electronAPI?.setup;
     if (!api) { setSetupComplete(true); return; }
     let cancelled = false;
-    api.getStatus().then((snap) => {
-      if (cancelled) return;
-      setSetupComplete(snap?.isComplete ?? false);
-    }).catch(() => { if (!cancelled) setSetupComplete(true); });
+    // Bounded retry. getStatus is a synchronous main-process snapshot so it
+    // effectively never rejects, but if the IPC bridge isn't wired yet we
+    // retry rather than guess. On give-up we default to FALSE (show the
+    // wizard), NOT true: the wizard self-completes when setup is actually
+    // done (its own getStatus reports isComplete and calls onComplete),
+    // whereas assuming "complete" on a never-provisioned machine would
+    // strand the user on the boot screen forever with no soul to wait on.
+    const attempt = (retries: number) => {
+      api.getStatus().then((snap) => {
+        if (cancelled) return;
+        setSetupComplete(snap?.isComplete ?? false);
+      }).catch(() => {
+        if (cancelled) return;
+        if (retries > 0) setTimeout(() => attempt(retries - 1), 300);
+        else setSetupComplete(false);
+      });
+    };
+    attempt(3);
     return () => { cancelled = true; };
   }, [setupComplete]);
 
@@ -329,17 +460,24 @@ function AppMain() {
   // arrives. Doesn't tear down the pixel-streaming hook (the user-
   // visible reconnect is owned by usePixelStreaming + UE itself); just
   // keeps the cache fresh so service fetches resolve correctly.
+  // The signalling WS URL drives usePixelStreaming's connection. Hold it in
+  // state so a soul respawn on a DIFFERENT port re-renders AppMain with the new
+  // URL, which re-runs the PS effect against the live port. Without this the URL
+  // was frozen at first render and ps.reconnect() redialled the dead old port
+  // forever after any respawn (dynamic ports change every boot).
+  const [sigUrl, setSigUrl] = useState<string>(() => signalingUrl());
   useEffect(() => {
     return subscribeSoulPorts(() => {
-      // Cache mutation is handled inside subscribeSoulPorts; we just
-      // need to subscribe so the side effect runs. No state update
-      // needed here, getSoulBaseUrl() reads the fresh cache on the
-      // next fetch automatically.
+      // A fresh [ports] banner landed (soul respawn). subscribeSoulPorts already
+      // refreshed the soulBase cache; push the new signalling URL into state so
+      // the pixel-streaming hook redials the LIVE port. Same string => React
+      // bails the re-render, so an unchanged-port banner is a no-op.
+      setSigUrl(signalingUrl());
     });
   }, []);
 
-  const { videoParentRef, connectionState, pixelStreaming, sendAndAwaitAck } = usePixelStreaming({
-    signalingUrl: signalingUrl(),
+  const { videoParentRef, connectionState, pixelStreaming, waitForAck } = usePixelStreaming({
+    signalingUrl: sigUrl,
   });
 
   // Publishes the streamed <video>'s screen geometry to UE so the
@@ -369,6 +507,13 @@ function AppMain() {
   // ADD_SLOT opens the picker over a blank stage. `selectedInstanceId` holds a
   // real roster instance id or ADD_SLOT.
   const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, resetStack, hydrateStack } = useAgentStack();
+  // Global environment — backdrop + key light + post effect (persists across
+  // agents, NOT per-instance). See src/hooks/useEnvironment.ts. Applied on every
+  // switch + whenever it changes.
+  const { environment, setEnvironment } = useEnvironment();
+  // Passthrough speech prefs (talkativeness + mute). Device-local + mirrored
+  // to soul so the external agent honors them. See usePassthroughPrefs.
+  const { prefs: passthroughPrefs, setVerbosity: setPassthroughVerbosity, toggleMuted: togglePassthroughMuted } = usePassthroughPrefs();
   // Selected carousel slot: a roster instance id, or ADD_SLOT for the picker.
   const [selectedInstanceId, setSelectedInstanceId] = useState<string>(BASE_INSTANCE_ID);
   const [addPickerOpen, setAddPickerOpen] = useState(false);
@@ -383,6 +528,10 @@ function AppMain() {
   // paid characters — independent of UE's report, which is null until UE
   // answers and would otherwise make an un-downloaded character look ready.
   const [localInstalledIds, setLocalInstalledIds] = useState<string[]>([]);
+  // Paid characters whose staged pak drifted from the manifest version (a newer
+  // pak was cooked). Still usable from the old bytes, but provisioning
+  // re-downloads them on launch so an older install picks up the new pak.
+  const [staleInstalledIds, setStaleInstalledIds] = useState<string[]>([]);
   // Character store: which paid characters this account owns (from the store
   // Worker / Polar). null = not fetched yet. Base characters are always owned.
   const [ownedCharacterIds, setOwnedCharacterIds] = useState<string[] | null>(null);
@@ -466,9 +615,26 @@ function AppMain() {
   // Full-screen customization mode, orthogonal to the rail sheets.
   // The wardrobe rail icon flips this; everything else stays.
   const [customizationActive, setCustomizationActive] = useState(false);
+  // Live post-effect preview while customizing. Effects never reach UE (they're
+  // composited over the <video> here), so they can't ride the descriptor path
+  // like everything else. null = show whatever the instance has saved.
+  const [effectPreview, setEffectPreview] =
+    useState<{ effectId: string; effectStrength: number } | null>(null);
   // Settings modal, opened from Titlebar profile dropdown. Distinct
   // overlay from CustomizationOverlay so the two can't collide.
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Passthrough mode. When true, UnClaw does no inference of its own: a
+  // user's external coding agent (Claude Code, ...) drives the avatar by
+  // calling soul's /passthrough/speak, which the passthrough bridge (see
+  // effect below) renders + dispatches to UE. The InputBar swaps its
+  // composer for a "Passthrough mode enabled" banner. Session-only (never
+  // persisted) — entered/exited via the unclaw://passthrough deep link so
+  // a plain relaunch always comes back up in normal chat mode.
+  const [passthrough, setPassthrough] = useState(false);
+  // Which external agent is driving passthrough (Claude Code / Codex / ...),
+  // pushed by soul from the shim's MCP handshake. Shown in the InputBar banner.
+  const [passthroughAgent, setPassthroughAgent] = useState<{ name: string; project?: string | null } | null>(null);
 
   // Chat history side-pane. When true, the gray utility pane slides in
   // from the right and the workspace wrapper's right anchor animates
@@ -478,6 +644,18 @@ function AppMain() {
   // typing while reading history. Toggled from the InputBar's expand
   // button. Closed by default; the pane is opt-in.
   const [chatPaneOpen, setChatPaneOpen] = useState(false);
+
+  // TEMP(revert): Cmd+H toggles hiding ALL chrome (everything but the stream)
+  // for clean capture / debugging. Driven by main's globalShortcut -> IPC so it
+  // wins over the OS "Hide app" accelerator. Remove this state + effect + the
+  // `unclaw-ui-hidden` class on the root div + the CSS rule in styles.css.
+  const [uiHidden, setUiHidden] = useState(false);
+  useEffect(() => {
+    const off = window.electronAPI?.onTempToggleUi?.(() =>
+      setUiHidden((v) => !v),
+    );
+    return () => { off?.(); };
+  }, []);
 
   // Window width, drives the InputBar wrapper's animated left anchor
   // (it slides between the workspace bottom and the chat-pane bottom
@@ -729,6 +907,13 @@ function AppMain() {
   );
 
   const onAddSlot = selectedInstanceId === ADD_SLOT;
+  // Live mirror of onAddSlot for async listeners (agentSwitchFailed, the
+  // reconcile reply). While the Add picker is open the stage is DELIBERATELY
+  // blank — reconcile/retry must NOT drive the last agent back onto it, or it
+  // reappears behind the picker AND leaves the state too tangled for Cancel to
+  // restore cleanly. Assigned in render so it's current before effects run.
+  const onAddSlotRef = useRef(onAddSlot);
+  onAddSlotRef.current = onAddSlot;
   const currentInstance = onAddSlot
     ? null
     : agentStack.find((i) => i.id === selectedInstanceId) ?? agentStack[0];
@@ -782,24 +967,166 @@ function AppMain() {
         ? profile?.agent_name ?? AGENTS[0].name
         : (activeAgentId ? agentById[activeAgentId]?.name : null) ?? 'Grace');
 
-  // Ordered switcher carousel: every roster instance, then the Add slot.
-  const agentCarousel = useMemo(
-    () => [...agentStack.map((i) => i.id), ADD_SLOT],
-    [agentStack],
+  // Roster for the InputBar's dropdown switcher: each instance with its
+  // on-screen name (same derivation as `characterName`). The Add slot is NOT
+  // in this list — it's the separate + button.
+  const personaAgents = useMemo(
+    () => agentStack.map((i) => ({
+      id: i.id,
+      name: i.name?.trim()
+        || (i.id === BASE_INSTANCE_ID
+          ? (profile?.agent_name ?? AGENTS[0].name)
+          : (agentById[i.agentId]?.name ?? 'Grace')),
+    })),
+    [agentStack, profile?.agent_name, agentById],
   );
 
-  // Bumped on every applyInstanceWardrobe call AND every agent switch. The
-  // delayed clothing-color re-apply in applyInstanceWardrobe checks it so a
-  // newer switch (or apply) supersedes a stale re-send.
-  const wardrobeApplyGenRef = useRef(0);
-  const emitAgentSwitch = useCallback((agentId: string, dir: number) => {
-    // Cancel any in-flight clothing-color re-apply tail for the PREVIOUS
-    // character before switching. Otherwise that loop keeps firing
-    // changeClothingColor descriptors for ~1s, which collide with this swap
-    // mid-flight and can drop it on Windows (fast localhost data channel).
-    wardrobeApplyGenRef.current++;
-    pixelStreaming?.emitUIInteraction({ EventType: 'agentSwitch', agentId, slideDir: dir });
+  // Dressing-chain generation counter. Every dress run claims a fresh epoch;
+  // switches / resets / disconnects bump it too, so an in-flight chain aborts
+  // at its next send instead of dressing a character it no longer owns. This
+  // is what stops "old instance's outfit lands on the character I just
+  // switched to" — the chain used to keep running through the swap.
+  const dressEpochRef = useRef(0);
+  // Ref twin of `ueActiveAgentId` (declared with its listeners further down)
+  // so switch-time callbacks can read "what is UE showing right now" without
+  // re-subscribing on every answer. null = unknown / mid-transition.
+  const ueActiveAgentRef = useRef<string | null>(null);
+  // Ref to applyInstanceWardrobe (defined after the send plumbing below);
+  // assigned right after its definition, same pattern as agentStackRef.
+  const applyInstanceWardrobeRef = useRef<
+    ((
+      w: WardrobeSettings | null | undefined,
+      agentId?: string | null,
+      opts?: { scope?: DressScope; epoch?: number },
+    ) => Promise<void>) | null
+  >(null);
+  // The cross-class swap in flight: set when we emit agentSwitch (the scene
+  // half of the wardrobe fires immediately under this epoch), consumed by the
+  // characterReady listener (which finishes with the outfit half under the
+  // SAME epoch, so it can't cancel a scene re-fire still in the air). A stale
+  // entry is harmless: the epoch check rejects it.
+  const pendingSwitchRef = useRef<{ agentId: string; epoch: number } | null>(null);
+  // Retry state for UE's `agentSwitchFailed` (the C++ subsystem now broadcasts
+  // it when a swap's cast fails / resolves to blank instead of stalling
+  // silently). Holds the last switch we asked for so we can replay it, plus a
+  // bounded retry counter. Reset to 0 on a genuinely new target and on
+  // characterReady success; cleared when we give up (then reconcile).
+  const lastSwitchTargetRef = useRef<
+    { agentId: string; dir: number; wardrobe: WardrobeSettings | null } | null
+  >(null);
+  const switchRetryRef = useRef(0);
+  const SWITCH_MAX_RETRIES = 3;
+  // The agentId (lowercased) whose swap UE confirmed DISPATCHED via
+  // `agentSwitchSuccess` (Swap to Character ran with a valid, latched id).
+  // Distinguishes a genuine cast failure (dispatch succeeded, then the incoming
+  // class wasn't a BP_CharacterBase / resolved blank -> replaying the identical
+  // id just loops -> reconcile) from a swap that never dispatched (keep the
+  // bounded retry). Cleared on characterReady success + when consumed by a
+  // failure.
+  const switchDispatchedRef = useRef<string | null>(null);
+  // Non-null (a setTimeout id) while a "same character → blank → same character"
+  // interstitial is mid-flight. UE's SwapCharacter no-ops when the target class
+  // is already live (two roster instances of one character), so switching
+  // between them doesn't transition. We route it through a blank frame for a
+  // graceful fade. While set, the 'blank' rejection (agentSwitchFailed) is
+  // expected and must not trigger the retry/reconcile.
+  const sameIdBlankRef = useRef<number | null>(null);
+  // How long the blank frame shows before the same character respawns.
+  const SAME_ID_BLANK_MS = 380;
+
+  const emitAgentSwitch = useCallback((
+    agentId: string, dir: number, wardrobe?: WardrobeSettings | null,
+  ) => {
+    // Leaving a character obsoletes anything still being applied to it.
+    dressEpochRef.current += 1;
+    cancelScheduledIdleRevert();
+    // MERGED SWITCH+DRESS: agentSwitch carries the wardrobe INDICES
+    // (top/bottom/shoes/hair/eyelash/eyebrow) so UE can apply them inside the
+    // swap graph. An UNSAVED slot goes as the character's DEFAULT index
+    // (wardrobeDefaultsFor), not -1 — so a fresh character lands on its authored
+    // look. The reliable application still runs at characterReady via the
+    // changeWardrobeItem dress chain (which uses the same defaults).
+    const def = wardrobeDefaultsFor(agentId);
+    const idx = (v: number | undefined, fallback: number) =>
+      (v == null || !Number.isFinite(v) ? fallback : Math.floor(v));
+    pixelStreaming?.emitUIInteraction({
+      EventType: 'agentSwitch',
+      agentId,
+      slideDir: dir,
+      top:     idx(wardrobe?.topIndex,    def.top),
+      bottom:  idx(wardrobe?.bottomIndex, def.bottom),
+      shoes:   idx(wardrobe?.shoesIndex,  def.shoes),
+      hair:    idx(wardrobe?.hairIndex,   def.hair),
+      eyelash: idx(wardrobe?.lashIndex,   def.lash),
+      eyebrow: idx(wardrobe?.browIndex,   def.brow),
+    });
   }, [pixelStreaming]);
+
+  // Switch UE to an agent, handling the same-class case: UE's SwapCharacter
+  // no-ops when the target class is already live (two roster instances of one
+  // character), so no characterReady will ever fire — dress the incoming
+  // instance directly instead of waiting on a signal that never comes.
+  //
+  // For a genuine cross-character swap, the wardrobe splits in two:
+  //   scene (key light + backdrop) fires NOW, in parallel with UE's
+  //     destroy/GC/async-load. Those are persistent-level actors; by the time
+  //     the new character fades in, the room is already lit correctly.
+  //   outfit waits for characterReady (the clothes need a body to hang on).
+  // Also mark UE "in transition" so the fast path can't misfire off a stale
+  // reading until characterReady lands.
+  const switchUeToAgent = useCallback((
+    agentId: string, dir: number, wardrobe?: WardrobeSettings | null,
+  ) => {
+    // A new switch supersedes any pending same-id blank interstitial.
+    if (sameIdBlankRef.current != null) {
+      window.clearTimeout(sameIdBlankRef.current);
+      sameIdBlankRef.current = null;
+    }
+    const lc = agentId.toLowerCase();
+    // Fresh spawn of `agentId`: emit the switch, arm the retry/dispatch state,
+    // and record a pending switch so characterReady dresses the selected
+    // instance under this epoch. The environment (key light + backdrop) is
+    // GLOBAL, re-asserted at characterReady, so agentSwitch goes out alone.
+    const spawnFresh = () => {
+      emitAgentSwitch(agentId, dir, wardrobe);
+      ueActiveAgentRef.current = null;
+      // Reset retries only on a genuinely new target (a replay keeps counting).
+      if (lastSwitchTargetRef.current?.agentId.toLowerCase() !== lc) {
+        switchRetryRef.current = 0;
+      }
+      lastSwitchTargetRef.current = { agentId, dir, wardrobe: wardrobe ?? null };
+      const epoch = ++dressEpochRef.current;
+      pendingSwitchRef.current = { agentId: lc, epoch };
+    };
+    const alreadyLive =
+      ueActiveAgentRef.current != null && ueActiveAgentRef.current === lc;
+    if (alreadyLive) {
+      // Same character CLASS, different roster instance (e.g. grace → grace).
+      // UE's SwapCharacter no-ops when the class is already live, so a plain
+      // re-switch doesn't transition and re-dressing in place snaps the outfit
+      // with no motion. Route it through a blank frame — grace → blank → grace
+      // — so the character fades out and back in, and characterReady fires again
+      // to dress the incoming instance. Clear the switch state first so the
+      // 'blank' rejection (agentSwitchFailed) can't replay the old target while
+      // we wait for the timer.
+      lastSwitchTargetRef.current = null;
+      switchRetryRef.current = 0;
+      switchDispatchedRef.current = null;
+      pendingSwitchRef.current = null;
+      emitAgentSwitch('blank', dir);      // clear the stage (bumps epoch, cancels idle)
+      ueActiveAgentRef.current = null;
+      sameIdBlankRef.current = window.setTimeout(() => {
+        sameIdBlankRef.current = null;
+        spawnFresh();                      // now NOT alreadyLive -> real respawn
+      }, SAME_ID_BLANK_MS);
+      return;
+    }
+    spawnFresh();
+  }, [emitAgentSwitch]);
+  // Live ref to switchUeToAgent so the agentSwitchFailed retry (and headless
+  // drivers) can call the current fn without re-subscribing.
+  const switchUeToAgentRef = useRef(switchUeToAgent);
+  switchUeToAgentRef.current = switchUeToAgent;
 
   // Select a carousel target by INSTANCE id (or ADD_SLOT). ADD_SLOT clears the
   // stage (an unknown id makes UE blank the scene) and opens the picker; a real
@@ -811,29 +1138,33 @@ function AppMain() {
         : selectedInstanceId;
       setSelectedInstanceId(ADD_SLOT);
       setAddPickerOpen(true);
+      // Going blank is DELIBERATE: UE can't cast "blank" to a BP_CharacterBase
+      // so it fires agentSwitchFailed — which must NOT trigger the retry/replay
+      // (that would drag the last agent back onto the stage behind the Add
+      // picker). Clear all pending-switch state before emitting.
+      lastSwitchTargetRef.current = null;
+      switchRetryRef.current = 0;
+      switchDispatchedRef.current = null;
+      pendingSwitchRef.current = null;
       emitAgentSwitch('blank', dir); // "blank" card (empty class) -> UE clears the stage. NOT "none" (reserved FName == NAME_None, hits SwapToCharacter's IsNone guard)
+      ueActiveAgentRef.current = null; // stage is clearing; nothing is live
     } else {
       const inst = agentStack.find((i) => i.id === targetId);
       setSelectedInstanceId(targetId);
       setAddPickerOpen(false);
-      if (inst) emitAgentSwitch(inst.agentId, dir);
+      if (inst) switchUeToAgent(inst.agentId, dir, inst.wardrobe);
     }
-  }, [onAddSlot, agentStack, selectedInstanceId, emitAgentSwitch]);
-
-  const stepAgent = useCallback((delta: 1 | -1) => {
-    if (agentCarousel.length === 0) return;
-    const idx = agentCarousel.indexOf(selectedInstanceId);
-    const base = idx < 0 ? 0 : idx;
-    const next = (base + delta + agentCarousel.length) % agentCarousel.length;
-    selectInstance(agentCarousel[next], delta);
-  }, [agentCarousel, selectedInstanceId, selectInstance]);
+  }, [onAddSlot, agentStack, selectedInstanceId, emitAgentSwitch, switchUeToAgent]);
 
   const handlePickAgent = useCallback((agentId: string) => {
     const id = addInstance(agentId);
     setSelectedInstanceId(id);
     setAddPickerOpen(false);
-    emitAgentSwitch(agentId, 1);
-  }, [addInstance, emitAgentSwitch]);
+    // A brand-new instance has no saved wardrobe; the same-class fast path
+    // in switchUeToAgent just no-ops the dress, which is correct (authored
+    // defaults, or whatever the stage already shows for this class).
+    switchUeToAgent(agentId, 1, null);
+  }, [addInstance, switchUeToAgent]);
 
   const handleCancelAdd = useCallback(() => {
     const back = addReturnRef.current || BASE_INSTANCE_ID;
@@ -857,9 +1188,12 @@ function AppMain() {
     try { localStorage.removeItem(`unclaw.chat.${instanceId}`); } catch { /* ignore */ }
     if (selectedInstanceId === instanceId) {
       setSelectedInstanceId(BASE_INSTANCE_ID);
-      emitAgentSwitch(BASE_AGENT, -1);
+      // Falling back to base: if the removed instance shared base's character
+      // class (a second Grace), UE won't re-spawn — dress base's look directly.
+      const base = agentStack.find((i) => i.id === BASE_INSTANCE_ID);
+      switchUeToAgent(BASE_AGENT, -1, base?.wardrobe);
     }
-  }, [removeInstance, selectedInstanceId, emitAgentSwitch]);
+  }, [removeInstance, selectedInstanceId, switchUeToAgent, agentStack]);
 
   // Listen for UE's `installedCharacters` report (sent on connect, on request,
   // and after each pak mount) and narrow the addable set to it. Shares the PS
@@ -896,6 +1230,7 @@ function AppMain() {
     try {
       const res = await window.electronAPI?.characterStore?.listInstalled?.();
       if (res?.ids) setLocalInstalledIds(res.ids);
+      setStaleInstalledIds(res?.stale ?? []);
     } catch (err) {
       console.warn('[store] local installed list failed', err);
     }
@@ -982,9 +1317,17 @@ function AppMain() {
   // unclaw:// deep link from the Polar checkout-complete page -> refresh
   // entitlements immediately (polling is the fallback while the browser tab
   // is open). Also drains any link that arrived during cold start.
+  //
+  // Passthrough mode also enters via a deep link: the /unclaw skill runs
+  // `open "unclaw://passthrough"`, which cold-starts (or focuses) the app
+  // and lands here. `unclaw://passthrough?off` exits back to normal chat.
   useEffect(() => {
     const onLink = (url: string) => {
       if (/store|purchased|checkout/.test(url)) void refreshEntitlements();
+      if (/^unclaw:\/\/passthrough/.test(url)) {
+        setPassthrough(!/[?&]off\b/.test(url));
+        window.electronAPI?.focusWindow?.();
+      }
     };
     const off = window.electronAPI?.onDeepLink?.(onLink);
     void window.electronAPI?.getPendingDeepLink?.().then((u) => { if (u) onLink(u); });
@@ -1128,32 +1471,88 @@ function AppMain() {
       provisionedRef.current.add(id);
       // Present = staged on disk OR baked into the build (UE reports baked paid
       // chunks via installedCharacterIds — the case on Windows chunked builds).
-      // Same rule the + menu's readiness check uses. Only a truly-absent pak
-      // downloads; a baked-in one just gets its voice ensured.
+      // Same rule the + menu's readiness check uses. A truly-absent pak
+      // downloads; a staged pak whose version DRIFTED from the manifest (a newer
+      // pak was cooked) re-downloads; an up-to-date or baked-in one just gets
+      // its voice ensured. Baked-in paks are never in staleInstalledIds (that
+      // set is staged-only), so they refresh via the UE update, not here.
       const present = localInstalledIds.includes(id) || (installedCharacterIds?.includes(id) ?? false);
-      if (present) {
-        void ensureCharacterVoices(id);               // pak present, ensure voice
-      } else {
+      const needsPak = !present || staleInstalledIds.includes(id);
+      if (needsPak) {
         void handleDownloadPak(id);                   // pak + mount + voice
+      } else {
+        void ensureCharacterVoices(id);               // pak current, ensure voice
       }
     }
-  }, [authToken, ownedCharacterIds, installedCharacterIds, localInstalledIds, pakProgress, handleDownloadPak, ensureCharacterVoices]);
+  }, [authToken, ownedCharacterIds, installedCharacterIds, localInstalledIds, staleInstalledIds, pakProgress, handleDownloadPak, ensureCharacterVoices]);
 
-  // Owned paid characters still being fetched at startup (pak not yet on disk).
-  // Drives the non-blocking "preparing your characters" status so provisioning
-  // reads as a deliberate init step, not a silent mid-session background fetch.
+  // Owned paid characters still being fetched at startup (pak missing, or a
+  // drifted staged version being refreshed). Drives the non-blocking "preparing
+  // your characters" status so provisioning reads as a deliberate init step,
+  // not a silent mid-session background fetch.
   const provisioningIds = useMemo(
     () => (ownedCharacterIds ?? []).filter(
       (id) => PAID_CHARACTER_IDS.includes(id)
-        && !localInstalledIds.includes(id)
-        && !(installedCharacterIds?.includes(id) ?? false),  // baked-in = ready, not "preparing"
+        && ((!localInstalledIds.includes(id) && !(installedCharacterIds?.includes(id) ?? false))
+            || staleInstalledIds.includes(id)),  // missing, or refreshing a drifted pak
     ),
-    [ownedCharacterIds, localInstalledIds, installedCharacterIds],
+    [ownedCharacterIds, localInstalledIds, installedCharacterIds, staleInstalledIds],
   );
 
   // Track whether the AI is currently producing audible output. Voice
   // mode uses this to gate VAD and to detect barge-in.
   const isAISpeakingRef = useRef(false);
+
+  // Absolute deadline (performance.now() ms) through which the AI is
+  // considered to still be speaking. The boolean above is a coarse flag
+  // set at dispatch; this is the part that actually has to be right,
+  // because everything the mic hears before it is the avatar, not the
+  // user.
+  //
+  // Why a deadline instead of the single setTimeout this used to have:
+  // that timer was sized from `result.duration ?? 4` / `total_duration
+  // ?? 4000`. On any reply where soul reported no duration the gate
+  // closed after 4 s while the avatar kept talking, and every remaining
+  // word was transcribed and sent back as a user prompt. A deadline that
+  // each dispatched chunk pushes forward by its OWN duration can't drift
+  // that way: it always covers the audio actually scheduled.
+  const aiSpeakingUntilRef = useRef(0);
+
+  /** Hold the AI-speaking gate open for at least `ms` more. Monotonic —
+   *  never brings the deadline in, so an early/short chunk can't reopen
+   *  the mic while a later chunk is still queued to play. */
+  const holdAISpeaking = useCallback((ms: number) => {
+    if (!(ms > 0)) return;
+    const until = performance.now() + ms;
+    if (until > aiSpeakingUntilRef.current) aiSpeakingUntilRef.current = until;
+    isAISpeakingRef.current = true;
+  }, []);
+
+  /** Close the gate — but only if the audio we scheduled has actually
+   *  finished. A backstop timer sized from an early estimate must never
+   *  win over chunks that later extended the deadline; if it fires too
+   *  soon it re-arms itself for the remaining time instead of opening
+   *  the mic into the middle of a reply. */
+  const releaseAISpeaking = useCallback(() => {
+    const remaining = aiSpeakingUntilRef.current - performance.now();
+    if (remaining > 0) {
+      window.setTimeout(() => releaseAISpeaking(), Math.ceil(remaining));
+      return;
+    }
+    isAISpeakingRef.current = false;
+    aiSpeakingUntilRef.current = 0;
+    notifyAIFinishedRef.current();
+  }, []);
+
+  /** Close the gate NOW, deadline and all. For paths where the audio is
+   *  known not to be playing: aborted stream, provider error, user
+   *  cancel. Unlike releaseAISpeaking this must not wait, or a failed
+   *  turn would keep the mic shut for the duration of a reply that is
+   *  never going to be spoken. */
+  const forceReleaseAISpeaking = useCallback(() => {
+    isAISpeakingRef.current = false;
+    aiSpeakingUntilRef.current = 0;
+  }, []);
 
   // Forward declaration for cross-references between voice and chat.
   const notifyAIFinishedRef = useRef<() => void>(() => {});
@@ -1239,6 +1638,10 @@ function AppMain() {
    *  animation action (kiss/dance/hello), reminder-panel refresh, and
    *  the speaking-finished timer for the voice barge-in gate. Used both
    *  for the primary /chat response AND for each polled escalation step. */
+  // Set below (near applyCamera); called when a big body animation fires so the
+  // camera briefly pulls back to reveal it. A ref so the earlier chat callbacks
+  // can reach the later-defined camera helper.
+  const triggerActionCameraRef = useRef<(() => void) | null>(null);
   const dispatchChatResult = useCallback((result: SoulChatResult) => {
     let addedTurn: Turn | null = null;
     if (result.response) {
@@ -1305,6 +1708,10 @@ function AppMain() {
 
       if (isAnimAction && action) {
         dispatchActionToUE(pixelStreaming, action, result.response);
+        triggerActionCameraRef.current?.();
+      }
+      if (pixelStreaming) {
+        dispatchBodyToUE(pixelStreaming, result.body);
       }
     }
 
@@ -1325,14 +1732,19 @@ function AppMain() {
       setRefreshKey(k => k + 1);
     }
 
-    isAISpeakingRef.current = true;
+    // Hold the gate for the reply's real audio length. The `?? 4` here
+    // used to be the whole story: on a reply soul reported no duration
+    // for, the mic reopened after 4 s and transcribed the rest of the
+    // avatar. Now the fallback is only the FLOOR — holdAISpeaking is
+    // monotonic, so a later, better estimate can still extend it, and
+    // releaseAISpeaking below refuses to close early.
     const speakSec = (result as { duration?: number }).duration ?? 4;
+    holdAISpeaking(speakSec * 1000 + 300);
     window.setTimeout(() => {
-      isAISpeakingRef.current = false;
-      notifyAIFinishedRef.current();
-    }, Math.round(speakSec * 1000));
+      releaseAISpeaking();
+    }, Math.round(speakSec * 1000) + 300);
     return addedTurn;
-  }, [pixelStreaming, memory]);
+  }, [pixelStreaming, memory, holdAISpeaking, releaseAISpeaking]);
 
   /** Dispatch ONE streaming chunk to UE. Mirrors the descriptor shape
    *  dispatchChatResult sends but skips memory + the speak-finished
@@ -1347,6 +1759,14 @@ function AppMain() {
    *  the authority on when each chunk plays. */
   const dispatchChatChunk = useCallback((chunk: SoulChatChunk) => {
     if (!pixelStreaming) return;
+    // This chunk's audio starts playing about now and runs for its own
+    // duration. Push the mic gate past it (plus a margin for the WebRTC
+    // hop and speaker decay) so the avatar's voice is never treated as
+    // the user's. Extending per chunk is what makes the gate track the
+    // real reply length instead of a single up-front estimate.
+    if (typeof chunk.duration === 'number' && chunk.duration > 0) {
+      holdAISpeaking(chunk.duration * 1000 + 300);
+    }
     pixelStreaming.emitUIInteraction({
       EventType: 'respond_with_mood_server',
       JobId: chunk.id,
@@ -1377,12 +1797,16 @@ function AppMain() {
         || action.name === 'celebrate';
       if (isAnim) {
         dispatchActionToUE(pixelStreaming, action, chunk.response);
+        triggerActionCameraRef.current?.();
       }
       if (isReminderAction(action.name)) {
         setRefreshKey(k => k + 1);
       }
     }
-  }, [pixelStreaming]);
+    if (chunk.chunk_idx === 0 && pixelStreaming) {
+      dispatchBodyToUE(pixelStreaming, chunk.body);
+    }
+  }, [pixelStreaming, holdAISpeaking]);
 
   /** Start a 1.2s poll loop against /escalation/{id}/next. Each polled
    *  result is dispatched through the same UE pipeline a primary /chat
@@ -1598,12 +2022,11 @@ function AppMain() {
       });
       // Gate /idle while the face plays, same pattern as the chat
       // result path.
-      isAISpeakingRef.current = true;
       const speakSec = result.duration ?? 3;
+      holdAISpeaking(speakSec * 1000 + 300);
       window.setTimeout(() => {
-        isAISpeakingRef.current = false;
-        notifyAIFinishedRef.current();
-      }, Math.round(speakSec * 1000));
+        releaseAISpeaking();
+      }, Math.round(speakSec * 1000) + 300);
     } catch (err) {
       console.warn('[express] failed', err);
     }
@@ -1645,7 +2068,7 @@ function AppMain() {
     // an escalation mid-flight just means the answer never arrives,
     // not that the visible activity should be erased.
     lastToolLabelRef.current = '';
-    isAISpeakingRef.current = false;
+    forceReleaseAISpeaking();
 
     // If a barge-in fired and resulted in this send, un-mute audio
     // (it was muted when barge-in started) and cancel the false-
@@ -1729,6 +2152,20 @@ function AppMain() {
       // Only emitted once a real chunk actually arrives (an escalation-only
       // turn never opens an utterance). One-shot providers never enter this.
       let utteranceBegun = false;
+      // endUtterance must reach UE AFTER the final chunk's PlayWithAudio (the data
+      // channel is ordered), so the plugin winds down on real queue-drain instead
+      // of a timer that can fire mid-reply and dip the face to idle. We close the
+      // utterance from the final chunk's dispatch callback; the speakMs timer and
+      // catch/finally are idempotent backstops. endUtteranceOnce guards re-entry.
+      let utteranceEnded = false;
+      let finalChunkIdx = -1;
+      let lastSeenChunkIdx = -1;
+      const endUtteranceOnce = () => {
+        if (utteranceBegun && !utteranceEnded) {
+          utteranceEnded = true;
+          pixelStreaming?.emitUIInteraction({ EventType: 'endUtterance' });
+        }
+      };
       try {
         for await (const chunk of streamChatViaSoul(trimmed, {
           systemExtension: systemExt,
@@ -1743,6 +2180,10 @@ function AppMain() {
           if (chunk.is_final) {
             totalDuration = chunk.total_duration ?? totalDuration;
             totalChunks = chunk.n_chunks ?? totalChunks;
+            // Index of the last content chunk, so its dispatch callback can close
+            // the utterance the instant it ships (falls back to the highest idx
+            // actually seen if n_chunks is absent).
+            finalChunkIdx = (chunk.n_chunks ?? (lastSeenChunkIdx + 1)) - 1;
             continue;
           }
           // First non-final chunk anchors the timeline. Add memory
@@ -1751,6 +2192,7 @@ function AppMain() {
           // memory the first time so the chat pane doesn't get N
           // duplicated entries).
           const now = performance.now();
+          lastSeenChunkIdx = Math.max(lastSeenChunkIdx, chunk.chunk_idx);
           if (firstChunkArrivedAt === 0) {
             firstChunkArrivedAt = now;
             // Open the utterance the moment the first chunk lands, before it
@@ -1779,6 +2221,10 @@ function AppMain() {
           const tid = window.setTimeout(() => {
             pendingChunkTimeoutsRef.current.delete(tid);
             dispatchChatChunk(chunk);
+            // Final chunk just shipped — close the utterance right behind it. The
+            // ordered data channel guarantees UE sees endUtterance after this
+            // chunk's PlayWithAudio, so it winds down on real drain, never mid-reply.
+            if (chunk.chunk_idx === finalChunkIdx) endUtteranceOnce();
           }, delay);
           pendingChunkTimeoutsRef.current.add(tid);
         }
@@ -1805,15 +2251,19 @@ function AppMain() {
           // hook fires and the voice agent can resume.
           const gapsMs = Math.max(0, totalChunks - 1) * interChunkGapMs;
           const speakMs = (totalDuration > 0 ? totalDuration * 1000 : 4000) + gapsMs;
+          // Floor only. Each dispatched chunk already pushed the gate past
+          // its own audio, so if this cumulative estimate is short (the
+          // 4000 fallback on a long reply, the case that leaked the whole
+          // tail of the avatar into the transcriber) releaseAISpeaking
+          // waits out the real deadline instead of opening the mic.
+          holdAISpeaking(speakMs);
           const timerId = window.setTimeout(() => {
             pendingChunkTimeoutsRef.current.delete(timerId);
-            // Last chunk's audio has finished — close the utterance so the
-            // plugin does its single, clean wind-down back to idle.
-            if (utteranceBegun) {
-              pixelStreaming?.emitUIInteraction({ EventType: 'endUtterance' });
-            }
-            isAISpeakingRef.current = false;
-            notifyAIFinishedRef.current();
+            // Backstop only: the final chunk's dispatch normally closes the
+            // utterance already. This covers a missing is_final / dropped final
+            // chunk so the plugin never holds the speaking pose. Idempotent.
+            endUtteranceOnce();
+            releaseAISpeaking();
           }, Math.round(speakMs));
           pendingChunkTimeoutsRef.current.add(timerId);
         }
@@ -1828,10 +2278,8 @@ function AppMain() {
         }
         // Balance any open utterance so the plugin doesn't hold the speaking
         // pose (the plugin also self-heals after MaxHoldSeconds, but be tidy).
-        if (utteranceBegun) {
-          pixelStreaming?.emitUIInteraction({ EventType: 'endUtterance' });
-        }
-        isAISpeakingRef.current = false;
+        endUtteranceOnce();
+        forceReleaseAISpeaking();
       } finally {
         if (streamAbortRef.current === ac) streamAbortRef.current = null;
         setIsSending(false);
@@ -1865,11 +2313,11 @@ function AppMain() {
       if ((err as { name?: string })?.name !== 'AbortError') {
         setPipelineError(friendlyPipelineError(err));
       }
-      isAISpeakingRef.current = false;
+      forceReleaseAISpeaking();
     } finally {
       setIsSending(false);
     }
-  }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream, awardClawForInteraction]);
+  }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream, awardClawForInteraction, holdAISpeaking, releaseAISpeaking, forceReleaseAISpeaking]);
 
   // Slash-command animation dispatcher, hands a ready-to-go UE
   // descriptor to the dock so it can fire `/dance`, `/kiss`, `/hello`
@@ -1888,12 +2336,69 @@ function AppMain() {
       Response: '',
       Timestamp: new Date().toISOString(),
     });
+    // Same reveal-then-return camera move as the chat-driven actions.
+    triggerActionCameraRef.current?.();
   }, [pixelStreaming]);
+
+  // Voice failures (mic permission, worklet, etc.) otherwise reject straight to
+  // the console where no user ever sees them. Surface them as a dismissible
+  // notice above the input bar; mic-permission ones offer a jump to Settings.
+  const [voiceNotice, setVoiceNotice] = useState<
+    { text: string; kind: 'mic' | 'generic' } | null
+  >(null);
+  const voiceNoticeTimer = useRef<number | null>(null);
+  const showVoiceNotice = useCallback(
+    (text: string, kind: 'mic' | 'generic') => {
+      setVoiceNotice({ text, kind });
+      if (voiceNoticeTimer.current) {
+        window.clearTimeout(voiceNoticeTimer.current);
+        voiceNoticeTimer.current = null;
+      }
+      // Mic notices are STICKY like the "set up your keys / model" warnings ,
+      // they need a user action (grant access), so they stay until dismissed or
+      // until voice actually starts (cleared by the effect below). Generic
+      // hiccups self-clear.
+      if (kind !== 'mic') {
+        voiceNoticeTimer.current = window.setTimeout(() => setVoiceNotice(null), 6000);
+      }
+    },
+    [],
+  );
 
   const voice = useVoiceAgent({
     onTranscript: (text) => {
       const trimmed = text.trim();
       if (!trimmed) return;
+
+      // Echo guard. The timing gate can't be trusted: nothing observes
+      // real playback (UE never reports back), and the barge-in detector
+      // opens the gate mid-reply because the avatar's leaked voice IS
+      // confident speech. So check content instead — we know exactly what
+      // the avatar is saying, and a transcript made of its words is echo
+      // no matter what the clock thinks.
+      //
+      // `pendingInterruptedRef` holds the reply text captured at barge-in;
+      // `lastResponseRef` the most recent reply. Check both: the first
+      // covers a barge-in-opened gate, the second a gate that closed early
+      // on the 4 s fallback while the avatar was still talking.
+      const aiSpeech = pendingInterruptedRef.current || lastResponseRef.current || '';
+      const verdict = detectEcho(trimmed, aiSpeech);
+      if (verdict.isEcho) {
+        console.info(
+          `[voice] dropped echo of the avatar (${verdict.reason}): "${trimmed}"`,
+        );
+        // False barge-in: the avatar interrupted itself. Clear the
+        // pending-interrupt so the next real turn isn't told it cut off a
+        // reply that in fact ran to completion. The gate is untouched —
+        // barge-in no longer moves it, and its own timer still owns it.
+        if (pendingInterruptedRef.current !== null) {
+          pendingInterruptedRef.current = null;
+          clearBargeInTimer();
+        }
+        streaming.reset();
+        return;
+      }
+
       // Mirror the PTT visual: drop the final transcription into the
       // textarea so the user briefly sees what was heard, then send.
       // The InputBar's send path will clear the textarea on its way
@@ -1907,17 +2412,19 @@ function AppMain() {
       // textarea content is just a momentary mirror anyway.
       window.setTimeout(() => {
         inputBarRef.current?.setText('');
-        // Continuous mode keeps `voice.isListening` true between
-        // utterances, so `voiceActive` stays on and the InputBar
-        // overlay would otherwise keep rendering streaming.display
-        // (which still carries the just-finalized committed text
-        // until the next startFeed). Resetting the transcriber state
-        // here clears that ghost transcript so the bar goes back to
-        // its empty visual between utterances.
+        // Continuous mode keeps `voice.isListening` true between utterances, so
+        // the transcriber still holds the just-finalized `committed` text until
+        // the next startFeed. Reset it here or the setText effect above would
+        // immediately re-populate the bar with the utterance we just sent.
         streaming.reset();
       }, 0);
     },
-    isAISpeaking: () => isAISpeakingRef.current,
+    // Gate is open while EITHER the coarse flag is set or the deadline
+    // hasn't passed. The deadline is the reliable half; the flag covers
+    // the window between deciding to speak and the first chunk arriving
+    // with a real duration.
+    isAISpeaking: () =>
+      isAISpeakingRef.current || performance.now() < aiSpeakingUntilRef.current,
     whisperPrompt: () => `Conversation with ${persona.displayName}.`,
     // Continuous voice mode pipes through the same Moonshine streaming
     // transcriber as push-to-talk, so the input bar shows partial
@@ -1932,14 +2439,30 @@ function AppMain() {
     },
     onBargeIn: () => {
       // Stage 1: tentative interruption, we've heard ~256 ms of
-      // confident user speech while the AI is talking. Mute audio
-      // immediately so the user has silence to talk into; cache
-      // what was being said so the next chat (if it actually
-      // fires) can pass it to the LLM as "you were interrupted
-      // saying X" context.
-      const v = document.querySelector('video');
-      if (v) v.muted = true;
-      isAISpeakingRef.current = false;
+      // confident speech while the AI is talking. Cache what was being
+      // said so the next chat (if it actually fires) can pass it to the
+      // LLM as "you were interrupted saying X" context.
+      //
+      // NOT muting the video and NOT clearing isAISpeakingRef here, both
+      // of which this used to do. On macOS neither is sound:
+      //
+      //   * Muting the <video> doesn't silence the avatar. The audible
+      //     copy is rendered by the Unreal process itself; the WebRTC
+      //     stream in this window is a second copy. Muting it changes
+      //     nothing you can hear.
+      //   * Clearing isAISpeakingRef opened the mic gate mid-reply, and
+      //     since the un-cancellable UE audio is what tripped barge-in in
+      //     the first place, the rest of the reply went straight into the
+      //     transcriber and back to the agent as a user prompt. The
+      //     detector was opening the gate against the very echo the gate
+      //     exists to block.
+      //
+      // VAD-based barge-in can only be trusted when the avatar's audio is
+      // cancellable, i.e. when it is rendered by this process. Until UE's
+      // local output is silenced on macOS (see _LocalAudioMuteMonitor,
+      // Windows-only), the detector cannot tell the user from the avatar,
+      // so it must not be allowed to unlock anything. The gate now closes
+      // only on its own timer.
       pendingInterruptedRef.current = lastResponseRef.current || null;
 
       // Stage 2: false-alarm guard, if no transcription comes
@@ -1953,16 +2476,81 @@ function AppMain() {
         // Only resume if no real chat fired in the meantime.
         if (pendingInterruptedRef.current !== null) {
           pendingInterruptedRef.current = null;
+          // Stage 1 no longer mutes, so there is nothing to unmute; this
+          // stays only to undo a mute left by an older build mid-session.
           const v2 = document.querySelector('video');
-          if (v2) v2.muted = false;
+          if (v2 && v2.muted) v2.muted = false;
           // Don't flip isAISpeakingRef back to true, the audio
           // was already in flight and its natural duration timer
           // (set in dispatchChatResult) will clear it normally.
         }
       }, 1500);
     },
-    onError: (msg) => console.warn('[voice]', msg),
+    onError: (msg) => {
+      console.warn('[voice]', msg);
+      const denied = /permission denied|notallowed|not-?allowed/i.test(msg);
+      if (denied) {
+        showVoiceNotice(
+          'Microphone access is off, so voice mode can’t hear you.',
+          'mic',
+        );
+      } else {
+        showVoiceNotice('Voice mode hit a snag. Tap the mic to try again.', 'generic');
+      }
+    },
   });
+
+  // Toggle voice mode. Before STARTING, proactively confirm the OS mic grant so
+  // we trigger the macOS prompt (or a clear notice) instead of a silent
+  // getUserMedia NotAllowedError. Stopping is always allowed.
+  const handleVoiceToggle = useCallback(async () => {
+    if (!voice.isListening) {
+      try {
+        const ok = await window.electronAPI?.mic?.request?.();
+        if (ok === false) {
+          showVoiceNotice(
+            'Microphone access is off, so voice mode can’t hear you.',
+            'mic',
+          );
+          return;
+        }
+      } catch {
+        /* non-electron / older preload: fall through to voice.toggle */
+      }
+    }
+    void voice.toggle();
+  }, [voice, showVoiceNotice]);
+
+  // Voice started successfully → mic access is clearly fine, so retire any
+  // lingering mic warning.
+  useEffect(() => {
+    if (voice.isListening) {
+      setVoiceNotice((n) => (n?.kind === 'mic' ? null : n));
+    }
+  }, [voice.isListening]);
+
+  // Listening reactions (backchannel): while the user speaks, ping soul so
+  // the avatar visibly attends (brow flick on start, slow nods while they
+  // keep talking, an acknowledgment nod when they stop). Soul gates all the
+  // hard cases server-side (captured mode, cooldowns, avatar-speaking), so
+  // this effect just mirrors the VAD state. The `sustained` interval only
+  // runs while speech is actually held.
+  const listeningSpokeAtRef = useRef<number>(0);
+  useEffect(() => {
+    if (!voice.isUserSpeaking) return;
+    // Barge-in has its own choreography (mute + interrupt); skip reactions.
+    if (isAISpeakingRef.current) return;
+    listeningSpokeAtRef.current = Date.now();
+    sendListeningEvent('start');
+    const iv = window.setInterval(() => sendListeningEvent('sustained'), 2500);
+    return () => {
+      window.clearInterval(iv);
+      // Acknowledge only real utterances, not VAD blips.
+      if (Date.now() - listeningSpokeAtRef.current > 1200) {
+        sendListeningEvent('end');
+      }
+    };
+  }, [voice.isUserSpeaking]);
 
   useEffect(() => {
     notifyAIFinishedRef.current = voice.notifyAIFinished;
@@ -2069,7 +2657,9 @@ function AppMain() {
     } catch (err) {
       console.warn('[reset] some steps failed', err);
     }
-    // Unclaim the machine so the next sign-in starts from a clean owner.
+    // Unclaim the machine so the next sign-in starts from a clean owner. Clear
+    // BOTH the durable main-process marker and the localStorage mirror.
+    try { await window.electronAPI?.clearLocalOwner?.(); } catch { /* ignore */ }
     try { localStorage.removeItem(LOCAL_ACCOUNT_KEY); } catch { /* ignore */ }
     clearLocalChatHistory();
     resetStack();
@@ -2091,139 +2681,232 @@ function AppMain() {
     profileSyncedRef.current = false;
   }, [authToken, resetStack, pixelStreaming]);
 
-  // Re-apply the user's saved wardrobe + lighting to UE. Fired on:
-  //   * stream connect (so a fresh UE session loads the user's outfit
-  //     before they ever see Grace),
-  //   * session reset (UE returns to neutral; we restore the look),
-  //   * any other place that needs to bring UE back to the saved
-  //     configuration without going through customization mode.
-  //
-  // Sends three descriptors:
-  //   1. initializeClothing, 4 int fields (top/bottom/shoes/hair)
-  //   2. changeLightAngle, string `lightAngle` 0-360
-  //   3. changeLightColor, flat dot-named string fields lightColor.r/.g/.b
-  //
-  // No-op when the stream isn't connected or the profile hasn't loaded
-  // a wardrobe yet.
-  // sendAndAwaitAck wrapped with retry, used by applyInstanceWardrobe so
-  // the stream-connect init handshake survives the "UE technically
-  // connected but not yet ready to process descriptors" race window.
-  // Sends → waits up to 1500ms for `{EventType, status: "received"}`
-  // back from UE → on timeout, retries (max 3 attempts). If all retries
-  // fail, logs an error but does NOT throw, so a missing ack for one
-  // descriptor never blocks the rest of the init chain or the UI.
-  const sendWithRetry = useCallback(async (
-    payload: Record<string, unknown> & { EventType: string },
-    maxAttempts = 3,
-  ) => {
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        console.log(`[wardrobe] → ${payload.EventType} (attempt ${attempt}/${maxAttempts})`, payload);
-        await sendAndAwaitAck(payload, { timeoutMs: 1500 });
-        return true;
-      } catch (err) {
-        console.warn(`[wardrobe] ${payload.EventType} attempt ${attempt} failed:`, err);
-      }
-    }
-    console.error(`[wardrobe] ${payload.EventType} GAVE UP after ${maxAttempts} attempts, UE never ack'd`);
-    return false;
-  }, [sendAndAwaitAck]);
-
   // Apply ONE instance's saved outfit to whatever character is currently live
-  // in UE. Called after a `characterReady` signal (post-swap) and on session
-  // reset. No-op when the instance has no saved wardrobe -> the freshly-spawned
-  // character keeps its authored UE defaults.
-  const applyInstanceWardrobe = useCallback(async (w: WardrobeSettings | null | undefined) => {
+  // in UE. Called at switch time (scope 'scene': the key light + backdrop are
+  // persistent-level actors, they apply while UE is still swapping classes),
+  // after a `characterReady` signal (scope 'outfit'), and with scope 'full'
+  // on the paths where the character is already live (same-class fast path,
+  // connect reconcile on-target). No-op when the instance has no saved
+  // wardrobe -> the character keeps its authored UE defaults.
+  //
+  // The chain itself (sparse sends, ordering, pipelined fire + single ack
+  // probe, the full descriptor contract) lives in
+  // src/wardrobe/dressCharacter.ts. This wrapper owns the React-side
+  // concerns: single-flight + cancellation. A run claims a fresh epoch unless
+  // the caller passes one (the scene run at switch time and the outfit run at
+  // characterReady share an epoch, so the outfit run doesn't cancel a scene
+  // probe/re-fire still in flight). emitAgentSwitch / reset / disconnect bump
+  // the epoch, so a superseded run stops at its next send instead of dressing
+  // a character it no longer owns.
+  //
+  // `agentIdForWardrobe` is the instance being dressed, passed explicitly
+  // rather than read off the active instance: this runs right after a swap,
+  // when "active" may still be the character we just left.
+  const applyInstanceWardrobe = useCallback(async (
+    w: WardrobeSettings | null | undefined,
+    agentIdForWardrobe?: string | null,
+    opts?: { scope?: DressScope; epoch?: number },
+  ) => {
     if (!pixelStreaming) return;
-    if (!w) return;
-    const myGen = ++wardrobeApplyGenRef.current;
-    // Sequential await, UE applies descriptors in order; if one is
-    // racing with the prior one we'd see weird intermediate states.
-    // The 1500ms-per-attempt × 3 attempts × 3 descriptors caps the
-    // whole handshake at ~13.5s worst case (vs hanging forever).
-    await sendWithRetry({
-      EventType: 'initializeClothing',
-      top:    w.topIndex    ?? 0,
-      bottom: w.bottomIndex ?? 0,
-      shoes:  w.shoesIndex  ?? 0,
-      hair:   w.hairIndex   ?? 0,
-    });
-    await sendWithRetry({
-      EventType: 'changeLightAngle',
-      lightAngle: String(w.lightingAngle ?? 0),
-    });
-    // Accent/lighting color: freeform hex override wins over the palette index.
-    const c = w.accentColorHex
-      ? hexToRgb01(w.accentColorHex)
-      : (ACCENT_COLORS[w.accentColorIndex ?? 0] ?? ACCENT_COLORS[0]);
-    await sendWithRetry({
-      EventType: 'changeLightColor',
-      'lightColor.r': c.r.toFixed(3),
-      'lightColor.g': c.g.toFixed(3),
-      'lightColor.b': c.b.toFixed(3),
-    });
-    // Per-category garment colors. UE's changeClothingColor takes both tones +
-    // the category. Each slot's effective color = its custom hex if set, else
-    // the palette preset. Best-effort — skipped categories keep the default.
-    const applyClothingColors = async () => {
-      const clothingColors = w.clothingColors;
-      if (!clothingColors) return;
-      for (const cat of ['top', 'bottom', 'shoes'] as const) {
-        if (wardrobeApplyGenRef.current !== myGen) return; // superseded by a newer apply
-        const pair = clothingColors[cat];
-        if (!pair) continue;
-        const c1 = pair.c1Hex ? hexToRgb01(pair.c1Hex) : (CLOTHING_COLORS[pair.c1] ?? CLOTHING_COLORS[0]);
-        const c2 = pair.c2Hex ? hexToRgb01(pair.c2Hex) : (CLOTHING_COLORS[pair.c2] ?? CLOTHING_COLORS[0]);
-        await sendWithRetry({
-          EventType: 'changeClothingColor',
-          wardrobeCategory: cat,
-          'color1.r': c1.r.toFixed(3),
-          'color1.g': c1.g.toFixed(3),
-          'color1.b': c1.b.toFixed(3),
-          'color2.r': c2.r.toFixed(3),
-          'color2.g': c2.g.toFixed(3),
-          'color2.b': c2.b.toFixed(3),
+    // An instance with NO saved wardrobe still dresses: buildDressPayloads sends
+    // -1 for every slot (keep-authored-default), which resets the character on a
+    // switch instead of letting the previous character's outfit bleed through.
+    const epoch = opts?.epoch ?? ++dressEpochRef.current;
+    const isAlive = () => dressEpochRef.current === epoch;
+    await dressCharacter({
+      wardrobe: w ?? {},
+      agentId: agentIdForWardrobe,
+      scope: opts?.scope ?? 'full',
+      emit: (payload) => {
+        pixelStreaming.emitUIInteraction({
+          ...payload,
+          Timestamp: new Date().toISOString(),
         });
-      }
-    };
-    // First pass. On macOS this is the ONLY pass — the native PixelStreaming
-    // plugin's slower round-trips already land this after the garment spawn, so
-    // color is instant and Mac behavior is unchanged from before this fix.
-    await applyClothingColors();
-    // WINDOWS/LINUX ONLY: re-apply across the short garment-spawn window. On a
-    // fresh character/garment spawn (launch + agent switch) initializeClothing
-    // re-spawns garments ASYNCHRONOUSLY and UE acks on receipt — not
-    // spawn-complete — so on Windows (fast localhost round-trips) the first
-    // color pass can land before the new garment mesh exists and gets clobbered
-    // by the spawn finishing with default materials. Garments appear fast (well
-    // before the entrance anim), so re-apply a few times so the color lands the
-    // instant the garment appears. Early passes make it feel instant; the later
-    // ones are safety nets for a slower spawn. Idempotent + gen-guarded so a
-    // newer switch cancels this tail. Gated off on macOS so that platform is
-    // byte-for-byte unchanged.
-    if (window.electronAPI?.platform !== 'darwin') {
-      for (const stepMs of [180, 320, 500]) { // re-apply at ~180 / 500 / 1000ms
-        await new Promise((resolve) => setTimeout(resolve, stepMs));
-        if (wardrobeApplyGenRef.current !== myGen) return;
-        await applyClothingColors();
-      }
-    }
-    console.log('[wardrobe] instance handshake complete');
-  }, [pixelStreaming, sendWithRetry]);
+      },
+      waitForAck,
+      isAlive,
+    });
+  }, [pixelStreaming, waitForAck]);
+  applyInstanceWardrobeRef.current = applyInstanceWardrobe;
 
-  // Mood-accent bleed. The wardrobe lighting color the user picks for
-  // the character also seeps into the UI via two CSS vars (`--mood-accent`
+  // GLOBAL environment apply. The backdrop (changeBGColor + changeBGMaterial)
+  // AND the key light (changeLightAngle + changeLightColor) are persistent-level
+  // actors, not character-owned, so they're set once globally and re-asserted on
+  // every switch (via the characterReady listener) + immediately whenever the
+  // user changes them — the room + grade stay put across agents. Light fields
+  // are emitted only when the user has actually configured them, so an unset
+  // environment leaves UE's authored studio light alone (same guard the dress
+  // chain used to use).
+  // Last bgmode (backdrop material) UE was told, so applyEnvironment can skip
+  // re-sending an unchanged material (which would reset the backdrop color).
+  // Reset to undefined on disconnect so a reconnect re-asserts it once.
+  const lastAppliedBgmodeRef = useRef<number | null | undefined>(undefined);
+  const applyEnvironment = useCallback((opts?: { forceMaterial?: boolean }) => {
+    if (!pixelStreaming) return;
+    const e = environment;
+    // Backdrop. ORDER MATTERS: changeBGMaterial swaps/re-instantiates the
+    // backdrop material, which resets its color parameter to the material's
+    // default (a frame later, even if we set the color right after) — so the
+    // material MUST be applied BEFORE the color, or it wipes the color we just
+    // set (the "bg color reverts on save" bug: applyEnvironment ran the color
+    // then the material, and the material reset it).
+    //
+    // On a normal color-only re-apply we SKIP the material (send it only when
+    // bgmode actually changed) precisely so it can't wipe the color. But on a
+    // SESSION RESET, UE has dropped the backdrop back to its engine default, so
+    // the material genuinely must be re-asserted first — callers on that path
+    // pass forceMaterial. The order (material → color) is identical either way;
+    // forceMaterial only decides WHETHER the material is re-sent, never after.
+    const force = opts?.forceMaterial === true;
+    let materialEmitted = false;
+    if (e.bgmode != null && (force || e.bgmode !== lastAppliedBgmodeRef.current)) {
+      pixelStreaming.emitUIInteraction({
+        EventType: 'changeBGMaterial',
+        bgmode: e.bgmode,
+        Timestamp: new Date().toISOString(),
+      });
+      lastAppliedBgmodeRef.current = e.bgmode;
+      materialEmitted = true;
+    }
+    const bgRgb = e.bgColorHex
+      ? hexToRgb01(e.bgColorHex)
+      : (BG_COLORS[e.bgColorIndex ?? 0] ?? BG_COLORS[0]);
+    const ps = pixelStreaming;
+    const emitColor = () => ps.emitUIInteraction({
+      EventType: 'changeBGColor',
+      'bgcolor.r': round3(bgRgb.r),
+      'bgcolor.g': round3(bgRgb.g),
+      'bgcolor.b': round3(bgRgb.b),
+      value: round3(e.bgGlow ?? BG_GLOW_DEFAULT),
+      Timestamp: new Date().toISOString(),
+    });
+    emitColor();
+    // changeBGMaterial re-instantiates the backdrop material and resets its
+    // color a FRAME LATER (async) — so the color we send right after gets wiped
+    // by that late reset. This is why the saved color lands on SAVE (where the
+    // material isn't re-sent, bgmode unchanged) but reverts on LOAD / reconnect
+    // (where it is). When the material was (re)emitted, re-assert the color a
+    // couple of beats later so it survives the material's async reset.
+    if (materialEmitted) {
+      window.setTimeout(emitColor, 200);
+      window.setTimeout(emitColor, 600);
+    }
+    // Key light.
+    if (e.lightingAngle != null) {
+      pixelStreaming.emitUIInteraction({
+        EventType: 'changeLightAngle',
+        lightAngle: String(e.lightingAngle),
+        Timestamp: new Date().toISOString(),
+      });
+    }
+    if (e.accentColorHex != null || e.accentColorIndex != null || e.lightIntensity != null) {
+      const lc = e.accentColorHex
+        ? hexToRgb01(e.accentColorHex)
+        : (ACCENT_COLORS[e.accentColorIndex ?? 0] ?? ACCENT_COLORS[0]);
+      pixelStreaming.emitUIInteraction({
+        EventType: 'changeLightColor',
+        'lightColor.r': round3(lc.r),
+        'lightColor.g': round3(lc.g),
+        'lightColor.b': round3(lc.b),
+        lightIntensity: round3(e.lightIntensity ?? LIGHT_INTENSITY_DEFAULT),
+        Timestamp: new Date().toISOString(),
+      });
+    }
+  }, [pixelStreaming, environment]);
+  const applyEnvironmentRef = useRef(applyEnvironment);
+  applyEnvironmentRef.current = applyEnvironment;
+  // Set by the reconcile driver when it initiates a fresh spawn (cold boot /
+  // reset / reconnect), so the NEXT characterReady re-asserts the global
+  // environment. A plain user character switch does NOT set it — the backdrop
+  // + light are persistent-level actors that survive a swap, so re-sending
+  // them on every switch would be pure redundancy.
+  const reapplyEnvOnNextReadyRef = useRef(false);
+  // Re-apply the moment any environment setting changes (and once the stream is up).
+  useEffect(() => {
+    if (pixelStreaming) applyEnvironment();
+  }, [environment, pixelStreaming, applyEnvironment]);
+
+  // ===== Camera ==========================================================
+  // We drive the camera explicitly (updateCameraFromLocation) instead of
+  // letting it move as a side-effect of wardrobeModeOn/Off. The desired framing
+  // is a function of (which character, are we customizing, the chosen mode):
+  // each character has its own resting height. Customization always pulls back
+  // to show the whole figure; otherwise the user's toggle (default / waist /
+  // full) picks the shot. locB.x/y/z go on the wire as NUMBERS (UE reads them
+  // with Get Number Field). Optionally pass an explicit agentId (e.g. from
+  // characterReady, before activeAgentId state has caught up to the new spawn).
+  const [cameraMode, setCameraMode] = useState<CameraMode>('default');
+  // While customizing, face-region panes (hair / eyebrow / eyelash) want the
+  // close resting shot instead of the full-figure pull-back, so the user can
+  // actually see the grooms they're editing. CustomWardrobe reports this per
+  // pane via onCloseUpChange. Defaults true because customization always opens
+  // on the hair pane.
+  const [customizeCloseUp, setCustomizeCloseUp] = useState(true);
+  const applyCamera = useCallback((agentIdOverride?: string | null) => {
+    if (!pixelStreaming) return;
+    const aid = agentIdOverride ?? activeAgentId;
+    const [x, y, z] = customizationActive
+      ? (customizeCloseUp ? cameraDefaultFor(aid) : cameraCustomize(aid))
+      : cameraForMode(aid, cameraMode);
+    pixelStreaming.emitUIInteraction({
+      EventType: 'updateCameraFromLocation',
+      'locB.x': round3(x),
+      'locB.y': round3(y),
+      'locB.z': round3(z),
+      Timestamp: new Date().toISOString(),
+    });
+  }, [pixelStreaming, activeAgentId, customizationActive, customizeCloseUp, cameraMode]);
+  const applyCameraRef = useRef(applyCamera);
+  applyCameraRef.current = applyCamera;
+
+  // Action camera. When a big body animation fires (kiss / dance / hello /
+  // celebrate / star-wars), briefly pull the camera back to the medium (waist)
+  // shot to reveal the whole gesture, hold ~1.5s, then return to the live
+  // framing. Skipped while customizing (that owns its own framing) and when
+  // already at the full pull-back (a move to waist would zoom IN). Re-arming
+  // (a second action) restarts the hold; the restore reads the CURRENT mode via
+  // applyCameraRef, so a manual toggle mid-action is honored.
+  const ACTION_CAMERA_HOLD_MS = 1500;
+  const actionCameraTimerRef = useRef<number | null>(null);
+  const triggerActionCamera = useCallback(() => {
+    if (!pixelStreaming || customizationActive || cameraMode === 'full') return;
+    const [x, y, z] = cameraForMode(activeAgentId, 'waist');
+    pixelStreaming.emitUIInteraction({
+      EventType: 'updateCameraFromLocation',
+      'locB.x': round3(x),
+      'locB.y': round3(y),
+      'locB.z': round3(z),
+      Timestamp: new Date().toISOString(),
+    });
+    if (actionCameraTimerRef.current !== null) window.clearTimeout(actionCameraTimerRef.current);
+    actionCameraTimerRef.current = window.setTimeout(() => {
+      actionCameraTimerRef.current = null;
+      applyCameraRef.current?.();
+    }, ACTION_CAMERA_HOLD_MS);
+  }, [pixelStreaming, activeAgentId, customizationActive, cameraMode]);
+  triggerActionCameraRef.current = triggerActionCamera;
+
+  // Re-frame whenever the active character, the customize mode, or the chosen
+  // camera mode changes (and once the stream is up). characterReady also nudges
+  // this (below) so a fresh cold-boot spawn — which the connect-time emit races
+  // ahead of — still lands.
+  useEffect(() => {
+    if (pixelStreaming) applyCamera();
+  }, [activeAgentId, customizationActive, cameraMode, pixelStreaming, applyCamera]);
+
+
+  // Mood-accent bleed. The GLOBAL key-light color the user picks
+  // also seeps into the UI via two CSS vars (`--mood-accent`
   // for solid spots, `--mood-tint-faint` for the hairline-top gradient).
   // Very subtle: only the chrome edges and a single decorative period
   // in the Greeting pick this up. The system `--accent` (focus, save,
   // error) stays ember red regardless so meaning never shifts with mood.
-  // Fires on profile load and every wardrobe save; falls back to the
-  // ember-red default if no wardrobe is configured.
+  // Fires whenever the global light color changes; falls back to the
+  // ember-red default if no light is configured.
   useEffect(() => {
-    const w = currentInstance?.wardrobe;
-    const c = w?.accentColorHex
-      ? { hex: w.accentColorHex, ...hexToRgb01(w.accentColorHex) }
-      : (ACCENT_COLORS[w?.accentColorIndex ?? 0] ?? ACCENT_COLORS[0]);
+    const c = environment.accentColorHex
+      ? { hex: environment.accentColorHex, ...hexToRgb01(environment.accentColorHex) }
+      : (ACCENT_COLORS[environment.accentColorIndex ?? 0] ?? ACCENT_COLORS[0]);
     const r = Math.round(c.r * 255);
     const g = Math.round(c.g * 255);
     const b = Math.round(c.b * 255);
@@ -2239,7 +2922,7 @@ function AppMain() {
       `rgba(${r}, ${g}, ${b}, 0.22)`);
     root.setProperty('--mood-tint-soft',
       `rgba(${r}, ${g}, ${b}, 0.14)`);
-  }, [currentInstance?.wardrobe]);
+  }, [environment.accentColorHex, environment.accentColorIndex]);
 
   // Live mirrors so the characterReady listener (subscribed once per stream)
   // reads the current roster + the instance we're switching INTO without
@@ -2286,23 +2969,180 @@ function AppMain() {
       const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current);
       // Record which character UE actually spawned. Fall back to the instance we
       // switched into when the signal omits agentId.
-      setUeActiveAgentId(
+      const spawned =
         (typeof msg.agentId === 'string' && msg.agentId)
           ? msg.agentId.toLowerCase()
-          : (inst?.agentId?.toLowerCase() ?? null),
-      );
+          : (inst?.agentId?.toLowerCase() ?? null);
+      // Swap succeeded: clear the agentSwitchFailed retry + dispatch state.
+      lastSwitchTargetRef.current = null;
+      switchRetryRef.current = 0;
+      switchDispatchedRef.current = null;
+      ueActiveAgentRef.current = spawned;
+      setUeActiveAgentId(spawned);
+      // Re-frame the camera for the character that just spawned. Every switch
+      // lands here (each character is a different height), and passing `spawned`
+      // explicitly avoids racing the activeAgentId state update. Fires on cold
+      // boot too (this is the reliable point after UE is actually ready).
+      applyCameraRef.current?.(spawned);
+      // Re-assert the GLOBAL environment (backdrop + key light) ONLY when this
+      // spawn is part of a session (re)establishment (cold boot / reset /
+      // reconnect) — where UE came up at its default. A user-initiated
+      // character switch keeps the persistent backdrop, so we don't re-send it.
+      if (reapplyEnvOnNextReadyRef.current) {
+        reapplyEnvOnNextReadyRef.current = false;
+        // Session (re)establishment: UE reset the backdrop to its default, so
+        // force the material to re-assert BEFORE the color (material → color).
+        applyEnvironmentRef.current?.({ forceMaterial: true });
+      }
       // Stale/racing-signal guard: only dress when the character UE actually
       // spawned (msg.agentId) matches the instance we're targeting.
       if (inst && typeof msg.agentId === 'string' && msg.agentId && inst.agentId !== msg.agentId) {
         return;
       }
-      void applyInstanceWardrobe(inst?.wardrobe);
+      // If this ready signal completes the swap we initiated, the scene half
+      // (light + backdrop) already fired at switch time: finish with the
+      // outfit half under the SAME epoch. Any other arrival (a swap driven
+      // from outside switchUeToAgent, a stale pending entry) dresses in full
+      // under a fresh epoch.
+      const pending = pendingSwitchRef.current;
+      const continuesSwitch =
+        pending != null &&
+        inst != null &&
+        pending.agentId === inst.agentId.toLowerCase() &&
+        dressEpochRef.current === pending.epoch;
+      if (continuesSwitch) pendingSwitchRef.current = null;
+      // Dress the per-character OUTFIT (clothing/colors/blends) now that the body
+      // exists. Light + backdrop are GLOBAL and were re-asserted by
+      // applyEnvironmentRef above, so they're not part of this per-instance
+      // chain. A continued switch reuses its epoch; any other arrival (a swap
+      // driven from outside switchUeToAgent, or a stale pending entry) dresses
+      // under a fresh epoch.
+      void applyInstanceWardrobe(
+        inst?.wardrobe, inst?.agentId,
+        continuesSwitch ? { scope: 'outfit', epoch: pending.epoch } : undefined,
+      );
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const ps = pixelStreaming as any;
     ps.addResponseEventListener?.('unclaw-character-ready', onResponse);
     return () => ps.removeResponseEventListener?.('unclaw-character-ready');
   }, [pixelStreaming, applyInstanceWardrobe]);
+
+  // PER-SLOT CLOTHING COLOUR. The merged agentSwitch carries the wardrobe
+  // INDICES; UE async-loads each garment mesh and reports updateTopSuccess /
+  // updateBottomSuccess / updateShoesSuccess once that mesh lands. A garment's
+  // colour (a dynamic material instance) can only take AFTER its mesh exists, so
+  // we send changeClothingColor off these signals — the moment each slot is
+  // ready, coloured from the selected instance's saved pair. No-op when the slot
+  // has no saved colour (keeps the mesh default). hair/eyelash/eyebrow are
+  // grooms with no clothing colour. Live edits during customization colour
+  // directly (the character is already on-screen), so they don't need this.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const CAT_FOR: Record<string, 'top' | 'bottom' | 'shoes'> = {
+      updateTopSuccess: 'top', updateBottomSuccess: 'bottom', updateShoesSuccess: 'shoes',
+    };
+    const onUpdate = (raw: string) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { return; }
+      const et = (parsed as { EventType?: unknown })?.EventType;
+      if (typeof et !== 'string') return;
+      const cat = CAT_FOR[et];
+      if (!cat) return;
+      const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current);
+      const pair = inst?.wardrobe?.clothingColors?.[cat];
+      if (!pair) return; // no saved colour for this slot -> leave the mesh default
+      const c1 = pair.c1Hex ? hexToRgb01(pair.c1Hex) : (CLOTHING_COLORS[pair.c1] ?? CLOTHING_COLORS[0]);
+      const c2 = pair.c2Hex ? hexToRgb01(pair.c2Hex) : (CLOTHING_COLORS[pair.c2] ?? CLOTHING_COLORS[0]);
+      pixelStreaming.emitUIInteraction({
+        EventType: 'changeClothingColor',
+        wardrobeCategory: cat,
+        'color1.r': c1.r.toFixed(3), 'color1.g': c1.g.toFixed(3), 'color1.b': c1.b.toFixed(3),
+        'color2.r': c2.r.toFixed(3), 'color2.g': c2.g.toFixed(3), 'color2.b': c2.b.toFixed(3),
+        Timestamp: new Date().toISOString(),
+      });
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ps = pixelStreaming as any;
+    ps.addResponseEventListener?.('unclaw-update-success', onUpdate);
+    return () => ps.removeResponseEventListener?.('unclaw-update-success');
+  }, [pixelStreaming]);
+
+  // SWAP FAILURE: the UE subsystem now broadcasts `agentSwitchFailed` when a
+  // swap's cast fails or resolves to blank (previously it stalled silently and
+  // the frontend waited forever on a characterReady that never came). Replay
+  // the last requested switch — the C++ generation counter dedupes duplicate
+  // in-flight loads, so a replay is safe — up to a bounded number of times,
+  // then fall back to the reconcile driver so the UI always converges on
+  // whatever UE actually settled on.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const onFailed = (raw: string) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { return; }
+      if (!parsed || typeof parsed !== 'object') return;
+      if ((parsed as { EventType?: unknown }).EventType !== 'agentSwitchFailed') return;
+      // On the Add picker the stage is intentionally blank; UE rejecting the
+      // 'blank' agentSwitch is EXPECTED. Don't retry or reconcile — that would
+      // drag the last agent back onto the hidden stage. Cancel handles restore.
+      if (onAddSlotRef.current) return;
+      // A same-id blank interstitial (grace → blank → grace) is mid-flight; the
+      // 'blank' rejection is expected and the scheduled respawn will bring the
+      // character back. Don't retry/reconcile off it.
+      if (sameIdBlankRef.current != null) return;
+      const target = lastSwitchTargetRef.current;
+      // If UE confirmed this swap DISPATCHED (agentSwitchSuccess) and it still
+      // failed, the id was valid but the incoming class isn't a BP_CharacterBase
+      // / resolved blank: replaying the identical id would just dispatch-then-
+      // fail again. Reconcile to UE's truth instead of retrying.
+      const dispatched = switchDispatchedRef.current;
+      switchDispatchedRef.current = null;
+      const dispatchFailed =
+        dispatched != null &&
+        target != null &&
+        dispatched === target.agentId.toLowerCase();
+      if (!target || dispatchFailed || switchRetryRef.current >= SWITCH_MAX_RETRIES) {
+        // Nothing safe to replay, dispatch-then-cast-failed, or out of retries:
+        // reconcile to whatever UE actually settled on.
+        lastSwitchTargetRef.current = null;
+        switchRetryRef.current = 0;
+        setUeSessionEpoch((e) => e + 1);
+        return;
+      }
+      switchRetryRef.current += 1;
+      // Small backoff so a replay doesn't land inside the same load window.
+      setTimeout(() => {
+        switchUeToAgentRef.current?.(target.agentId, target.dir, target.wardrobe);
+      }, 400);
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ps = pixelStreaming as any;
+    ps.addResponseEventListener?.('unclaw-agent-switch-failed', onFailed);
+    return () => ps.removeResponseEventListener?.('unclaw-agent-switch-failed');
+  }, [pixelStreaming]);
+
+  // SWAP DISPATCHED: UE emits `agentSwitchSuccess` right after the `Swap to
+  // Character` node runs in the `agentSwitch` event — the swap left the gate
+  // with a valid, latched id. This is the early positive signal (characterReady
+  // still follows once the body spawns + binds). We record the dispatched id so
+  // a subsequent agentSwitchFailed is treated as a genuine cast failure (don't
+  // replay the same id) rather than a never-dispatched swap, and reset the retry
+  // counter since the swap is genuinely progressing.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const onDispatched = (raw: string) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { return; }
+      if (!parsed || typeof parsed !== 'object') return;
+      if ((parsed as { EventType?: unknown }).EventType !== 'agentSwitchSuccess') return;
+      switchDispatchedRef.current = lastSwitchTargetRef.current?.agentId.toLowerCase() ?? null;
+      switchRetryRef.current = 0;
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ps = pixelStreaming as any;
+    ps.addResponseEventListener?.('unclaw-agent-switch-success', onDispatched);
+    return () => ps.removeResponseEventListener?.('unclaw-agent-switch-success');
+  }, [pixelStreaming]);
 
   // RECONCILE on connect: UE answers our fetchCurrentAgent query with the
   // character it's currently showing (same shape as characterReady). Decide:
@@ -2321,6 +3161,9 @@ function AppMain() {
       if (!parsed || typeof parsed !== 'object') return;
       const msg = parsed as { EventType?: unknown; agentId?: unknown };
       if (msg.EventType !== 'fetchCurrentAgent') return;
+      // A late reply that lands while the Add picker is open must not drive a
+      // character onto the intentionally-blank stage.
+      if (onAddSlotRef.current) return;
       if (initialResolvedRef.current) return; // only the connect-time query acts
       initialResolvedRef.current = true;
       const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current)
@@ -2334,18 +3177,36 @@ function AppMain() {
         // UE is already showing this character — don't re-switch (would loop on
         // reload). Just re-apply THIS instance's outfit, since UE may be wearing
         // another instance's look or the engine defaults.
-        setUeActiveAgentId(ueAgent || inst.agentId.toLowerCase());  // already on-screen; no characterReady will fire
-        void applyInstanceWardrobe(inst.wardrobe);
+        const live = ueAgent || inst.agentId.toLowerCase();
+        ueActiveAgentRef.current = live;  // already on-screen; no characterReady will fire
+        setUeActiveAgentId(live);
+        void applyInstanceWardrobe(inst.wardrobe, inst.agentId);
+        // Re-assert the GLOBAL environment (backdrop color + key light) too.
+        // No characterReady fires on this path, so without this the saved
+        // backdrop color silently reverts to UE's default on any reconcile
+        // that lands on an already-live character (warm reconnect, soul
+        // restart, reset) — read as "the bg color doesn't save". This is a
+        // reset path (UE dropped the backdrop to default), so force the
+        // material to re-assert BEFORE the color (material → color).
+        applyEnvironmentRef.current?.({ forceMaterial: true });
+        // Same reasoning for the camera: no characterReady fires here, so
+        // re-frame for the already-live character (warm reconnect / reset).
+        applyCameraRef.current?.(live);
       } else {
-        // Blank or a different character — switch; its characterReady dresses it.
-        emitAgentSwitch(inst.agentId, 1);
+        // Blank or a different character: switch through the same path the
+        // carousel uses, so the scene half (light + backdrop) applies while
+        // the character loads and characterReady finishes the outfit. This is
+        // a session-(re)establishment spawn (cold boot / reset / reconnect),
+        // so flag the resulting characterReady to re-assert the environment.
+        reapplyEnvOnNextReadyRef.current = true;
+        switchUeToAgent(inst.agentId, 1, inst.wardrobe);
       }
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const ps = pixelStreaming as any;
     ps.addResponseEventListener?.('unclaw-fetch-current-agent', onResponse);
     return () => ps.removeResponseEventListener?.('unclaw-fetch-current-agent');
-  }, [pixelStreaming, applyInstanceWardrobe, emitAgentSwitch]);
+  }, [pixelStreaming, applyInstanceWardrobe, switchUeToAgent]);
 
   // Connect-time driver: ask UE which character it's on, and KEEP asking until
   // it answers. On a cold launch the stream connects several seconds before UE's
@@ -2357,15 +3218,35 @@ function AppMain() {
   useEffect(() => {
     if (connectionState !== 'connected') {
       initialResolvedRef.current = false;
+      // Stream gone: whatever dressing chain / idle-revert was in flight
+      // belongs to a session that no longer exists.
+      dressEpochRef.current += 1;
+      cancelScheduledIdleRevert();
+      ueActiveAgentRef.current = null;
       setUeActiveAgentId(null);
+      // Fresh session will need the backdrop material re-asserted.
+      lastAppliedBgmodeRef.current = undefined;
       return;
     }
+    // On the Add picker the stage is intentionally blank. Don't drive a
+    // character in (a reconnect here should stay blank behind the picker);
+    // Cancel leaves ADD_SLOT first, which re-bumps the epoch and re-runs this
+    // driver with a real target.
+    if (onAddSlotRef.current) return;
     // Re-arm on every (re)connect AND every ueSessionEpoch bump (reset
     // session / reset account). A reset drops UE back to the blank stage
     // without dropping the stream, so we must clear the resolved flag and
     // re-drive from scratch, exactly like a fresh connect.
     initialResolvedRef.current = false;
+    dressEpochRef.current += 1;
+    cancelScheduledIdleRevert();
+    ueActiveAgentRef.current = null;
     setUeActiveAgentId(null);
+    // A reset/reconnect clears UE's backdrop material back to default, so the
+    // material must be re-asserted by the next applyEnvironment. Clear the
+    // skip-cache (otherwise applyEnvironment thinks UE still has it and the
+    // backdrop stays default after a reset).
+    lastAppliedBgmodeRef.current = undefined;
     let attempts = 0;
     const ask = () => {
       if (initialResolvedRef.current) return;
@@ -2422,7 +3303,15 @@ function AppMain() {
     let cancelled = false;
     void (async () => {
       try {
-        const localOwner = (() => {
+        // Prefer the durable main-process marker (survives a localStorage wipe
+        // that would otherwise look like an owner change and nuke the user's
+        // BYOK keys); fall back to the legacy localStorage marker so existing
+        // installs migrate cleanly on their first post-update sign-in.
+        const localOwner = await (async () => {
+          try {
+            const durable = await window.electronAPI?.getLocalOwner?.();
+            if (durable) return durable;
+          } catch { /* fall through to localStorage */ }
           try { return localStorage.getItem(LOCAL_ACCOUNT_KEY); } catch { return null; }
         })();
         const { profile: p, ownerChanged, cloudUnavailable } = await reconcileForAccount(accountId, authToken, localOwner);
@@ -2473,6 +3362,10 @@ function AppMain() {
           resetStack();
         }
 
+        // Record ownership in BOTH the durable main-process store (authoritative)
+        // and localStorage (legacy mirror) so the marker can't desync from the
+        // keys it guards.
+        try { await window.electronAPI?.setLocalOwner?.(accountId); } catch { /* ignore */ }
         try { localStorage.setItem(LOCAL_ACCOUNT_KEY, accountId); } catch { /* ignore */ }
 
         // Seed the cloud with this account's local roster when the cloud
@@ -2579,6 +3472,9 @@ function AppMain() {
       // spans the whole workspace, not the pre-shrunk window.
       setActiveWidget(null);
       setChatPaneOpen(false);
+      // Opens on the hair pane, which is a close-up pane; reset so entry frames
+      // close instead of inheriting the last session's pane framing for a frame.
+      setCustomizeCloseUp(true);
       setCustomizationActive(prev => !prev);
       return;
     }
@@ -2586,9 +3482,81 @@ function AppMain() {
   }, [onboardingComplete]);
 
   const handleCloseSheet = useCallback(() => setActiveWidget(null), []);
-  const handleExitCustomization = useCallback(() => setCustomizationActive(false), []);
+  // Cancel is try-on behavior: everything reverts. Dropping the preview falls
+  // the effect back to whatever the instance last saved.
+  const handleExitCustomization = useCallback(() => {
+    setCustomizationActive(false);
+    setEffectPreview(null);
+  }, []);
 
   const isConnected = connectionState === 'connected';
+
+  // Passthrough bridge. While in passthrough mode + connected, subscribe
+  // to soul's /passthrough/ws and render every pushed speak through the
+  // no-LLM /speak endpoint (with THIS renderer's onboarding voice + BYOK
+  // keys), dispatching each finished job to UE exactly like a chat turn.
+  // Re-dials on a soul respawn (subscribeSoulPorts bumps portEpoch, which
+  // is folded into connectionState upstream, so the effect re-runs on
+  // reconnect). persona.voices is read per-speak inside the bridge so an
+  // agent switch mid-session voices the new character.
+  const personaVoicesRef = useRef(persona.voices);
+  personaVoicesRef.current = persona.voices;
+  // Refs so live talkativeness/mute changes take effect without restarting
+  // the bridge (which would drop + redial the WS).
+  const passthroughPrefsRef = useRef(passthroughPrefs);
+  passthroughPrefsRef.current = passthroughPrefs;
+  // Ready = signed in (authToken) AND onboarded (profile). The shim gates on
+  // this so the agent isn't told "spoken" while the app is on the sign-in /
+  // setup screen (where /speak can't render , no keys). Reported over the WS.
+  const passthroughReady = !!authToken && !!profile;
+  const passthroughBridgeRef = useRef<{ stop: () => void; reportReady: (r: boolean) => void } | null>(null);
+  useEffect(() => {
+    if (!passthrough || !isConnected || !pixelStreaming) return undefined;
+    const bridge = startPassthroughBridge({
+      onRendered: (result) => { dispatchChatResult(result); },
+      getVoices: () => personaVoicesRef.current,
+      getPrefs: () => passthroughPrefsRef.current,
+      getReady: () => (!!authTokenRef.current && !!profileRef.current),
+      onAgent: (a) => setPassthroughAgent(a),
+    });
+    passthroughBridgeRef.current = bridge;
+    return () => { bridge.stop(); passthroughBridgeRef.current = null; setPassthroughAgent(null); };
+  }, [passthrough, isConnected, pixelStreaming, dispatchChatResult]);
+
+  // Voice input and passthrough are mutually exclusive: in passthrough the
+  // user's coding agent drives the avatar (the app does no inference of its
+  // own), so a hot mic makes no sense , and its accent border + halo
+  // (voiceActive) would otherwise linger over the composer even after exiting
+  // passthrough. Stop any active voice/streaming the moment passthrough turns
+  // on; the guards make repeat runs a no-op.
+  useEffect(() => {
+    if (!passthrough) return;
+    if (voice.isListening) void voice.stop();
+    if (streaming.isActive) { streaming.stop(); streaming.reset(); }
+  }, [passthrough, voice, streaming]);
+  // Re-report readiness if the user signs in / finishes onboarding while a
+  // passthrough session is already open (bridge stays connected).
+  useEffect(() => {
+    passthroughBridgeRef.current?.reportReady(passthroughReady);
+  }, [passthroughReady]);
+
+  // Body-idle resync. A renderer refresh/crash tears down the stream
+  // session and the fresh one starts on the default body-idle loop,
+  // while soul still holds the real rotation state ("we lose the
+  // context of where we were"). On every (re)connect, ask soul where
+  // the rotation is and re-dispatch it. GET /body/idle never advances
+  // the rotation, so reconnect storms are harmless.
+  useEffect(() => {
+    if (!isConnected || !pixelStreaming) return undefined;
+    let cancelled = false;
+    void (async () => {
+      const body = await fetchCurrentBodyIdle();
+      if (!cancelled && body) {
+        dispatchBodyToUE(pixelStreaming, body);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isConnected, pixelStreaming]);
 
   // Idle micro-expression driver. Fires POST /idle on a jittered
   // timer (~30-50s mean) to keep Grace alive when the user isn't
@@ -2641,7 +3609,13 @@ function AppMain() {
         && !voice.isListening
         && !escalating;
       if (ok) {
-        try { await fireIdle(); } catch { /* fireIdle soft-fails */ }
+        try {
+          const idleRes = await fireIdle();
+          // Body idle rotation rides the idle response (captured mode).
+          if (idleRes?.body && pixelStreaming) {
+            dispatchBodyToUE(pixelStreaming, idleRes.body);
+          }
+        } catch { /* fireIdle soft-fails */ }
       }
       if (cancelled) return;
       // When idle is disabled (paused or period=0) we still cycle, on a
@@ -2820,14 +3794,11 @@ function AppMain() {
     };
   }, [isConnected, hasSession, streaming, voice.isListening]);
 
-  // Drive the textarea live as streaming partials arrive. ONLY the
-  // committed portion lands in the textarea, tentative text gets
-  // rendered as a light-gray overlay sitting on top of the textarea
-  // (handled by InputBar via the voiceTentative prop). This way the
-  // unconfirmed words have a clear visual distinction from the
-  // committed text without requiring a separate live-transcript view.
-  // Effect deps don't include tentative, that re-renders InputBar
-  // directly through its prop, no need to call setText for it.
+  // Drive the textarea live as streaming partials arrive. The textarea
+  // (`message`) holds ONLY the committed portion; the unconfirmed tail is drawn
+  // separately as a dim ghost by the InputBar mirror (via the `tentative` prop
+  // above), so committed never renders twice — the bug that got the tail pulled
+  // the first time. This effect stays committed-only on purpose.
   useEffect(() => {
     if (!streaming.isActive) return;
     const baseline = voiceBaselineRef.current;
@@ -2852,12 +3823,35 @@ function AppMain() {
   // effect).
   const handleSaveWardrobe = useCallback((settings: WardrobeSettings) => {
     emitWardrobeDescriptor({ EventType: 'finalizeClothing' });
-    // Persist to the INSTANCE being customized (the live one), not a global
-    // profile. wardrobeTargetRef tracks the selected real instance, so this
-    // is stale-free and lands on the right roster slot.
-    setInstanceWardrobe(wardrobeTargetRef.current, settings);
+    // The ENVIRONMENT (backdrop + key light + post effect) is GLOBAL, not
+    // per-instance: split those fields out to the global environment store and
+    // strip them from the instance wardrobe so a character swap never changes
+    // the room or grade. Both overlays inherit the current globals through their
+    // `initial` (spread below), so these keys round-trip unchanged unless the
+    // user touched them — writing them back is idempotent. `hairStrands` is
+    // dropped entirely (the strands control was removed).
+    const {
+      bgColorHex, bgColorIndex, bgGlow,
+      lightingAngle, lightIntensity, accentColorHex, accentColorIndex,
+      effectId, effectStrength,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      hairStrands: _dropStrands,
+      ...instanceSettings
+    } = settings;
+    setEnvironment({
+      bgColorHex, bgColorIndex, bgGlow,
+      lightingAngle, lightIntensity, accentColorHex, accentColorIndex,
+      effectId, effectStrength,
+    });
+    // Persist the rest to the INSTANCE being customized (the live one).
+    // wardrobeTargetRef tracks the selected real instance, so this is
+    // stale-free and lands on the right roster slot.
+    setInstanceWardrobe(wardrobeTargetRef.current, instanceSettings);
     setCustomizationActive(false);
-  }, [emitWardrobeDescriptor, setInstanceWardrobe]);
+    // The effect is persisted now, so the preview has nothing left to add;
+    // dropping it hands the grade back to the saved value with no flicker.
+    setEffectPreview(null);
+  }, [emitWardrobeDescriptor, setInstanceWardrobe, setEnvironment]);
 
   // wardrobeModeOn / wardrobeModeOff are now owned entirely by
   // CustomizationOverlay, which toggles them per active view (off in the hair
@@ -2892,13 +3886,8 @@ function AppMain() {
     }
   }, [activeWidget, refreshKey]);
 
-  // Chevron-prev / chevron-next for the AgentSwitcher row above the input bar.
-  // Steps through the roster carousel ([...roster, Add slot]).
-  const handlePrevPersona = useCallback(() => stepAgent(-1), [stepAgent]);
-  const handleNextPersona = useCallback(() => stepAgent(1), [stepAgent]);
-
   return (
-    <div className="relative flex-1 min-h-0 overflow-hidden">
+    <div className={`relative flex-1 min-h-0 overflow-hidden${uiHidden ? ' unclaw-ui-hidden' : ''}`}>
       {/* Workspace, everything that should physically shrink when the
           chat pane opens. The `right` value animates from 0 →
           chatPaneWidth so StreamView, the input bar, and every
@@ -2920,6 +3909,15 @@ function AppMain() {
         connectionState={connectionState}
       />
 
+      {/* Post effects, graded over the stream. Mounted for the whole session,
+          not just while customizing: the effect is part of how she looks. The
+          in-flight preview wins over the saved value so dragging the strength
+          slider is instant. */}
+      <StreamEffects
+        effectId={effectPreview?.effectId ?? environment.effectId}
+        strength={effectPreview?.effectStrength ?? environment.effectStrength}
+      />
+
       {/* Customization mode, full-screen overlay anchored to the
           workspace wrapper, so it shares Grace's framing. Every other
           chrome element below fades out while it's mounted. Rendered
@@ -2928,12 +3926,28 @@ function AppMain() {
           properly fire wardrobeModeOff. */}
       <AnimatePresence>
         {customizationActive && (
-          <CustomizationOverlay
-            key="customization"
-            initial={currentInstance?.wardrobe ?? null}
+          // One unified customization surface for every character. It resolves
+          // its own wardrobe from the active agent id: custom-pipeline builds
+          // get the full catalog (34 hair / 18 brows / 6 lashes + body); the
+          // base six get their restricted set (own hair, shared clothing, no
+          // brows/lashes, no body). See wardrobeForAgent in catalog.ts.
+          <CustomWardrobe
+            key="custom-wardrobe"
+            agentId={activeAgentId}
+            initial={{
+              ...(currentInstance?.wardrobe ?? {}),
+              // Environment (backdrop + light + effect) is GLOBAL: overlay the
+              // current globals so the pane opens on them, not on any stale
+              // per-instance copy left in the wardrobe blob.
+              ...environment,
+            }}
             onEmit={emitWardrobeDescriptor}
             onSave={handleSaveWardrobe}
             onCancel={handleExitCustomization}
+            onEffect={setEffectPreview}
+            onCloseUpChange={setCustomizeCloseUp}
+            bgMode={environment.bgmode}
+            onBgMode={(m) => setEnvironment({ bgmode: m })}
           />
         )}
       </AnimatePresence>
@@ -3209,11 +4223,30 @@ function AppMain() {
                 pointerEvents: 'none',
               }}
             >
+              {/* Camera framing toggle, floats just above the input bar.
+                  Only while a stream is up and not in customization (which owns
+                  its own full-figure framing). */}
+              {isConnected && !customizationActive && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8, pointerEvents: 'auto' }}>
+                  <CameraModeToggle mode={cameraMode} onChange={setCameraMode} />
+                </div>
+              )}
               <div style={{ pointerEvents: 'auto' }}>
                 <InputBar
                   ref={inputBarRef}
                   personaName={characterName}
                   isSending={isSending}
+                  passthrough={passthrough}
+                  onExitPassthrough={() => setPassthrough(false)}
+                  passthroughAgent={passthroughAgent
+                    ? (passthroughAgent.project
+                        ? `${passthroughAgent.name} · ${passthroughAgent.project}`
+                        : passthroughAgent.name)
+                    : null}
+                  passthroughVerbosity={passthroughPrefs.verbosity}
+                  passthroughMuted={passthroughPrefs.muted}
+                  onSetPassthroughVerbosity={setPassthroughVerbosity}
+                  onTogglePassthroughMuted={togglePassthroughMuted}
                   disabled={!isConnected}
                   hasAttachments={attachedImages.length > 0}
                   onSendMessage={handleSendMessage}
@@ -3224,36 +4257,43 @@ function AppMain() {
                   onExpress={handleExpress}
                   voice={{
                     active: voice.isListening,
-                    disabled: isSending,
+                    // Only block STARTING voice while she's replying. It must
+                    // always be possible to STOP it: in continuous mode every
+                    // turn sets isSending, which used to grey the button out
+                    // (0.4 opacity, not-allowed) and pulse it while the mic was
+                    // still hot, so you couldn't switch voice mode off until she
+                    // finished. That was the erratic behaviour.
+                    disabled: isSending && !voice.isListening,
                     vadLevel: voice.vadLevel,
                     isUserSpeaking: voice.isUserSpeaking,
                     isTranscribing: voice.isTranscribing,
-                    toggle: () => { void voice.toggle(); },
+                    toggle: () => { void handleVoiceToggle(); },
                     start: () => { void voice.start(); },
                     stop: () => { void voice.stop(); },
                   }}
-                  // Overlay during BOTH PTT and continuous mode. PTT
-                  // flips streaming.isActive on start(); continuous
-                  // mode flips it when VoiceController calls
-                  // startFeed() at speech onset. OR'ing `voice.isListening`
-                  // covers the brief gap between mic toggle and the WS
-                  // handshake.
+                  // Voice-active visual state during BOTH PTT and continuous
+                  // mode. PTT flips streaming.isActive on start(); continuous
+                  // mode flips it when VoiceController calls startFeed() at
+                  // speech onset. OR'ing `voice.isListening` covers the brief
+                  // gap between mic toggle and the WS handshake.
                   //
-                  // The overlay uses `display` (committed + tentative
-                  // joined) rather than `tentative` alone. Moonshine's
-                  // LocalAgreement-2 promotes most heard speech into
-                  // `committed` as soon as two consecutive inferences
-                  // agree on it; tentative is just the unstable tail.
-                  // Showing tentative-only made the overlay flicker
-                  // briefly with the last few words and disappear once
-                  // they stabilized, exactly the "millisecond flash"
-                  // the user reported. `display` keeps the whole
-                  // running transcript visible until finalize clears.
-                  voiceActive={streaming.isActive || voice.isListening}
-                  voiceTentative={streaming.display.trim().replace(/^\s+/u, '')}
-                  onPrevPersona={handlePrevPersona}
-                  onNextPersona={handleNextPersona}
-                  onPersonaNameClick={() => selectInstance(ADD_SLOT, 1)}
+                  // The bar shows ONLY committed transcript while you speak.
+                  // The committed text already lands in the textarea via the
+                  // setText effect above; we used to ALSO pass `display`
+                  // (committed + tentative) as a gray overlay, which re-rendered
+                  // every committed word a second time. Unconfirmed words are no
+                  // longer drawn at all.
+                  voiceActive={!passthrough && (streaming.isActive || voice.isListening)}
+                  // The unstable transcriber tail, shown as a dim ghost after
+                  // the committed text (which rides `message` via setText). The
+                  // InputBar mirror renders committed once + this once, so no
+                  // double-draw. Cleared to '' when not streaming so it never
+                  // lingers after finalize.
+                  tentative={streaming.isActive ? streaming.tentative : ''}
+                  agents={personaAgents}
+                  selectedAgentId={selectedInstanceId}
+                  onSelectAgent={(id) => selectInstance(id, 1)}
+                  onAddAgent={() => selectInstance(ADD_SLOT, 1)}
                   personaDisabled={!isConnected}
                   onPasteImage={handlePasteImage}
                   onAttachImages={handleAttachImages}
@@ -3337,11 +4377,84 @@ function AppMain() {
         onResetSession={handleResetSession}
         onOpenSettings={() => setSettingsOpen(true)}
         clawsBalance={hasSession ? clawsBalance : undefined}
+        companionAuth={hasSession && authUser ? { token: authToken ?? null, userId: authUser.id } : null}
       />
 
       {/* New-account notice: this machine's previous API keys were cleared
           (keys are local secrets, never synced to an account). Nudge the user
           to re-enter them in Settings. Dismissible. */}
+      {/* Voice / mic warning — same top-banner treatment as the "re-enter your
+          keys" notice. Mic denials are accent-tinted and sticky with an Open
+          Settings action; generic voice hiccups are neutral and self-clear. */}
+      {voiceNotice && (
+        <div
+          role="alert"
+          style={{
+            position: 'absolute',
+            top: 46,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 59,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            maxWidth: 440,
+            padding: '9px 12px 9px 14px',
+            borderRadius: 12,
+            background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.66))',
+            border: `1px solid ${voiceNotice.kind === 'mic' ? 'color-mix(in srgb, var(--accent) 45%, transparent)' : 'rgba(255,255,255,0.12)'}`,
+            backdropFilter: 'var(--glass-blur)',
+            WebkitBackdropFilter: 'var(--glass-blur)',
+            boxShadow: '0 10px 28px -12px rgba(0,0,0,0.6)',
+            color: 'var(--text-primary)',
+            fontSize: 12.5,
+            lineHeight: 1.35,
+          }}
+        >
+          <span style={{ flex: 1 }}>{voiceNotice.text}</span>
+          {voiceNotice.kind === 'mic' && (
+            <button
+              type="button"
+              onClick={() => { void window.electronAPI?.mic?.openSettings?.(); }}
+              style={{
+                flex: '0 0 auto',
+                padding: '5px 10px',
+                borderRadius: 8,
+                border: '1px solid color-mix(in srgb, var(--accent) 55%, transparent)',
+                background: 'color-mix(in srgb, var(--accent) 20%, transparent)',
+                color: 'var(--text-primary)',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Open Settings
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setVoiceNotice(null)}
+            aria-label="Dismiss"
+            style={{
+              flex: '0 0 auto',
+              width: 22,
+              height: 22,
+              padding: 0,
+              borderRadius: '50%',
+              border: 'none',
+              background: 'transparent',
+              color: 'var(--text-ghost)',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <X size={14} strokeWidth={2.4} />
+          </button>
+        </div>
+      )}
+
       {apiKeysNotice && hasSession && (
         <div
           style={{

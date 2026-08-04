@@ -403,7 +403,9 @@ async function runStageRuntime(
     window,
     uv,
     ['python', 'install', MANIFEST.pythonVersion],
-    { stream: true, extraEnv: uvEnv },
+    // ~200 MB CPython download; 10 min is generous for a slow link but bounds
+    // a truly stalled fetch.
+    { stream: true, extraEnv: uvEnv, timeoutMs: 10 * 60_000 },
   );
 
   // 2. Create the venv (idempotent, uv venv is a no-op if it exists
@@ -414,7 +416,7 @@ async function runStageRuntime(
       window,
       uv,
       ['venv', paths.pythonEnv, '--python', MANIFEST.pythonVersion],
-      { stream: true, extraEnv: uvEnv },
+      { stream: true, extraEnv: uvEnv, timeoutMs: 3 * 60_000 },
     );
   } else {
     pushLog(window, 'meta', '[runtime] venv already exists, skipping create');
@@ -445,7 +447,27 @@ async function runStageRuntime(
       '-r', requirementsFile,
       '--index-strategy', 'unsafe-best-match',
     ],
-    { stream: true, extraEnv: uvEnv },
+    // The slowest step (multi-hundred-MB wheel set). 20 min bounds a hung
+    // PyPI socket while leaving ample headroom for a genuinely slow install.
+    { stream: true, extraEnv: uvEnv, timeoutMs: 20 * 60_000 },
+  );
+
+  // Strip torch/torchaudio. Nothing on the Mac path imports them (T2F is
+  // lazy + MLX, Kokoro is MLX, lipsync is ONNX, STT is mlx-whisper), but
+  // mlx-whisper's package METADATA declares torch, so the resolve above
+  // drags ~450 MB of wheels back in on every fresh install. Requirements
+  // can't express "ignore this transitive dep" portably; an explicit
+  // uninstall after the resolve is deterministic under any resolver.
+  // Best-effort: if they were never installed, uv exits fine.
+  await runCommand(
+    window,
+    uv,
+    [
+      'pip', 'uninstall',
+      '--python', venvPythonPath(paths.pythonEnv),
+      'torch', 'torchaudio',
+    ],
+    { stream: true, extraEnv: uvEnv, timeoutMs: 2 * 60_000 },
   );
 
   // Windows-only: reconcile onnxruntime. kokoro-onnx transitively depends on
@@ -577,6 +599,19 @@ export async function syncSoulVenv(
       '--python', venvPython,
       '-r', requirementsFile,
       '--index-strategy', 'unsafe-best-match',
+    ],
+    { stream: true, extraEnv: uvEnv },
+  );
+  // Same torch strip as the first-run install: mlx-whisper's metadata
+  // re-drags torch on every resolve even though nothing imports it on
+  // the Mac path. Keep the venv in the shipped (torch-free) shape.
+  await runCommand(
+    window!,
+    uv,
+    [
+      'pip', 'uninstall',
+      '--python', venvPython,
+      'torch', 'torchaudio',
     ],
     { stream: true, extraEnv: uvEnv },
   );
@@ -808,6 +843,7 @@ export async function downloadWithResumeAndVerify(
     fs.unlinkSync(destPath);
   }
 
+  const partialPath = `${destPath}.partial`;
   let attempt = 0;
   let lastErr: Error | null = null;
   while (attempt < DOWNLOAD_RETRIES) {
@@ -817,6 +853,12 @@ export async function downloadWithResumeAndVerify(
       if (asset.sha256) {
         const sha = await sha256File(destPath);
         if (sha !== asset.sha256) {
+          // Known-bad bytes (CDN served a stale cached body, truncated
+          // transfer, a Range-ignored resume that slipped through). Remove
+          // the final file AND any lingering partial so the retry starts
+          // clean instead of resuming onto the corrupt tail.
+          try { fs.unlinkSync(destPath); } catch { /* ok */ }
+          try { fs.unlinkSync(partialPath); } catch { /* ok */ }
           throw new Error(
             `SHA-256 mismatch on ${path.basename(destPath)}: ` +
             `expected ${asset.sha256}, got ${sha}`,
@@ -837,6 +879,12 @@ export async function downloadWithResumeAndVerify(
       lastErr = err as Error;
       pushLog(window, 'meta',
         `[download] attempt ${attempt}/${DOWNLOAD_RETRIES} failed: ${lastErr.message}`);
+      // 4xx (bad URL, WAF block, expired presigned URL) won't heal on retry.
+      // Fail fast instead of burning the whole backoff schedule on it.
+      if ((lastErr as Error & { fatal?: boolean }).fatal) {
+        pushLog(window, 'meta', `[download] not retrying (client error): ${lastErr.message}`);
+        break;
+      }
       const backoff = Math.pow(2, attempt - 1) * 1000;
       await sleep(backoff);
     }
@@ -896,16 +944,30 @@ function downloadOnce(
         return;
       }
 
+      // Range-ignored guard. We asked to resume (sent a Range header) but the
+      // server answered 200 (full body) instead of 206 (partial content) ,
+      // common when a CDN/presigned URL ignores Range. Appending that full
+      // body onto our existing partial bytes yields a corrupt partial+full
+      // file, previously caught only by the SHA check after a fully wasted
+      // download. Detect it and restart the file from byte 0 instead.
+      let startAt = resumeFrom;
+      if (resumeFrom > 0 && res.statusCode === 200) {
+        pushLog(window, 'meta',
+          `[download] server ignored Range (200 not 206), restarting ` +
+          `${path.basename(destPath)} from the beginning`);
+        startAt = 0;
+      }
+
       const contentLength = parseInt(res.headers['content-length'] || '0', 10);
       const total = expectedSize > 0
         ? expectedSize
-        : (resumeFrom + contentLength);
+        : (startAt + contentLength);
 
       const out = fs.createWriteStream(partialPath, {
-        flags: resumeFrom > 0 ? 'a' : 'w',
+        flags: startAt > 0 ? 'a' : 'w',
       });
 
-      let received = resumeFrom;
+      let received = startAt;
       let lastEmit = 0;
       res.on('data', (chunk: Buffer) => {
         received += chunk.length;
@@ -1005,10 +1067,39 @@ export interface InstalledPak {
   containerPak: string | null;
 }
 
+/** Sidecar that records which manifest version of a pak is staged, so the
+ *  provisioning pass can tell an OUTDATED pak from a current one and re-download
+ *  on drift (not just when missing). Lives next to <id>.pak in the stage dir. */
+function pakVersionFile(characterId: string): string {
+  return path.join(characterPaksStageDir(), `${characterId}.version`);
+}
+
+/** Map of staged characterId -> installed pak version (from the sidecar).
+ *  Missing sidecar => 'unknown', which never equals a real manifest version, so
+ *  a pak staged before versioning existed is treated as drifted and refreshed. */
+export function installedPakVersions(): Record<string, string> {
+  const out: Record<string, string> = {};
+  try {
+    const dir = characterPaksStageDir();
+    if (!fs.existsSync(dir)) return out;
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.toLowerCase().endsWith('.pak')) continue;
+      const id = f.replace(/\.pak$/i, '');
+      let version = 'unknown';
+      try {
+        const v = fs.readFileSync(path.join(dir, `${id}.version`), 'utf8').trim();
+        if (v) version = v;
+      } catch { /* no sidecar => unknown */ }
+      out[id] = version;
+    }
+  } catch { /* ignore */ }
+  return out;
+}
+
 export async function downloadAndExtractCharacterPak(
   window: BrowserWindow,
   characterId: string,
-  asset: { url: string; sha256: string | null; sizeBytes: number },
+  asset: { url: string; sha256: string | null; sizeBytes: number; version?: string },
   onProgress: (downloaded: number, total: number) => void,
 ): Promise<InstalledPak> {
   assertSafeCharacterId(characterId);
@@ -1054,6 +1145,12 @@ export async function downloadAndExtractCharacterPak(
   fs.mkdirSync(stageDir, { recursive: true });
   const stagedPak = path.join(stageDir, stagedName);
   fs.copyFileSync(srcPak, stagedPak);
+  // Stamp the staged version so a later provisioning pass can detect drift.
+  // Written AFTER the copy so a crash mid-copy leaves no false "current" mark.
+  try {
+    if (asset.version) fs.writeFileSync(pakVersionFile(characterId), asset.version);
+    else { try { fs.unlinkSync(pakVersionFile(characterId)); } catch { /* none */ } }
+  } catch { /* non-fatal: worst case it re-downloads next launch */ }
 
   // (2) Mid-session mount path — the renderer sends MountCharacterPak(<this>)
   // so the character is usable without a relaunch. Platform-specific because
@@ -1184,6 +1281,11 @@ export interface RunCommandOpts {
   /** Extra env vars merged into the child process env. Used to scope
    *  uv's downloaded CPython + cache under our runtime dir. */
   extraEnv?: NodeJS.ProcessEnv;
+  /** Hard wall-clock cap. If the child hasn't exited by then it's killed
+   *  and the promise rejects with a clear "timed out" error. Without this a
+   *  wedged `uv pip install` (a stalled PyPI socket) hangs the setup stage
+   *  forever behind the indeterminate progress arc. Omit for no timeout. */
+  timeoutMs?: number;
 }
 
 export function runCommand(
@@ -1215,11 +1317,29 @@ export function runCommand(
         if (line) pushLog(window, stream, line);
       }
     };
+    // Optional wall-clock watchdog. Kills a wedged child (SIGKILL after a
+    // SIGTERM grace) and rejects so the stage surfaces a real error instead
+    // of hanging behind the indeterminate progress arc forever.
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (opts.timeoutMs && opts.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        try { proc.kill('SIGTERM'); } catch { /* already gone */ }
+        setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, 3000);
+      }, opts.timeoutMs);
+    }
+    const clearTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
+
     proc.stdout?.on('data', onChunk('stdout'));
     proc.stderr?.on('data', onChunk('stderr'));
-    proc.on('error', reject);
+    proc.on('error', (err) => { clearTimer(); reject(err); });
     proc.on('exit', (code) => {
-      if (code === 0 || opts.ignoreNonZeroExit) {
+      clearTimer();
+      if (timedOut) {
+        reject(new Error(
+          `${path.basename(cmd)} timed out after ${Math.round((opts.timeoutMs ?? 0) / 1000)}s`));
+      } else if (code === 0 || opts.ignoreNonZeroExit) {
         resolve();
       } else {
         reject(new Error(`${path.basename(cmd)} exited with code ${code}`));

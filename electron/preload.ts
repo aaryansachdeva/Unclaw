@@ -30,12 +30,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openTerminalWithCommand: (command: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('terminal:open-with-command', command),
 
+  /** Microphone permission (macOS). `requestMic` proactively triggers the OS
+   *  prompt (or resolves false if already denied) BEFORE getUserMedia so voice
+   *  mode never fails silently. `getMicStatus` reads current access, and
+   *  `openMicSettings` jumps to the Privacy > Microphone pane. */
+  mic: {
+    getStatus: (): Promise<'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown'> =>
+      ipcRenderer.invoke('mic:get-status'),
+    request: (): Promise<boolean> => ipcRenderer.invoke('mic:request'),
+    openSettings: (): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('mic:open-settings'),
+  },
+
   // ----------------------------------------------------------------------
   // Screenshot, main-window facing.
   // The main React app calls `triggerScreenshot()` to fire the overlay
   // (same effect as the global Ctrl+Shift+G). It then subscribes to
   // `onScreenshotCaptured` to receive the cropped PNG (base64) plus
   // the dimensions.
+  // TEMP(revert): Cmd+H all-chrome hide toggle. Fired from main's globalShortcut.
+  onTempToggleUi: (cb: () => void): (() => void) => {
+    const handler = () => cb();
+    ipcRenderer.on('temp:toggle-ui', handler);
+    return () => ipcRenderer.removeListener('temp:toggle-ui', handler);
+  },
+
   triggerScreenshot: () => ipcRenderer.send('screenshot:trigger'),
   onScreenshotCaptured: (
     cb: (payload: { base64: string; width: number; height: number }) => void,
@@ -103,6 +122,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('apiKeys:set', payload),
   apiKeysClear: (): Promise<boolean> =>
     ipcRenderer.invoke('apiKeys:clear'),
+  getLocalOwner: (): Promise<string | null> =>
+    ipcRenderer.invoke('localOwner:get'),
+  setLocalOwner: (ownerId: string): Promise<boolean> =>
+    ipcRenderer.invoke('localOwner:set', ownerId),
+  clearLocalOwner: (): Promise<boolean> =>
+    ipcRenderer.invoke('localOwner:clear'),
 
   // ----------------------------------------------------------------------
   // Soul lifecycle, main spawns (or attaches to) soul on app start and
@@ -126,6 +151,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     /** User-initiated retry from the boot-failure screen. Tears down any
      *  half-started soul and runs a fresh boot episode. */
     restart: (): Promise<boolean> => ipcRenderer.invoke('soul:restart'),
+    /** Reveal the logs folder in Finder/Explorer. Surfaced from the boot
+     *  screen so a user hitting a stuck launch can grab logs for support. */
+    openLogs: (): Promise<boolean> => ipcRenderer.invoke('system:open-logs'),
     /** Latest discovered ports, or null while soul is still booting.
      *  Renderer code that constructs URLs should prefer onPorts() +
      *  the snapshot's ports field over hardcoded 8765/8080/8888. */
@@ -274,7 +302,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       url: string;
     }): Promise<{ ok: boolean; dir?: string; mountPath?: string | null; error?: string }> =>
       ipcRenderer.invoke('character-store:download-pak', args),
-    listInstalled: (): Promise<{ ids: string[] }> =>
+    listInstalled: (): Promise<{ ids: string[]; stale: string[] }> =>
       ipcRenderer.invoke('character-store:list-installed'),
     // Cloned-voice install. The voice files ride in the same private,
     // entitlement-gated bucket as the pak; the renderer fetches presigned URLs

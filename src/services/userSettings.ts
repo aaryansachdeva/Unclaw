@@ -99,13 +99,45 @@ export interface WardrobeSettings {
   bottomIndex?: number;
   shoesIndex?: number;
   hairIndex?: number;
+  /** @deprecated The strands toggle was removed from the UI; hair uses its
+   *  authored default. Kept on the type only so App's save-split can strip any
+   *  value lingering in an old persisted wardrobe blob. Never written anymore. */
+  hairStrands?: boolean;
+  /** Custom characters only: brow groom index (wardrobeCategory 'eyebrow'). */
+  browIndex?: number;
+  /** Custom characters only: lash groom index (wardrobeCategory 'eyelash'). */
+  lashIndex?: number;
+  /** Custom characters only. Bipolar body-blend axes, -1..+1, 0 = authored
+   *  proportions. Stored as ONE signed number per axis rather than UE's four
+   *  unsigned blends, because tall and short are the same lever: you can't be
+   *  both. setBlends splits each axis back into its pair at emit time. */
+  heightBlend?: number;
+  weightBlend?: number;
   lightingAngle?: number;
+  /** Key-light brightness, sent verbatim to UE's Set Intensity as the
+   *  `lightIntensity` field of changeLightColor. Raw UE units (candelas),
+   *  0-10, 8 = the light's authored default. Absent = leave UE's default. */
+  lightIntensity?: number;
   /** Index into the curated accent-lighting palette (see ACCENT_COLORS
    *  in components/Wardrobe). 0 = neutral default. */
   accentColorIndex?: number;
   /** Optional freeform hex override for the accent/lighting color, set via the
    *  color picker. When present it wins over accentColorIndex. */
   accentColorHex?: string;
+  /** Index into the backdrop palette (BG_COLORS in CustomizationOverlay).
+   *  0 = the authored dark navy. */
+  bgColorIndex?: number;
+  /** Freeform hex override for the backdrop. Wins over bgColorIndex. */
+  bgColorHex?: string;
+  /** Backdrop glow, the `Multiple` scalar on the half-sphere's material.
+   *  Multiplier, 0-5, 1 = authored default. */
+  bgGlow?: number;
+  /** Post effect graded over the video in the renderer (see StreamEffects).
+   *  Never reaches UE: the stream is a <video>, and this is a compositing
+   *  layer on top of it. 'none' or absent = the raw stream. */
+  effectId?: string;
+  /** Effect strength, 0-1. */
+  effectStrength?: number;
   /** Per-category garment colors. Only the colorable categories
    *  (top/bottom/shoes) appear; absent = palette default. */
   clothingColors?: Partial<Record<'top' | 'bottom' | 'shoes', ClothingColor>>;
@@ -406,6 +438,13 @@ export async function reconcileForAccount(
   localOwnerId: string | null,
 ): Promise<ReconcileResult> {
   const sameOwner = localOwnerId === accountId;
+  // ownerChanged (which gates the caller's IRREVERSIBLE wipe of the prior
+  // owner's BYOK keys) must fire ONLY when we can POSITIVELY prove a different
+  // account held the machine , i.e. we have a non-null prior owner id that
+  // differs. A null/absent marker means "unknown", NOT "different": treating it
+  // as different is exactly the bug that nuked a user's own keys after their
+  // localStorage marker was lost. When in doubt, adopt, never scrub.
+  const knownDifferentOwner = localOwnerId !== null && localOwnerId !== accountId;
   let cloud: CloudSettingsRecord | null;
   try {
     cloud = await fetchCloudSettings(token);
@@ -425,11 +464,14 @@ export async function reconcileForAccount(
     // (it may be a different account's stale profile).
     try { await saveSettings(cloud.settings); }
     catch (err) { console.warn('[settings] mirror cloud→soul failed', err); }
-    return { profile: cloud.settings, ownerChanged: !sameOwner };
+    return { profile: cloud.settings, ownerChanged: knownDifferentOwner };
   }
 
   // Cloud has nothing for this account.
-  if (sameOwner) {
+  if (!knownDifferentOwner) {
+    // Same account, OR an unknown prior owner (null marker). Either way we can't
+    // prove a different owner, so adopt the machine's local state rather than
+    // scrubbing it (scrubbing on a guess would destroy this user's own keys).
     const local = await fetchSettings().catch(() => null);
     if (local) {
       // This account's own local-only settings (e.g. wizard finished offline).
@@ -440,8 +482,9 @@ export async function reconcileForAccount(
     return { profile: null, ownerChanged: false };
   }
 
-  // Different account / guest machine + no cloud profile: do not inherit the
-  // stale local profile — wipe it and start clean for this account.
+  // A KNOWN different account previously owned this machine + no cloud profile:
+  // do not inherit the prior owner's stale local profile — wipe it and start
+  // clean for this account.
   try { await deleteSettings(); }
   catch (err) { console.warn('[settings] wipe stale local profile failed', err); }
   return { profile: null, ownerChanged: true };

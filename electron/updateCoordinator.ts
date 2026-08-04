@@ -154,6 +154,42 @@ function writeLedger(paths: UpdatePaths, ledger: InstalledVersions): void {
   fs.writeFileSync(paths.ledger, JSON.stringify(ledger, null, 2));
 }
 
+/**
+ * Undo a swap interrupted between its two renames. installCategory does
+ * `rename(destDir → staging/<id>-old-<ts>)` then `rename(newDir → destDir)`;
+ * a crash between them leaves destDir MISSING with the old contents parked in
+ * staging. On the next launch, if a category dir is gone but a matching backup
+ * survives, move the newest backup back into place so the runtime isn't left
+ * with a missing soul/assets/unreal dir (the offline-safe recovery; an online
+ * machine would also re-download via the dir-exists up-to-date check). Runs
+ * before the staging wipe so the backup is still there. Never throws.
+ */
+function recoverInterruptedSwaps(paths: UpdatePaths, window: BrowserWindow | null): void {
+  if (!fs.existsSync(paths.staging)) return;
+  const dests: Array<[UpdateCategoryId, string]> = [
+    ['soul', paths.soul], ['unreal', paths.unreal], ['assets', paths.assets],
+  ];
+  let entries: string[];
+  try { entries = fs.readdirSync(paths.staging); } catch { return; }
+  for (const [id, destDir] of dests) {
+    if (fs.existsSync(destDir)) continue; // dir intact, nothing to recover
+    // Backups are named `<id>-old-<timestamp>`; newest timestamp wins.
+    const backups = entries
+      .filter((n) => n.startsWith(`${id}-old-`))
+      .sort();
+    const newest = backups[backups.length - 1];
+    if (!newest) continue;
+    try {
+      fs.renameSync(path.join(paths.staging, newest), destDir);
+      emit(window, 'update:log',
+        `[updater/${id}] recovered interrupted swap: restored ${newest} → ${path.basename(destDir)}`);
+    } catch (err) {
+      emit(window, 'update:log',
+        `[updater/${id}] could not restore interrupted swap: ${(err as Error).message}`);
+    }
+  }
+}
+
 // ----------------------------------------------------------------------
 // Manifest fetch
 // ----------------------------------------------------------------------
@@ -414,20 +450,41 @@ export async function runUpdateCheck(window: BrowserWindow | null): Promise<Upda
     // background and pushes state via the appShellUpdater subscription
     // below; we don't block on it here.
     startAppShellUpdater(window);
+    let appShellSettled = false;
     const unsubAppShell = subscribeAppShell((state) => {
       mirrorAppShellIntoSnapshot(state, window);
+      // Release the mirror only once Squirrel reaches a TERMINAL state, NOT on a
+      // fixed timer. A >60s app-shell download used to get orphaned mid-
+      // 'downloading' when the old 60s unsubscribe fired, freezing the `app` row
+      // non-terminal so UpdateOverlay never dismissed (force-quit required).
+      if (!appShellSettled &&
+          (state.state === 'ready' || state.state === 'up-to-date' || state.state === 'failed')) {
+        appShellSettled = true;
+        unsubAppShell();
+      }
     });
     // Seed the snapshot's `app` row immediately so the UI shows it as
     // 'checking' rather than missing entirely while Squirrel's first
     // event lands.
     mirrorAppShellIntoSnapshot(getAppShellState(), window);
-    // Release the subscription when this update pass finishes (the bridge
-    // keeps its own internal cache; we re-subscribe on the next runUpdateCheck).
-    setTimeout(() => unsubAppShell(), 60_000);
+    // Backstop so a silent Squirrel (network vanished mid-check, no terminal
+    // event ever fires) can't leak the listener forever. Generous , this is a
+    // safety net, not the primary release path (terminal-state is).
+    setTimeout(() => {
+      if (!appShellSettled) { appShellSettled = true; unsubAppShell(); }
+    }, 30 * 60_000);
+
+    // Recover from a swap that was interrupted between its two renames (dest →
+    // backup, new → dest): the category dir is missing but its `<id>-old-<ts>`
+    // backup still sits in staging. Restore the newest backup BEFORE we wipe
+    // staging, so an offline machine (that can't re-download) isn't left with a
+    // missing runtime dir. Must run before the wipe below or the backup is lost.
+    recoverInterruptedSwaps(paths, window);
 
     // Wipe any stale staging from a prior partial update, a crash mid-
     // download/extract could have left junk that we don't need anymore
-    // (atomic rename means whatever's in the dest dir is canonical).
+    // (atomic rename means whatever's in the dest dir is canonical; any
+    // recoverable backup was just restored above).
     try {
       if (fs.existsSync(paths.staging)) {
         fs.rmSync(paths.staging, { recursive: true, force: true });
@@ -463,11 +520,19 @@ export async function runUpdateCheck(window: BrowserWindow | null): Promise<Upda
       .filter(([id]) => id !== 'app');
     for (const [id, entry] of cats) {
       const installed = ledger[id];
-      // Up to date when we already hold this exact version. Defensive: also
-      // treat it as up-to-date when the installed tag sorts at or after the
-      // manifest's (date-style tags compare lexicographically), so a stale
-      // manifest can never force a perpetual re-download/restart.
-      const upToDate = installed != null && installed >= entry.version;
+      const destDir = id === 'soul' ? paths.soul
+        : id === 'unreal' ? paths.unreal
+        : paths.assets;
+      // Up to date when we already hold this exact version AND the artifacts are
+      // actually on disk. The dir-exists check is the self-heal: if a prior swap
+      // was interrupted between the two renames (dest moved to backup, new not
+      // yet in place), the category dir is GONE but the ledger still reads
+      // "installed" , without this we'd skip it forever and boot a runtime with a
+      // missing soul/assets/unreal dir. Defensive on the version too: treat an
+      // installed tag at/after the manifest's as current (date-style tags sort
+      // lexicographically) so a stale manifest can't force perpetual re-download.
+      const upToDate =
+        installed != null && installed >= entry.version && fs.existsSync(destDir);
       snapshot.categories.push({
         id,
         state: upToDate ? 'up-to-date' : 'pending',

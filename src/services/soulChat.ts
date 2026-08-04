@@ -109,6 +109,11 @@ export interface SoulChatResult {
    *  client should poll /escalation/{id}/next for follow-up narrations
    *  and the final response. See services/escalation.ts. */
   escalation?: { id: string; reason: string };
+  /** Body-animation directives from soul's body director (captured
+   *  mode): conviction-gated talk loops, idle rotation, and explicit
+   *  LLM body tokens. The client forwards each to UE's text2body
+   *  AnimBP via emitUIInteraction. */
+  body?: SoulBodyDirective[];
   /** Server fields we don't strongly type. */
   [key: string]: unknown;
 }
@@ -214,6 +219,75 @@ export async function chatViaSoul(
 
 
 // ---------------------------------------------------------------------
+// Passthrough speak
+// ---------------------------------------------------------------------
+//
+// In passthrough mode UnClaw does no inference of its own; a user's
+// external coding agent (Claude Code, Codex, ...) sends text to voice via
+// soul's /passthrough/speak, which soul pushes to us over
+// /passthrough/ws. We then render it here: soul's /speak endpoint runs
+// the SAME TTS + lipsync + expression pipeline as /chat but with NO LLM
+// (the text is spoken verbatim). We supply our onboarding voice / TTS
+// provider / BYOK keys exactly like chatViaSoul, so soul never needs a
+// stored default. The returned job is dispatched to UE by the caller
+// (emitUIInteraction), identical to a normal chat turn.
+
+/** Render `text` verbatim through soul's /speak (no LLM). mood/behavior
+ *  are optional expression hints; actionName optionally fires a gesture
+ *  (e.g. 'give_a_kiss', 'do_dance', 'celebrate'). Resolves the user's
+ *  saved voice + TTS provider + BYOK key the same way chatViaSoul does. */
+export async function speakViaSoul(
+  text: string,
+  opts: {
+    mood?: string;
+    behavior?: string;
+    actionName?: string;
+    voiceId?: string;
+    voices?: SoulChatOptions['voices'];
+    lipsyncModel?: SoulChatOptions['lipsyncModel'];
+  } = {},
+): Promise<SoulChatResult> {
+  const body: Record<string, unknown> = { message: text };
+  if (opts.mood) body.mood = opts.mood;
+  if (opts.behavior) body.behavior = opts.behavior;
+  if (opts.actionName) body.action_name = opts.actionName;
+  if (opts.voiceId) body.voice_id = opts.voiceId;
+  if (opts.lipsyncModel) body.lipsync_model = opts.lipsyncModel;
+
+  // Voice + TTS provider + BYOK, same resolution as chatViaSoul. No LLM
+  // fields — /speak skips inference entirely.
+  try {
+    const keys = await fetchApiKeys();
+    body.tts_provider = keys.tts_provider;
+    if (keys.tts_provider === 'elevenlabs' && keys.elevenlabs_api_key) {
+      body.elevenlabs_api_key = keys.elevenlabs_api_key;
+    }
+    if (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'custom' && keys.kokoro_endpoint) {
+      body.kokoro_endpoint = keys.kokoro_endpoint;
+    }
+    if (!opts.voiceId) {
+      const voice = resolveVoiceId(keys, opts.voices);
+      if (voice) body.voice_id = voice;
+    }
+  } catch (err) {
+    console.warn('[speak] failed to read api keys', err);
+  }
+
+  const res = await fetch(`${getSoulBaseUrl()}/speak`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`soul /speak ${res.status}: ${errText.slice(0, 200)}`);
+  }
+  return (await res.json()) as SoulChatResult;
+}
+
+
+// ---------------------------------------------------------------------
 // Idle driver
 // ---------------------------------------------------------------------
 //
@@ -227,8 +301,28 @@ export async function chatViaSoul(
 // server-side default. We pull from `apiKeys` per call so a wizard
 // edit propagates without an app restart.
 
+/** One body-animation directive for the UE text2body AnimBP. `event`
+ *  is the UIInteraction EventType; exactly one of the *Num fields is
+ *  set (plus talkTime for doTalking). `clip` is informational.
+ *  Short idle VISITS additionally carry revertAfterS/revertIdleNum:
+ *  the renderer schedules a doIdle back to the home loop after that
+ *  many seconds (idle is the one state UE never exits on its own). */
+export interface SoulBodyDirective {
+  event: 'doIdle' | 'doTalking' | 'doAction' | 'doGesture';
+  idleNum?: number;
+  talkNum?: number;
+  talkTime?: number;
+  actionNum?: number;
+  gestureNum?: number;
+  clip?: string;
+  revertAfterS?: number;
+  revertIdleNum?: number;
+  revertClip?: string;
+}
+
 export interface SoulIdleResult {
   type: 'idle' | 'idle_skipped';
+  body?: SoulBodyDirective[];
   id?: string;
   mood?: string;
   behavior?: string;
@@ -283,6 +377,44 @@ export async function fireIdle(opts: {
     return (await res.json()) as SoulIdleResult;
   } catch (err) {
     console.warn('[idle] /idle fetch failed', err);
+    return null;
+  }
+}
+
+
+/** Where soul's body-idle rotation currently is, WITHOUT advancing it.
+ *  Called on stream (re)connect: a renderer refresh/crash resets the
+ *  session to the default loop while soul still holds the real state;
+ *  re-dispatching this directive puts the body back where it was. */
+export async function fetchCurrentBodyIdle(): Promise<SoulBodyDirective[] | null> {
+  try {
+    const res = await fetch(`${getSoulBaseUrl()}/body/idle`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { body?: SoulBodyDirective[] };
+    return data.body?.length ? data.body : null;
+  } catch {
+    return null;
+  }
+}
+
+
+/** Testing helper: ask soul's body director for a fresh random body-idle
+ *  loop NOW. Returns the doIdle directive(s) for the caller to dispatch
+ *  over the pixel-streaming data channel, or null on any failure. */
+export async function randomizeBodyIdle(): Promise<SoulBodyDirective[] | null> {
+  try {
+    const res = await fetch(`${getSoulBaseUrl()}/body/randomize_idle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { body?: SoulBodyDirective[] };
+    return data.body?.length ? data.body : null;
+  } catch {
     return null;
   }
 }

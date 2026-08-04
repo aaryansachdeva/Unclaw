@@ -18,6 +18,17 @@ interface ElectronAPI {
    *  SettingsPanel's Claude Code subscription card to fire
    *  `claude setup-token` in a fresh tab. */
   openTerminalWithCommand: (command: string) => Promise<{ ok: boolean; error?: string }>;
+  /** Microphone permission (macOS). `request` triggers the OS prompt (or
+   *  resolves false if already denied); `getStatus` reads current access;
+   *  `openSettings` jumps to Privacy > Microphone. */
+  mic: {
+    getStatus: () => Promise<'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown'>;
+    request: () => Promise<boolean>;
+    openSettings: () => Promise<{ ok: boolean; error?: string }>;
+  };
+
+  /** TEMP(revert): Cmd+H all-chrome hide toggle. Returns an unsubscribe fn. */
+  onTempToggleUi?: (cb: () => void) => () => void;
 
   /** Trigger the screenshot region selector. Same effect as the
    *  global Ctrl+Shift+G shortcut. */
@@ -65,6 +76,13 @@ interface ElectronAPI {
   /** Wipe the persisted blob. */
   apiKeysClear: () => Promise<boolean>;
 
+  /** Durable "which account owns this machine's local state" marker, persisted
+   *  in userData next to the API keys so it can't desync from them the way the
+   *  old localStorage-only marker could (a lost marker used to wipe keys). */
+  getLocalOwner: () => Promise<string | null>;
+  setLocalOwner: (ownerId: string) => Promise<boolean>;
+  clearLocalOwner: () => Promise<boolean>;
+
   // Soul subprocess lifecycle, main spawns (or attaches to) soul on
   // app start. The LoadingScreen subscribes to `onLog` to render boot
   // progress; the App subscribes to `onReady` to dismiss the loader
@@ -84,6 +102,8 @@ interface ElectronAPI {
     }>;
     /** User-initiated retry from the boot-failure screen. */
     restart: () => Promise<boolean>;
+    /** Reveal the logs folder in Finder/Explorer (support affordance). */
+    openLogs: () => Promise<boolean>;
     /** Latest known port mapping, or null while soul is still booting.
      *  Renderer-side URL builders (services/soulBase.ts) call this
      *  during init so they don't construct stale URLs. */
@@ -183,8 +203,10 @@ interface ElectronAPI {
       characterId: string;
       url: string;
     }) => Promise<{ ok: boolean; dir?: string; mountPath?: string | null; error?: string }>;
-    /** Character ids whose pak is downloaded locally (in the staging dir). */
-    listInstalled: () => Promise<{ ids: string[] }>;
+    /** Character ids whose pak is downloaded locally (in the staging dir),
+     *  plus `stale`: those whose staged version drifted from the manifest and
+     *  should be re-downloaded. */
+    listInstalled: () => Promise<{ ids: string[]; stale: string[] }>;
     /** Which of a character's cloned voice files are already on disk. */
     hasVoices: (args: { characterId: string }) => Promise<{
       ok: boolean; present?: { supertonic: boolean; kokoro: boolean }; complete?: boolean; error?: string;

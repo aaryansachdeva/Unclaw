@@ -55,7 +55,10 @@ async function safeJson<T>(res: Response): Promise<T | null> {
 export async function listReminders(): Promise<RemindersListResult> {
   let res: Response;
   try {
-    res = await fetch(`${getSoulBaseUrl()}/reminders`, { method: 'GET' });
+    res = await fetch(`${getSoulBaseUrl()}/reminders`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(15000),
+    });
   } catch (err) {
     return {
       available: false,
@@ -99,6 +102,7 @@ export async function createReminder(input: ReminderInput): Promise<Reminder | n
       location: input.location ?? '',
       notes: input.notes ?? '',
     }),
+    signal: AbortSignal.timeout(15000),
   });
   if (!res.ok) return null;
   return await safeJson<Reminder>(res);
@@ -112,6 +116,7 @@ export async function updateReminder(
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
+    signal: AbortSignal.timeout(15000),
   });
   if (!res.ok) return null;
   return await safeJson<Reminder>(res);
@@ -120,6 +125,7 @@ export async function updateReminder(
 export async function deleteReminder(id: string): Promise<boolean> {
   const res = await fetch(`${getSoulBaseUrl()}/reminders/${encodeURIComponent(id)}`, {
     method: 'DELETE',
+    signal: AbortSignal.timeout(15000),
   });
   return res.ok || res.status === 204;
 }
@@ -127,7 +133,7 @@ export async function deleteReminder(id: string): Promise<boolean> {
 export async function completeReminder(id: string): Promise<Reminder | null> {
   const res = await fetch(
     `${getSoulBaseUrl()}/reminders/${encodeURIComponent(id)}/complete`,
-    { method: 'POST' },
+    { method: 'POST', signal: AbortSignal.timeout(15000) },
   );
   if (!res.ok) return null;
   return await safeJson<Reminder>(res);

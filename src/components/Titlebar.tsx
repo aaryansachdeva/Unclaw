@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { Pin, PinOff, LogOut, Settings, Trash2, LogIn, UserCircle2, RotateCcw } from 'lucide-react';
+import { Pin, PinOff, LogOut, Settings, Trash2, LogIn, UserCircle2, RotateCcw, Smartphone } from 'lucide-react';
 import { getSoulBaseUrl } from '../services/soulBase';
 import { ClawsIcon } from './ClawsBalance';
+import { CompanionPanel } from './CompanionPanel';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -88,6 +89,10 @@ interface TitlebarProps {
   /** Claws balance shown as a pill just inboard of the profile cluster.
    *  undefined = hide it (signed out / minimal mode). */
   clawsBalance?: number | null;
+  /** Signed-in session, threaded to the "Connect your phone" popover so it
+   *  can pair the desktop (mint credential -> soul /pair/install). null hides
+   *  the phone button (guest / signed out). */
+  companionAuth?: { token: string | null; userId: string | null } | null;
 }
 
 function userInitials(user: TitlebarUser): string {
@@ -112,12 +117,16 @@ export function Titlebar({
   onResetSession,
   onOpenSettings,
   clawsBalance,
+  companionAuth = null,
   minimalMode = false,
   leftSlot,
 }: TitlebarProps) {
   const reduce = useReducedMotion() ?? false;
   const [pinned, setPinned] = useState(true);
   const [profileOpen, setProfileOpen] = useState(false);
+  // "Connect your phone" popover (phone icon in the right capsule).
+  const [companionOpen, setCompanionOpen] = useState(false);
+  const companionWrapRef = useRef<HTMLDivElement | null>(null);
   // Two-step confirm for the destructive "Reset all data" row. First
   // click flips this on (the row turns red and prompts to confirm);
   // second click runs onResetAccount. Reset to false on popover close.
@@ -179,6 +188,24 @@ export function Titlebar({
       document.removeEventListener('keydown', onKey);
     };
   }, [clawsInfoOpen]);
+
+  // Click-outside / Escape handler for the "Connect your phone" popover.
+  useEffect(() => {
+    if (!companionOpen) return undefined;
+    const onPointer = (e: MouseEvent) => {
+      const target = e.target instanceof Node ? e.target : null;
+      if (target && companionWrapRef.current && !companionWrapRef.current.contains(target)) {
+        setCompanionOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setCompanionOpen(false); };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [companionOpen]);
 
   // Disarm the reset confirms when the popover closes — otherwise the
   // user could open it again and a stray click would skip the confirm.
@@ -372,24 +399,87 @@ export function Titlebar({
                 </div>
               )}
 
+              {/* Hairline divider: separates the claws balance from the action
+                  icons (discord / phone / pin) on its right. macOS only. */}
+              {isMacPlatform && clawsBalance !== undefined && (
+                <span
+                  aria-hidden
+                  style={{
+                    width: 1,
+                    height: 18,
+                    background: 'rgba(255, 255, 255, 0.16)',
+                    flex: '0 0 auto',
+                  }}
+                />
+              )}
+
+              {/* Join-our-Discord: opens join.unclaw.io in the user's browser.
+                  Flat-colored to match the other icon buttons (not blurple). */}
+              <button
+                type="button"
+                onClick={() => { void window.electronAPI?.authOpenExternal('https://join.unclaw.io'); }}
+                aria-label="Join our Discord"
+                title="Join our Discord"
+                style={{
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  width: 30, height: 30, borderRadius: 8,
+                  background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+                  color: 'var(--text-secondary)',
+                  transition: 'background 150ms var(--ease-out-quart), color 150ms var(--ease-out-quart)',
+                  WebkitAppRegion: 'no-drag',
+                } as React.CSSProperties}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--glass-bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+              >
+                <svg viewBox="0 0 256 199" width="18" height="14" aria-hidden fill="currentColor">
+                  <path d="M216.856 16.597A208.502 208.502 0 0 0 164.042 0c-2.275 4.113-4.933 9.645-6.766 14.046-19.692-2.961-39.203-2.961-58.533 0-1.832-4.4-4.55-9.933-6.846-14.046a207.809 207.809 0 0 0-52.855 16.638C5.618 67.147-3.443 116.4 1.087 164.956c22.169 16.555 43.653 26.612 64.775 33.193A161.094 161.094 0 0 0 79.735 175.3a136.413 136.413 0 0 1-21.846-10.632 108.636 108.636 0 0 0 5.356-4.237c42.122 19.702 87.89 19.702 129.51 0a131.66 131.66 0 0 0 5.355 4.237 136.07 136.07 0 0 1-21.886 10.653c4.006 8.02 8.638 15.67 13.873 22.848 21.142-6.58 42.646-16.637 64.815-33.213 5.316-56.288-9.08-105.09-38.056-148.36ZM85.474 135.095c-12.645 0-23.015-11.805-23.015-26.18s10.149-26.2 23.015-26.2c12.867 0 23.236 11.804 23.015 26.2.02 14.375-10.148 26.18-23.015 26.18Zm85.051 0c-12.645 0-23.014-11.805-23.014-26.18s10.148-26.2 23.014-26.2c12.867 0 23.236 11.804 23.015 26.2 0 14.375-10.148 26.18-23.015 26.18Z" />
+                </svg>
+              </button>
+
+              {/* Connect-your-phone: QR popover to pair the iOS companion. Sits
+                  just left of the pin. Shown only when signed in (a session is
+                  needed to pair). */}
+              {companionAuth && (
+                <div ref={companionWrapRef} style={{ position: 'relative', display: 'inline-flex', marginLeft: -5 }}>
+                  <button
+                    type="button"
+                    onClick={() => setCompanionOpen((o) => !o)}
+                    aria-label="Connect your phone"
+                    aria-expanded={companionOpen}
+                    title="Connect your phone"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      width: 30, height: 30, borderRadius: 8,
+                      background: companionOpen ? 'var(--glass-bg-hover)' : 'transparent',
+                      border: 'none', padding: 0, cursor: 'pointer',
+                      color: companionOpen ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      transition: 'background 150ms var(--ease-out-quart), color 150ms var(--ease-out-quart)',
+                      WebkitAppRegion: 'no-drag',
+                    } as React.CSSProperties}
+                    onMouseEnter={(e) => { if (!companionOpen) e.currentTarget.style.background = 'var(--glass-bg-hover)'; }}
+                    onMouseLeave={(e) => { if (!companionOpen) e.currentTarget.style.background = 'transparent'; }}
+                  >
+                    <Smartphone size={17} strokeWidth={2} />
+                  </button>
+                  <AnimatePresence>
+                    {companionOpen && (
+                      <CompanionPanel
+                        key="companion"
+                        authToken={companionAuth.token}
+                        userId={companionAuth.userId}
+                        reduce={reduce}
+                      />
+                    )}
+                  </AnimatePresence>
+                </div>
+              )}
+
               {/* Pin button rides INSIDE the profile capsule on the right
-                  edge of the chrome (next to the avatar), on BOTH platforms now.
+                  edge of the chrome (next to the avatar), on BOTH platforms.
                   macOS: opposite the native traffic lights. Windows/Linux: the
                   left cluster carries close + minimize instead of traffic lights. */}
               {(
                 <>
-                  {/* Hairline divider between the claws balance and the pin. */}
-                  {clawsBalance !== undefined && (
-                    <span
-                      aria-hidden
-                      style={{
-                        width: 1,
-                        height: 18,
-                        background: 'rgba(255, 255, 255, 0.16)',
-                        flex: '0 0 auto',
-                      }}
-                    />
-                  )}
                   <motion.button
                     type="button"
                     whileTap={reduce ? undefined : { scale: 0.88 }}
@@ -401,6 +491,7 @@ export function Titlebar({
                       // bright when pinned, dim when not.
                       width: 22,
                       height: 22,
+                      marginLeft: -5,
                       background: 'transparent',
                       border: 'none',
                       padding: 0,

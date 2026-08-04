@@ -11,8 +11,10 @@
 // (useVoiceAgent) maps those events into hook state.
 
 import {
+  AI_SPEECH_TAIL_MS,
   BARGE_IN_FRAMES,
   BARGE_IN_PROB,
+  FRAME_SIZE,
   MIN_UTTERANCE_PEAK,
   PRE_ROLL_MS,
   RING_BUFFER_SAMPLES,
@@ -76,6 +78,24 @@ export class VoiceController {
   private mediaStream: MediaStream | null = null;
   private worklet = new Worklet(); // wraps the message handler closure
 
+  // Rate adaptation. Silero VAD (and the streaming transcriber we feed) both
+  // require exactly 16 kHz. We ASK the AudioContext for 16 kHz, but some Core
+  // Audio setups ignore the hint — notably this Mac's UnclawSilentSink driver,
+  // which forces 48 kHz. So when the context comes back at another rate we
+  // resample worklet frames to 16 kHz on the fly (continuous linear resampler,
+  // identical to streamingClient's), then RE-CHUNK to exactly FRAME_SIZE (512)
+  // samples before handing them to processFrame — vadEngine.probe() throws on
+  // any other length. Previously this class hard-threw on a non-16 kHz context,
+  // which is why continuous voice mode was dead on this machine.
+  private _rsNeed = false;   // true when the context isn't 16 kHz
+  private _rsStep = 1;       // input samples consumed per 16 kHz output sample
+  private _rsPos = 0;        // fractional read index carried across frames
+  private _rsPrev = 0;       // last sample of the previous frame (edge interp)
+  // 16 kHz accumulator: resampled samples pile up here and drain out in
+  // exact 512-sample frames.
+  private _acc = new Float32Array(FRAME_SIZE * 8);
+  private _accLen = 0;
+
   // Ring buffer of last RING_BUFFER_SAMPLES samples (Float32, [-1, 1]).
   private ring = new Float32Array(RING_BUFFER_SAMPLES);
   private ringWriteIdx = 0;     // next sample idx to write
@@ -110,6 +130,15 @@ export class VoiceController {
 
   // Barge-in tracking when AI is talking.
   private bargeInFrames = 0;
+
+  // AI-speech gate. `opts.isAISpeaking()` is an open-loop estimate (see
+  // AI_SPEECH_TAIL_MS), so we latch it: any frame where it reads true
+  // pushes the gate deadline out by the hangover. The gate is closed
+  // only once that deadline passes, which covers dispatch→playback
+  // latency and speaker/AEC decay at the tail of a reply.
+  private aiGateUntilMs = 0;
+  /** Was the gate active on the previous frame? Detects entry/exit. */
+  private aiGateWasActive = false;
 
   // Streaming-feed lifecycle. The streaming WS opens lazily at the
   // start of each utterance and closes after finalize. Tracking the
@@ -188,17 +217,21 @@ export class VoiceController {
         console.warn('[voice] 16kHz AudioContext rejected, falling back:', err);
         this.ctx = new AudioContext({ latencyHint: 'interactive' });
       }
-      console.info('[voice] AudioContext at', this.ctx.sampleRate, 'Hz');
-      if (this.ctx.sampleRate !== SAMPLE_RATE) {
-        // Silero v5 requires exactly 16 kHz frames. If we couldn't get a
-        // 16 kHz context, the worklet will produce mismatched-rate frames
-        // and VAD output will be garbage. Bail with a clear message rather
-        // than silently misbehave.
-        throw new Error(
-          `voice: AudioContext is at ${this.ctx.sampleRate} Hz, ` +
-          `need ${SAMPLE_RATE} Hz. This OS/browser combo refused our 16 kHz hint.`,
-        );
-      }
+      // The context may not honor the 16 kHz hint (this Mac's UnclawSilentSink
+      // driver forces 48 kHz). Rather than bail — which killed continuous voice
+      // mode entirely — set up an on-the-fly resampler to 16 kHz. Frames get
+      // resampled + re-chunked to exactly FRAME_SIZE in the worklet onmessage
+      // handler below. Reset the resampler state for this session.
+      const actualRate = this.ctx.sampleRate;
+      this._rsNeed = actualRate !== SAMPLE_RATE;
+      this._rsStep = actualRate / SAMPLE_RATE;
+      this._rsPos = 0;
+      this._rsPrev = 0;
+      this._accLen = 0;
+      console.info(
+        '[voice] AudioContext at', actualRate, 'Hz',
+        this._rsNeed ? `→ resampling to ${SAMPLE_RATE}Hz` : '(native 16k)',
+      );
 
       try {
         // RELATIVE path (`./`), not absolute (`/`). See vadEngine.ts +
@@ -227,9 +260,10 @@ export class VoiceController {
           // Telemetry: prove frames are flowing without spamming the log.
           if (frameCount === 1) console.info('[voice] first audio frame');
           else if (frameCount % 150 === 0) console.debug('[voice] frame', frameCount);
-          this.worklet.handleFrame(msg.samples).catch((err) => {
-            this.emit({ kind: 'error', message: `frame handler: ${err}` });
-          });
+          // Resample to 16 kHz if the context isn't already there, then drain
+          // exact FRAME_SIZE (512-sample) frames into processFrame.
+          const in16k = this._rsNeed ? this.resampleTo16k(msg.samples) : msg.samples;
+          this.feed16k(in16k);
         }
       };
 
@@ -275,6 +309,66 @@ export class VoiceController {
   }
 
   // -------------------------------------------------------------------
+  //  Rate adaptation (48 kHz → 16 kHz + exact FRAME_SIZE re-chunking)
+  // -------------------------------------------------------------------
+
+  /** Continuous linear resampler from the context rate to 16 kHz. `_rsPos`
+   *  carries the fractional read position across frames and `_rsPrev` holds
+   *  the previous frame's last sample for interpolation across the boundary.
+   *  Identical to streamingClient's so both audio consumers agree. */
+  private resampleTo16k(frame: Float32Array): Float32Array {
+    const step = this._rsStep;
+    const n = frame.length;
+    const out = new Float32Array(Math.ceil((n - this._rsPos) / step) + 1);
+    let k = 0;
+    let pos = this._rsPos;
+    while (pos < n) {
+      const i = Math.floor(pos);
+      const frac = pos - i;
+      const a = i < 0 ? this._rsPrev : frame[i];
+      const j = i + 1;
+      const b = j < 0 ? this._rsPrev : (j < n ? frame[j] : frame[n - 1]);
+      out[k++] = a + (b - a) * frac;
+      pos += step;
+    }
+    this._rsPos = pos - n;          // carry remainder into next frame
+    this._rsPrev = frame[n - 1];
+    return out.subarray(0, k);
+  }
+
+  /** Append 16 kHz samples and drain exact FRAME_SIZE (512-sample) frames into
+   *  processFrame. Silero VAD throws on any other length, and the streaming
+   *  transcriber (fed via pushFrame inside processFrame) expects 16 kHz too.
+   *  Whether the context is native 16 kHz or resampled, everything downstream
+   *  sees identical 512-sample frames at a steady ~32 ms cadence. */
+  private feed16k(samples: Float32Array): void {
+    if (this._accLen + samples.length > this._acc.length) {
+      const grown = new Float32Array(
+        Math.max(this._acc.length * 2, this._accLen + samples.length),
+      );
+      grown.set(this._acc.subarray(0, this._accLen));
+      this._acc = grown;
+    }
+    this._acc.set(samples, this._accLen);
+    this._accLen += samples.length;
+
+    let off = 0;
+    while (this._accLen - off >= FRAME_SIZE) {
+      // slice() copies — processFrame + pushFrame retain the buffer, so it must
+      // not be aliased to the accumulator we're about to compact.
+      const frame = this._acc.slice(off, off + FRAME_SIZE);
+      off += FRAME_SIZE;
+      this.worklet.handleFrame(frame).catch((err) => {
+        this.emit({ kind: 'error', message: `frame handler: ${err}` });
+      });
+    }
+    if (off > 0) {
+      this._acc.copyWithin(0, off, this._accLen);
+      this._accLen -= off;
+    }
+  }
+
+  // -------------------------------------------------------------------
   //  Frame processor
   // -------------------------------------------------------------------
   private async processFrame(samples: Float32Array): Promise<void> {
@@ -305,22 +399,58 @@ export class VoiceController {
 
     // 3. Barge-in path: if AI is currently talking, raise the bar and only
     //    interrupt on a sustained, confident speech signal.
+    const now = performance.now();
     if (this.opts.isAISpeaking()) {
+      this.aiGateUntilMs = now + AI_SPEECH_TAIL_MS;
+    }
+    const aiGateActive = now < this.aiGateUntilMs;
+
+    if (aiGateActive) {
+      // Gate just closed over an in-flight user utterance. That only
+      // happens when the AI started talking over us, and whatever the
+      // endpointer holds is now unusable: resuming would keep the stale
+      // speechStartTimeMs and slice an utterance window that reaches
+      // back across the AI's entire reply, handing the agent its own
+      // voice. Abandon the turn instead.
+      if (!this.aiGateWasActive) {
+        if (this.prevState !== 'idle') {
+          console.info(
+            `[voice] AI started speaking during user state="${this.prevState}" ` +
+            `— abandoning the in-flight utterance`,
+          );
+        }
+        this.abandonUtterance();
+      }
+      this.aiGateWasActive = true;
+
       if (vadProb >= BARGE_IN_PROB) this.bargeInFrames += 1;
       else this.bargeInFrames = 0;
 
       if (this.bargeInFrames >= BARGE_IN_FRAMES) {
         this.bargeInFrames = 0;
+        // Drop the hangover immediately: the host is about to mute
+        // playback, and waiting out AI_SPEECH_TAIL_MS here would swallow
+        // the first 400 ms of the interruption — the very words the user
+        // raised their voice to say.
+        //
+        // Deliberately NOT clearing aiGateWasActive: isAISpeaking() stays
+        // true until the host reacts, so the next frame would re-arm the
+        // gate and read as a fresh entry, abandoning the interruption on
+        // every frame until the mute lands.
+        this.aiGateUntilMs = 0;
         this.emit({ kind: 'bargeIn' });
-        // Fall through to normal endpointer processing — once the host
-        // hook mutes AI playback, isAISpeaking() returns false and the
-        // user's words are captured normally.
       }
-      // While AI is speaking, don't run the endpointer — it would
-      // false-trigger on echo. We resume on the very next frame after
-      // isAISpeaking() flips back.
+      // While the gate is up, don't run the endpointer — it would
+      // false-trigger on the avatar's own voice bleeding into the mic.
       this.emit({ kind: 'frame', vadProb, smoothedProb: this.vad.smoothedProb, prosody });
       return;
+    }
+
+    if (this.aiGateWasActive) {
+      // Gate just lifted. Start the user's turn from a clean slate so no
+      // avatar audio captured during the hangover can seed an utterance.
+      this.aiGateWasActive = false;
+      this.abandonUtterance();
     }
 
     this.bargeInFrames = 0;
@@ -408,6 +538,30 @@ export class VoiceController {
     if (this.prevState !== 'idle') {
       this.prevState = 'idle';
       this.emit({ kind: 'state', state: 'idle' });
+    }
+  }
+
+  /** Throw away the in-flight turn without transcribing it.
+   *
+   *  Used at both edges of the AI-speech gate. Beyond the endpointer
+   *  reset this MUST close any streaming session: the WS is opened on
+   *  the idle→armed transition and only ever closed in handleEnded, so
+   *  a turn abandoned before endpointing would leave the socket open
+   *  and the next utterance would reuse a feed already primed with the
+   *  abandoned audio. */
+  private abandonUtterance(): void {
+    this.resetForNextUtterance();
+    this.bargeInFrames = 0;
+    if (this.streamingOpen && this.opts.streaming) {
+      const feed = this.opts.streaming;
+      const pending = this.streamingOpenPromise;
+      this.streamingOpen = false;
+      this.streamingOpenPromise = null;
+      // Wait out the handshake before stopping — calling stop() on a
+      // half-open socket leaves the server session dangling.
+      void Promise.resolve(pending)
+        .then(() => feed.stop())
+        .catch(() => { /* already gone */ });
     }
   }
 

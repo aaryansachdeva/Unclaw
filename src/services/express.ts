@@ -36,6 +36,9 @@ export async function expressFace(prompt: string): Promise<ExpressResult> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt: trimmed }),
+    // Generous , t2f inference is heavier than a widget fetch , but still
+    // bounded so a wedged model call can't hang the caller forever.
+    signal: AbortSignal.timeout(60000),
   });
   if (!r.ok) {
     const body = await r.text().catch(() => r.statusText);

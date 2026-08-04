@@ -11,6 +11,7 @@ import {
   nativeImage,
   globalShortcut,
   desktopCapturer,
+  systemPreferences,
   Display,
   IpcMainEvent,
 } from 'electron';
@@ -18,11 +19,21 @@ import path from 'path';
 import fs from 'fs';
 import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
-import { startSoul, stopSoul, getSoulSnapshot, getSoulPorts } from './soulSupervisor';
-import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent } from './setupCoordinator';
+import { startSoul, stopSoul, restartSoul, getSoulSnapshot, getSoulPorts, writeSoulKeysBridge, clearSoulKeysBridge } from './soulSupervisor';
+import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent, installedPakVersions } from './setupCoordinator';
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
+
+// Cap Chromium's GPU memory budget. By default Chromium scales its tile /
+// cache / staging budget to system RAM (generous on a 64GB machine); measured
+// 2026-07-19 the GPU process held a 1.6GB physical footprint (268MB across 561
+// IOSurfaces + 617MB IOAccelerator) for one window streaming one video. 512MB
+// forces the compositor to evict instead of hoard. Worst case is a rare
+// repaint flicker under fast UI motion; the WebRTC video path is unaffected
+// (decoded frames live in VideoToolbox surfaces outside this budget).
+// Must run before app ready, so module top level.
+app.commandLine.appendSwitch('force-gpu-mem-available-mb', '512');
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -549,6 +560,47 @@ ipcMain.on('window:close', () => app.quit());
 // without leaving Unclaw to type the command themselves. Uses osascript
 // (AppleScript) rather than `open -a Terminal` so we can inject the
 // command into a fresh tab and avoid clobbering any existing session.
+// Microphone permission. Continuous voice mode + push-to-talk both need mic
+// access. On macOS, getUserMedia hard-fails with NotAllowedError if the OS
+// hasn't granted mic access to this app — and that failure is otherwise
+// invisible. These let the renderer (a) proactively trigger the macOS prompt
+// via the proper Electron API before touching getUserMedia, (b) read the
+// current status to message the user, and (c) jump straight to the Privacy
+// pane when access was previously denied (macOS won't re-prompt then).
+ipcMain.handle('mic:get-status', () => {
+  if (process.platform !== 'darwin') return 'granted';
+  try {
+    return systemPreferences.getMediaAccessStatus('microphone');
+  } catch {
+    return 'unknown';
+  }
+});
+
+ipcMain.handle('mic:request', async () => {
+  if (process.platform !== 'darwin') return true;
+  try {
+    // 'not-determined' → shows the system prompt and resolves with the choice.
+    // 'granted' → resolves true immediately. 'denied'/'restricted' → resolves
+    // false WITHOUT a prompt (macOS only prompts once; after that it's Settings).
+    return await systemPreferences.askForMediaAccess('microphone');
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.handle('mic:open-settings', async () => {
+  try {
+    if (process.platform === 'darwin') {
+      await shell.openExternal(
+        'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+      );
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
 ipcMain.handle('terminal:open-with-command', async (_event, command: string) => {
   if (typeof command !== 'string' || !command.trim()) {
     return { ok: false, error: 'no command provided' };
@@ -614,6 +666,24 @@ ipcMain.handle('soul:restart', async () => {
   if (!mainWindow) return false;
   await restartSoul(mainWindow);
   return true;
+});
+
+// Reveal the logs folder in Finder/Explorer. Surfaced from the boot +
+// setup failure screens (and usable for support) so a user hitting a
+// stuck launch can grab logs without hand-navigating ~/Library. Opens
+// <userData>/logs, which holds the daily soul-*.log tee; the UE
+// game.log lives under runtime/data/unreal but the soul log is the
+// right first stop and links onward.
+ipcMain.handle('system:open-logs', async () => {
+  try {
+    const logsDir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
+    await shell.openPath(logsDir);
+    return true;
+  } catch (err) {
+    console.warn('[unclaw] open-logs failed:', err);
+    return false;
+  }
 });
 
 // First-run setup pipeline. SetupWizard subscribes to 'setup:log' +
@@ -1084,6 +1154,9 @@ ipcMain.handle('apiKeys:set', (_event, payload: string) => {
     } else {
       fs.writeFileSync(apiKeysFilePath(), payload, 'utf-8');
     }
+    // Refresh the plaintext bridge so a running soul picks up new keys on its
+    // next mtime-check (no Keychain prompt, no soul restart needed).
+    writeSoulKeysBridge();
     return true;
   } catch (err) {
     console.warn('[apiKeys] set failed', err);
@@ -1095,9 +1168,57 @@ ipcMain.handle('apiKeys:clear', () => {
   const p = apiKeysFilePath();
   try {
     if (fs.existsSync(p)) fs.unlinkSync(p);
+    clearSoulKeysBridge();
     return true;
   } catch (err) {
     console.warn('[apiKeys] clear failed', err);
+    return false;
+  }
+});
+
+// Durable "which account owns this machine's local state" marker. This used to
+// live only in the renderer's localStorage, but that can be cleared or
+// corrupted independently of the API keys it guards , and when the marker
+// vanished the reconciler mistook the SAME user for a new owner and WIPED their
+// unrecoverable BYOK keys. Persisting it here (a userData file, colocated with
+// apiKeys.bin) makes the marker share fate with the keys: if the keys survive,
+// the owner id survives, so a lost localStorage entry can never trigger a wipe.
+// The owner id is not a secret, so it's stored in plaintext.
+const LOCAL_OWNER_FILE = 'localOwner.txt';
+function localOwnerFilePath(): string {
+  return path.join(app.getPath('userData'), LOCAL_OWNER_FILE);
+}
+
+ipcMain.handle('localOwner:get', () => {
+  try {
+    const p = localOwnerFilePath();
+    if (!fs.existsSync(p)) return null;
+    const v = fs.readFileSync(p, 'utf-8').trim();
+    return v || null;
+  } catch (err) {
+    console.warn('[localOwner] get failed', err);
+    return null;
+  }
+});
+
+ipcMain.handle('localOwner:set', (_event, ownerId: string) => {
+  if (typeof ownerId !== 'string' || !ownerId) return false;
+  try {
+    fs.writeFileSync(localOwnerFilePath(), ownerId, 'utf-8');
+    return true;
+  } catch (err) {
+    console.warn('[localOwner] set failed', err);
+    return false;
+  }
+});
+
+ipcMain.handle('localOwner:clear', () => {
+  try {
+    const p = localOwnerFilePath();
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+    return true;
+  } catch (err) {
+    console.warn('[localOwner] clear failed', err);
     return false;
   }
 });
@@ -1189,7 +1310,7 @@ ipcMain.handle(
       const installed = await downloadAndExtractCharacterPak(
         mainWindow,
         args.characterId,
-        { url: args.url, sha256: platMeta.sha256, sizeBytes: platMeta.sizeBytes },
+        { url: args.url, sha256: platMeta.sha256, sizeBytes: platMeta.sizeBytes, version: meta.version },
         (downloaded, total) => {
           mainWindow?.webContents.send('character-store:pak-progress', {
             characterId: args.characterId,
@@ -1264,7 +1385,19 @@ ipcMain.handle('character-store:list-installed', async () => {
   // comes solely from the staged-paks dir, same as production. To restore the
   // baked-in dev shortcut, re-add the !app.isPackaged block AND move the
   // pakchunk1-4 paks back from _baked_paid_paks_backup into Content/Paks.
-  return { ids: Array.from(ids) };
+  //
+  // Drift detection: a staged pak whose recorded version differs from the
+  // manifest's current version is STALE — still usable (the old bytes mount
+  // fine) but the provisioning pass re-downloads it so an older install picks
+  // up a re-cooked pak on launch. `ids` stays the full installed set so the
+  // picker keeps showing the character as ready while the refresh runs.
+  const versions = installedPakVersions();
+  const stale: string[] = [];
+  for (const id of ids) {
+    const want = MANIFEST.characterPaks?.[id]?.version;
+    if (want && versions[id] !== want) stale.push(id);
+  }
+  return { ids: Array.from(ids), stale };
 });
 
 app.whenReady().then(() => {
@@ -1317,6 +1450,17 @@ app.whenReady().then(() => {
     );
   }
 
+  // TEMP(revert): Cmd+H hides all chrome (debug/clean-capture). Registered as a
+  // globalShortcut so it wins over the default app menu's "Hide" role (which
+  // also owns Cmd+H and would otherwise hide the whole app). Remove this block
+  // + the preload onToggleUi bridge + the App.tsx uiHidden handling to revert.
+  const tempUiToggle = globalShortcut.register('CommandOrControl+H', () => {
+    mainWindow?.webContents.send('temp:toggle-ui');
+  });
+  if (!tempUiToggle) {
+    console.warn('[temp] failed to register Cmd+H UI toggle');
+  }
+
   createWindow();
   createTray();
 
@@ -1333,6 +1477,14 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  // A second instance that lost the single-instance lock is quitting
+  // immediately (line ~1156) and never owned the soul/UE stack. It MUST NOT
+  // run the teardown below: the system-wide `pkill -f 'Unclaw Character'`
+  // would kill the PRIMARY instance's live UE + MCP children out from under
+  // a perfectly healthy session. Only the lock owner tears down the stack.
+  if (!gotSingleInstanceLock) return;
+  // Wipe the decrypted BYOK bridge so plaintext keys never outlive the app.
+  clearSoulKeysBridge();
   // SIGTERM the soul subprocess. Soul's shutdown hooks (UE SIGTERM,
   // MCP subprocess teardown) run cleanly. No-op if soul was attached
   // externally (the user owns that process and we don't kill it).

@@ -24,18 +24,14 @@ interface UsePixelStreamingReturn {
   connectionState: ConnectionState;
   pixelStreaming: PixelStreaming | null;
   /**
-   * Send a descriptor to UE and resolve when UE acks it back with
-   * `{EventType, status: "received"}`. Rejects on timeout (default 1500 ms).
-   * Caller can retry on rejection. Used for descriptors that MUST be
-   * acknowledged (the wardrobe init handshake on stream connect — UE is
-   * sometimes not ready to process descriptors the instant the stream
-   * is technically "connected", so we need confirm-or-retry rather than
-   * fire-and-forget).
+   * Arm a waiter for UE's `{EventType, status: "received"}` echo without
+   * sending anything. Resolves true when the ack lands, false on timeout
+   * (default 1500 ms). The dressing chain fires its descriptors over the
+   * ordered data channel and probes liveness with ONE of these per run
+   * instead of blocking on an ack per descriptor (un-acked EventTypes used
+   * to burn a full timeout each, stacking seconds of visible delay).
    */
-  sendAndAwaitAck: (
-    payload: Record<string, unknown> & { EventType: string },
-    opts?: { timeoutMs?: number }
-  ) => Promise<void>;
+  waitForAck: (eventType: string, timeoutMs?: number) => Promise<boolean>;
 }
 
 export function usePixelStreaming({
@@ -48,7 +44,7 @@ export function usePixelStreaming({
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
 
   // Per-EventType promise resolvers waiting on a `status: "received"`
-  // response from UE. Set when sendAndAwaitAck is called, cleared by
+  // response from UE. Set when waitForAck arms a waiter, cleared by
   // the response listener below when the matching EventType arrives.
   // Map (not object) so we can iterate cleanly on cleanup.
   const pendingAcksRef = useRef<Map<string, (err?: Error) => void>>(new Map());
@@ -95,7 +91,7 @@ export function usePixelStreaming({
     // Listen for UE → browser response messages. The SDK fires this
     // for EVERY response, regardless of "name" — that's just a handle
     // for removal. We parse the message as JSON; if it has the shape
-    // `{EventType, status: "received"}` it's an ack for a sendAndAwaitAck
+    // `{EventType, status: "received"}` it's an ack a waitForAck waiter
     // call and we resolve the matching pending promise. Late acks
     // (after a timeout) are silently discarded.
     ps.addResponseEventListener('unclaw-ack-router', (raw: string) => {
@@ -105,12 +101,24 @@ export function usePixelStreaming({
       if (!parsed || typeof parsed !== 'object') return;
       const msg = parsed as { EventType?: unknown; status?: unknown };
       if (typeof msg.EventType !== 'string') return;
-      if (msg.status !== 'received') return;
-      const resolver = pendingAcksRef.current.get(msg.EventType);
+      // UE acks a completed function in one of two conventions:
+      //   1. {EventType:"<sent>", status:"received"}  (clothing/init/color)
+      //   2. {EventType:"<sent>Success"}              (bg/light/blends/strands/
+      //      camera/animations) — strip the suffix to recover the key the
+      //      waiter was armed under.
+      // Normalise both to the sent EventType so a waitForAck on the descriptor
+      // we emitted resolves regardless of which convention UE used.
+      let key: string | null = null;
+      if (msg.status === 'received') {
+        key = msg.EventType;
+      } else if (msg.EventType.endsWith('Success')) {
+        key = msg.EventType.slice(0, -'Success'.length);
+      }
+      if (!key) return;
+      const resolver = pendingAcksRef.current.get(key);
       if (resolver) {
-        pendingAcksRef.current.delete(msg.EventType);
+        pendingAcksRef.current.delete(key);
         resolver();
-        console.log('[ps-ack] ←', msg.EventType);
       }
     });
 
@@ -141,7 +149,18 @@ export function usePixelStreaming({
     // emitting the Resolution command. Wire format is identical to the SDK's
     // own path: emitCommand() -> streamMessageController 'Command' handler,
     // same as onMatchViewportResolutionCallback's default body.
-    const MAX_RENDER_DIM = 1920; // cap longest side so the HW encoder + bitrate cap stay sane
+    // Cap the longest rendered side. Everything downstream scales with pixel
+    // area: UE's scene-texture chain, the capture/I420/NV12 conversions, and
+    // the HW encoder. Uncapped Retina (dpr 2) testing measured ~6.5 GB resident
+    // at launch and ~1 GB of realloc churn per window resize. 1600 (vs 1920)
+    // trims ~30% more off every output-sized buffer in the whole pipeline;
+    // memory > sharpness call made 2026-07-19.
+    const MAX_RENDER_DIM = 1600;
+    // Last dims actually sent to UE. Identical re-sends are skipped (layout
+    // jitter + the layered connect-time fires produce duplicates); reset on
+    // each webRtcConnected so a fresh session always gets one real send even
+    // if a pre-connect attempt was dropped with the data channel closed.
+    const lastSentRes = { w: 0, h: 0 };
     const installDprResolutionOverride = (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vp: any,
@@ -152,13 +171,29 @@ export function usePixelStreaming({
         let w = Math.round(cssW * dpr);
         let h = Math.round(cssH * dpr);
         const longest = Math.max(w, h);
+        // Cap, then quantize the longest side DOWN to a 128px step (above
+        // 1024). Every distinct resolution UE receives costs one realloc
+        // cycle of the backbuffer + capture + encoder chain, so snapping to
+        // steps makes most window resizes send nothing at all (the dedupe
+        // below eats the repeat). Worst-case cost is a <=127px downscale the
+        // video element upscales away, invisible at stream viewing sizes.
+        // Below 1024 the buffers are small enough that native size is fine.
+        let target = longest;
         if (longest > MAX_RENDER_DIM) {
-          const s = MAX_RENDER_DIM / longest;
+          target = MAX_RENDER_DIM;
+        } else if (longest >= 1024) {
+          target = Math.floor(longest / 128) * 128;
+        }
+        if (target < longest) {
+          const s = target / longest;
           w = Math.round(w * s);
           h = Math.round(h * s);
         }
         w -= w % 2; // even dims: H264 4:2:0 chroma subsampling needs them
         h -= h % 2;
+        if (w === lastSentRes.w && h === lastSentRes.h) return;
+        lastSentRes.w = w;
+        lastSentRes.h = h;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (ps as any).emitCommand({ 'Resolution.Width': w, 'Resolution.Height': h });
       };
@@ -176,17 +211,89 @@ export function usePixelStreaming({
       }
     };
 
-    // Dev-mode handle so the update can be fired from DevTools when
-    // diagnosing a layout-change miss. Stripped in production builds
-    // by Vite's dead-code elimination on import.meta.env.DEV.
+    // Decoder diagnostic. Chromium can silently fall back from VideoToolbox
+    // to FFmpeg software decode (codec-profile mismatch, GPU process restart),
+    // which costs ~200MB of CPU-side frame copies plus real CPU per frame.
+    // Log the implementation so a regression is a visible console line.
+    // HW names vary by Chromium version: "VideoToolboxVideoDecoder" (current),
+    // "VDAVideoDecoder" / "ExternalDecoder" (older). Software is consistently
+    // "FFmpegVideoDecoder" (or libvpx/dav1d for codecs we don't send). Match
+    // the known-HW set, so an unrecognized new name warns instead of passing.
+    const logDecoderImplementation = async () => {
+      try {
+        const pc: RTCPeerConnection | undefined =
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (ps as any)._webRtcController?.peerConnectionController?.peerConnection;
+        if (!pc) {
+          // eslint-disable-next-line no-console
+          console.warn('[ps] video decoder: no peer connection yet');
+          return;
+        }
+        let seen = false;
+        const stats = await pc.getStats();
+        stats.forEach((report) => {
+          if (report.type === 'inbound-rtp' && report.kind === 'video') {
+            seen = true;
+            const r = report as {
+              decoderImplementation?: string;
+              framesDecoded?: number;
+              totalDecodeTime?: number;
+            };
+            const avgMs = r.framesDecoded && r.totalDecodeTime
+              ? (r.totalDecodeTime / r.framesDecoded) * 1000
+              : undefined;
+            const avgStr = avgMs !== undefined ? `, avg decode ${avgMs.toFixed(2)}ms/frame` : '';
+            if (r.decoderImplementation === undefined) {
+              // Chromium fingerprinting-gates decoderImplementation: it's only
+              // exposed to pages granted media capture, which this renderer
+              // never requests (the mic lives UE-side). NOT a software signal.
+              // Verified 2026-07-19 that decode is hardware regardless: a
+              // VTDecoderXPCService spawns alongside the app on connect
+              // (out-of-process VideoToolbox). The avg decode time is the
+              // permission-free heuristic: HW runs ~1-3ms/frame at our sizes,
+              // software typically 5ms+.
+              // eslint-disable-next-line no-console
+              console.log(
+                `[ps] video decoder: hidden by Chromium (no capture permission)${avgStr}` +
+                ' — check for a VTDecoderXPCService process to confirm HW'
+              );
+              return;
+            }
+            const impl = r.decoderImplementation;
+            const hw = /VideoToolbox|VDA|External|MediaCodec|hw/i.test(impl);
+            // eslint-disable-next-line no-console
+            console[hw ? 'log' : 'warn'](
+              `[ps] video decoder: ${impl}${avgStr}${hw ? '' : ' (SOFTWARE decode: expect extra RAM + CPU)'}`
+            );
+          }
+        });
+        if (!seen) {
+          // eslint-disable-next-line no-console
+          console.warn('[ps] video decoder: no inbound video stats yet (stream not decoding?)');
+        }
+      } catch {
+        // Diagnostic only, never let it interfere with the stream.
+      }
+    };
+
+    // Dev-mode handles for DevTools: fire the viewport-res update when
+    // diagnosing a layout-change miss, and query the decoder verdict on
+    // demand (`await psDecoderCheck()`). Stripped in production builds by
+    // Vite's dead-code elimination on import.meta.env.DEV.
     if (import.meta.env.DEV) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (window as any).forceViewportUpdate = forceViewportResolutionUpdate;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).psDecoderCheck = logDecoderImplementation;
     }
 
     ps.addEventListener('webRtcConnecting', () => setConnectionState('connecting'));
     ps.addEventListener('webRtcConnected', () => {
       setConnectionState('connected');
+      // New session: forget the dedupe state so the first resolution send of
+      // this connection always goes out on the wire.
+      lastSentRes.w = 0;
+      lastSentRes.h = 0;
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
@@ -254,6 +361,10 @@ export function usePixelStreaming({
       setTimeout(forceViewportResolutionUpdate, 1000);
       setTimeout(forceViewportResolutionUpdate, 2000);
       setTimeout(forceViewportResolutionUpdate, 3000);
+      // One-time decoder diagnostic ~4s after stream start (stats need a few
+      // decoded frames before decoderImplementation populates). See
+      // logDecoderImplementation for why this exists.
+      setTimeout(() => void logDecoderImplementation(), 4000);
     });
 
     // Dynamic-resize: watch the video parent's pixel size and re-fire
@@ -294,39 +405,38 @@ export function usePixelStreaming({
     };
   }, [signalingUrl, retryDelay]);
 
-  const sendAndAwaitAck = useCallback<UsePixelStreamingReturn['sendAndAwaitAck']>(
-    (payload, opts) => {
-      const ps = psRef.current;
-      if (!ps) return Promise.reject(new Error('pixelStreaming not ready'));
-
-      const timeoutMs = opts?.timeoutMs ?? 1500;
-      const evt = payload.EventType;
-
-      return new Promise<void>((resolve, reject) => {
-        // If a previous ack for this EventType is still pending, the
-        // newer send supersedes it — drop the old resolver. (UE only
-        // tracks the latest state; we don't need both acks.)
-        const existing = pendingAcksRef.current.get(evt);
-        if (existing) existing(new Error('superseded by newer send'));
+  // Arm a waiter for UE's `{EventType, status:"received"}` echo WITHOUT
+  // sending anything. The dressing chain pipelines its descriptors over the
+  // ordered data channel and only needs ONE liveness signal per run, so the
+  // old sendAndAwaitAck (send + block per descriptor) became waitForAck
+  // (observe only). Resolves true on ack, false on timeout / supersede /
+  // unmount; never rejects, callers treat false as "UE stayed silent".
+  //
+  // Registration must happen BEFORE the send it observes, or a same-tick ack
+  // could race past an unarmed waiter.
+  const waitForAck = useCallback<UsePixelStreamingReturn['waitForAck']>(
+    (eventType, timeoutMs = 1500) => {
+      if (!psRef.current) return Promise.resolve(false);
+      return new Promise<boolean>((resolve) => {
+        // A previous waiter for this EventType is superseded: the router
+        // only routes the LATEST ack per type, and the epoch system already
+        // guarantees only one dressing chain is live at a time.
+        const existing = pendingAcksRef.current.get(eventType);
+        if (existing) existing(new Error('superseded by newer waiter'));
 
         const timer = setTimeout(() => {
-          if (pendingAcksRef.current.get(evt) === wrappedResolve) {
-            pendingAcksRef.current.delete(evt);
-            reject(new Error(`ack timeout: ${evt} (${timeoutMs}ms)`));
+          if (pendingAcksRef.current.get(eventType) === wrappedResolve) {
+            pendingAcksRef.current.delete(eventType);
+            resolve(false);
           }
         }, timeoutMs);
 
         const wrappedResolve = (err?: Error) => {
           clearTimeout(timer);
-          if (err) reject(err); else resolve();
+          resolve(!err);
         };
 
-        pendingAcksRef.current.set(evt, wrappedResolve);
-
-        ps.emitUIInteraction({
-          ...payload,
-          Timestamp: new Date().toISOString(),
-        });
+        pendingAcksRef.current.set(eventType, wrappedResolve);
       });
     },
     []
@@ -336,6 +446,6 @@ export function usePixelStreaming({
     videoParentRef,
     connectionState,
     pixelStreaming: psRef.current,
-    sendAndAwaitAck,
+    waitForAck,
   };
 }

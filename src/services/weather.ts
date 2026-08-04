@@ -73,6 +73,9 @@ export async function getWeather(coords?: Coords): Promise<WeatherResult> {
     res = await fetch(`${getSoulBaseUrl()}/weather${qs}`, {
       method: 'GET',
       headers: { 'X-Gemini-Key': keys.gemini_search_api_key },
+      // Bound the request so a wedged-but-listening soul can't hang the
+      // widget spinner forever (chat + idle paths already do this).
+      signal: AbortSignal.timeout(15000),
     });
   } catch (err) {
     return { available: false, error: `network: ${(err as Error).message}` };

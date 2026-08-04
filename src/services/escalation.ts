@@ -37,6 +37,10 @@ export async function pollNextEscalation(
   try {
     const r = await fetch(
       `${getSoulBaseUrl()}/escalation/${encodeURIComponent(jobId)}/next`,
+      // Without a bound, a single wedged poll leaves the caller's inFlight
+      // guard stuck true forever, freezing the "thinking" pills with no
+      // recovery. Timeout → reject → catch returns null → next tick advances.
+      { signal: AbortSignal.timeout(20000) },
     );
     if (!r.ok) return null;
     return (await r.json()) as EscalationStep;

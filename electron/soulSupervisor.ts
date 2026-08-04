@@ -23,10 +23,17 @@
 // lives at `../soul/run_soul.sh` relative to that. In packaged builds
 // (later) we'll bundle a wrapper; for now this is dev-only.
 
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, safeStorage } from 'electron';
 import { spawn, ChildProcess, execFile } from 'child_process';
 import path from 'path';
 import http from 'http';
+// Single source of truth for "first-run setup finished". Imported statically
+// (Rollup bundles all of electron/ into one file, so a runtime require of a
+// sibling module wouldn't resolve). This is a circular import , setupCoordinator
+// imports startSoul/getRuntimeDir from here , but it's eval-safe: neither module
+// calls the other's functions at top-level, only at runtime, and both are
+// hoisted function declarations, so the live bindings resolve fine.
+import { isSetupComplete } from './setupCoordinator';
 
 // Platform split. On Windows soul is launched via `powershell run_soul.ps1`
 // and the process tree is reaped with `taskkill /T /F` (no POSIX process
@@ -187,6 +194,7 @@ function startHealthPoll(window: BrowserWindow): void {
  *  real reason + a "view logs" affordance. */
 function handleBootFailure(window: BrowserWindow, reason: string): void {
   if (soulIsReady) return; // we made it after all; ignore late failure signals
+  if (bootFailed) return;  // already surfaced; don't double-emit soul:failed
   bootFailed = true;
   clearBootTimers();
   const errTail = recentLogs
@@ -195,6 +203,11 @@ function handleBootFailure(window: BrowserWindow, reason: string): void {
     .map((l) => l.line);
   log(window, 'meta', `[unclaw] soul boot FAILED: ${reason}`);
   emit(window, 'soul:failed', { reason, recentErrors: errTail });
+  // Terminal failure with the app still open: a hard soul death (crash/SIGKILL)
+  // skips soul's graceful _on_shutdown, so the UE child it spawned in its own
+  // session is orphaned and keeps holding the GPU video encoder. Reap any such
+  // orphan now (the sweep is ancestry-guarded, so it won't touch a live tree).
+  void sweepStaleProcesses(window).catch(() => { /* best effort */ });
 }
 
 /** Live ports soul is bound to. Null until the [ports] banner has been
@@ -332,13 +345,88 @@ export function getRuntimeDir(): string {
   return path.join(app.getPath('userData'), 'runtime');
 }
 
+// ---------------------------------------------------------------------------
+// BYOK plaintext bridge for soul.
+//
+// soul (a separate Python binary) cannot read the safeStorage master key from
+// the macOS login Keychain: the item's ACL trusts only the Electron app that
+// created it, so soul's `security find-generic-password` shell-out triggers an
+// interactive "allow access" prompt that a headless process can never answer
+// (it just times out after 30s). This Electron process IS the trusted app, so
+// `safeStorage.decryptString()` here succeeds with no prompt. We decrypt the
+// user's apiKeys.bin and hand soul the plaintext through a 0600 file it reads
+// directly (env SOUL_BYOK_KEYS_FILE), bypassing the Keychain entirely.
+//
+// The file holds unencrypted API keys, so: mode 0600 (owner-only), it lives in
+// userData (never cloud-synced, keys stay device-local), and it's unlinked on
+// clear + on app quit so plaintext never outlives the running app.
+const API_KEYS_BIN = 'apiKeys.bin';
+const SOUL_KEYS_BRIDGE = 'apiKeys.plain.json';
+
+export function soulKeysBridgePath(): string {
+  return path.join(app.getPath('userData'), SOUL_KEYS_BRIDGE);
+}
+
+/** Decrypt apiKeys.bin and (re)write the plaintext bridge soul reads. Removes
+ *  the bridge when there are no keys or decryption fails, so soul never sees a
+ *  stale profile. Safe to call repeatedly (spawn, key-save). Never throws. */
+export function writeSoulKeysBridge(): void {
+  const fs = require('fs') as typeof import('fs');
+  const bridge = soulKeysBridgePath();
+  const bin = path.join(app.getPath('userData'), API_KEYS_BIN);
+  try {
+    if (!fs.existsSync(bin)) {
+      clearSoulKeysBridge();
+      return;
+    }
+    let plaintext: string;
+    if (safeStorage.isEncryptionAvailable()) {
+      plaintext = safeStorage.decryptString(fs.readFileSync(bin));
+    } else {
+      // No OS crypto (rare) , apiKeys.bin was written as raw utf-8.
+      plaintext = fs.readFileSync(bin, 'utf-8');
+    }
+    fs.writeFileSync(bridge, plaintext, { mode: 0o600 });
+    // writeFileSync only applies mode on creation; force it if the file
+    // already existed with looser perms.
+    try { fs.chmodSync(bridge, 0o600); } catch { /* best effort */ }
+  } catch (err) {
+    console.warn('[soul] keys bridge write failed', err);
+    clearSoulKeysBridge();
+  }
+}
+
+/** Remove the plaintext bridge. Called on apiKeys:clear and app quit so
+ *  unencrypted keys never persist past the running app. Never throws. */
+export function clearSoulKeysBridge(): void {
+  const fs = require('fs') as typeof import('fs');
+  try {
+    const bridge = soulKeysBridgePath();
+    if (fs.existsSync(bridge)) fs.unlinkSync(bridge);
+  } catch (err) {
+    console.warn('[soul] keys bridge clear failed', err);
+  }
+}
+
 function isPackagedSetupComplete(): boolean {
   if (!app.isPackaged) return true; // dev runs always have a working repo
   try {
-    const fs = require('fs') as typeof import('fs');
-    return fs.existsSync(path.join(getRuntimeDir(), '.setup-complete'));
+    // Single source of truth: defer to the coordinator's releaseTag-aware
+    // check so this gate and the renderer's App.tsx gate can never disagree.
+    // Previously this was existence-only, so after a releaseTag bump (an
+    // app-shell update) the supervisor thought setup was done and spawned
+    // soul against the old runtime the wizard was concurrently replacing ,
+    // the documented "loading forever after setup completes" race.
+    return isSetupComplete();
   } catch {
-    return false;
+    // Coordinator unavailable (shouldn't happen): fall back to the old
+    // existence-only check rather than block boot entirely.
+    try {
+      const fs = require('fs') as typeof import('fs');
+      return fs.existsSync(path.join(getRuntimeDir(), '.setup-complete'));
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -417,12 +505,16 @@ function spawnSoul(window: BrowserWindow): boolean {
   // exactly like a terminal-launched `./run_soul.sh` invocation.
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    // Dynamic backbuffer match via MatchViewportRes, the new MacInputHandler
-    // SetCommandHandler("Resolution.Width", ...) (UE plugin rebuild) handles
-    // the SDK's resize messages and runs r.SetRes WxHw. UE picks its own
-    // sensible default at boot (typically the host display dimensions in
-    // -RenderOffScreen), then resizes on demand as the browser fires.
-    UNCLAW_UE_RES_AUTO: process.env.UNCLAW_UE_RES_AUTO ?? '1',
+    // Boot UE at run_soul's small fixed resolution (720x1280) instead of
+    // letting -RenderOffScreen default to the HOST DISPLAY size. Dynamic
+    // resize still works: MatchViewportRes grows the stream to the pane's
+    // capped size right after connect. This '0' became load-bearing on
+    // 2026-07-19 when r.SceneRenderTargetResizeMethod=2 (grow-only scene
+    // textures) shipped: with RES_AUTO=1 a 5K display made UE boot with a
+    // 5120x2880 chain that grow-only then kept FOREVER (~2GB of dead Metal
+    // memory, found via MemReport + vmmap "owned unmapped (graphics)").
+    // Boot small; the floor becomes the frontend's real streamed size.
+    UNCLAW_UE_RES_AUTO: process.env.UNCLAW_UE_RES_AUTO ?? '0',
     // Flat dir of owned character paks. run_soul.sh stages any *.pak here into
     // the UE sandbox container's Saved/Paks at launch so purchased characters
     // boot-mount before BeginPlay. run_soul guards on the dir existing, so this
@@ -442,6 +534,31 @@ function spawnSoul(window: BrowserWindow): boolean {
           process.env.PATH ?? '',
         ].filter(Boolean).join(':'),
   };
+
+  // BYOK keychain identity. Electron's safeStorage stores the OSCrypt master
+  // key on macOS under keychain service "<app.getName()> Safe Storage" with
+  // account "<app.getName()> Key" (and application="<app.getName()>" in the
+  // Linux secret service). soul's byok.py defaulted to the productName
+  // "Unclaw", which mismatches the ACTUAL app.getName() ("unclaw", lowercase,
+  // from package.json `name` since there's no top-level productName) on BOTH
+  // the service-name case AND the " Key" account suffix. Result: soul's
+  // `security find-generic-password` returned errSecItemNotFound (rc=44) and
+  // EVERY user's API keys silently failed to decrypt on Mac. Pass the
+  // authoritative names: this Electron process is the same one whose
+  // safeStorage created the item, so app.getName() is exactly the string it
+  // used. soul reads these override env vars ahead of its own defaults.
+  const keychainAppName = app.getName();
+  childEnv.SOUL_BYOK_KEYCHAIN_SERVICE = `${keychainAppName} Safe Storage`;
+  childEnv.SOUL_BYOK_KEYCHAIN_ACCOUNT = `${keychainAppName} Key`;
+  childEnv.SOUL_BYOK_KEYRING_APP = keychainAppName;
+
+  // Primary BYOK path on macOS: hand soul the already-decrypted keys via a
+  // 0600 plaintext bridge, because soul's own Keychain read triggers an
+  // un-answerable GUI prompt (see writeSoulKeysBridge). Refresh it from the
+  // latest apiKeys.bin right before spawn so a booting soul reads current
+  // keys. byok.py prefers SOUL_BYOK_KEYS_FILE over its Keychain fallback.
+  writeSoulKeysBridge();
+  childEnv.SOUL_BYOK_KEYS_FILE = soulKeysBridgePath();
 
   // Packaged-install env. The setup wizard provisions
   //   <userData>/runtime/{python-env, assets, unreal, data}/
@@ -595,6 +712,7 @@ function spawnSoul(window: BrowserWindow): boolean {
         void sweepStaleProcesses(window).finally(() => {
           if (intentionalStop) return;
           if (spawnSoul(window)) startHealthPoll(window);
+          else handleBootFailure(window, 'soul respawn could not be started');
         });
       }, backoff);
       return;
@@ -608,7 +726,16 @@ function spawnSoul(window: BrowserWindow): boolean {
     }
   });
   soulProc.on('error', (err) => {
-    log(window, 'meta', `[unclaw] soul error: ${err.message}`);
+    log(window, 'meta', `[unclaw] soul spawn error: ${err.message}`);
+    // A spawn-level error (bash/powershell ENOENT, EACCES on run_soul.sh)
+    // usually means the 'exit' handler will NOT fire, so the respawn/
+    // failure path there never runs and the user would sit out the full
+    // 150s boot watchdog. Surface it immediately. Guarded so a stray
+    // late error after a healthy boot (or during an intentional stop)
+    // doesn't flip the UI to failed.
+    if (!intentionalStop && !soulIsReady) {
+      handleBootFailure(window, `failed to launch soul: ${err.message}`);
+    }
   });
 
   // Fallback readiness path: poll /health alongside the stdout marker so a
@@ -624,7 +751,10 @@ function spawnSoul(window: BrowserWindow): boolean {
  * "external soul running" path (attach + immediate ready) and the
  * "no soul yet" path (spawn + wait for the READY marker).
  */
-export async function startSoul(window: BrowserWindow): Promise<void> {
+export async function startSoul(
+  window: BrowserWindow,
+  opts: { skipProbe?: boolean } = {},
+): Promise<void> {
   alreadyReadyFired = false;
   soulIsReady = false;
   // Reset livePorts so a respawn doesn't surface the dead session's
@@ -653,7 +783,12 @@ export async function startSoul(window: BrowserWindow): Promise<void> {
     return;
   }
 
-  const existing = await probeExistingSoul();
+  // A manual restart (restartSoul) just SIGTERM'd the old soul, which may
+  // still answer /health for a moment while it winds down. Probing here would
+  // "attach" to that dying corpse, mark ready, skip the fresh spawn+sweep, and
+  // then strand the boot when it finishes dying. Skip the probe on a forced
+  // restart so we always spawn a clean instance.
+  const existing = opts.skipProbe ? false : await probeExistingSoul();
   if (existing) {
     log(window, 'meta', '[unclaw] soul already running externally, attaching');
     alreadyReadyFired = true;
@@ -704,7 +839,14 @@ export async function startSoul(window: BrowserWindow): Promise<void> {
     }
   }, SOUL_BOOT_TIMEOUT_MS);
 
-  spawnSoul(window);
+  // Fast-fail if the spawn itself couldn't start (missing run_soul.sh, a
+  // spawn() throw). Previously this return value was ignored, so a missing
+  // script surfaced only after the full 150s watchdog , a 2.5 minute
+  // spinner before any error. Surface it now.
+  if (!spawnSoul(window)) {
+    handleBootFailure(window,
+      'could not start soul (run_soul.sh not found or failed to spawn)');
+  }
 }
 
 /**
@@ -720,7 +862,12 @@ export async function restartSoul(window: BrowserWindow): Promise<void> {
     soulProc = null;
   }
   clearBootTimers();
-  await startSoul(window);
+  // Brief grace so the SIGTERM'd group actually releases its ports and stops
+  // answering /health before we spawn again. startSoul(skipProbe) then does a
+  // fresh spawn + sweep (which SIGKILLs any survivor), so this is belt +
+  // suspenders against binding contention on the immediate relaunch.
+  await new Promise((r) => setTimeout(r, 600));
+  await startSoul(window, { skipProbe: true });
 }
 
 /**
@@ -742,9 +889,10 @@ async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
     return;
   }
   const psOutput = await new Promise<string>((resolve) => {
-    // `ps -A -o pid=,command=`, full command line for every process the
-    // user can see. We post-filter by argv pattern.
-    execFile('/bin/ps', ['-A', '-o', 'pid=,command='], (err, stdout) => {
+    // `ps -A -o pid=,ppid=,command=`: pid, PARENT pid, and full command line
+    // for every process the user can see. ppid lets us trace ancestry so we
+    // only sweep genuine orphans (see below), never a live tree.
+    execFile('/bin/ps', ['-A', '-o', 'pid=,ppid=,command='], (err, stdout) => {
       if (err) {
         log(window, 'meta', `[unclaw] stale-process sweep skipped: ps failed (${err.message})`);
         resolve('');
@@ -764,24 +912,75 @@ async function sweepStaleProcesses(window: BrowserWindow): Promise<void> {
     /\bwilbur\b/,
     new RegExp(`${ueAppName}\\.app`),
   ];
-  const stale: Array<{ pid: number; cmd: string }> = [];
 
+  // Full process table so we can walk ancestry.
+  const procs = new Map<number, { ppid: number; cmd: string }>();
   for (const line of psOutput.split('\n')) {
-    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
     if (!m) continue;
-    const pid = parseInt(m[1], 10);
-    const cmd = m[2];
+    procs.set(parseInt(m[1], 10), { ppid: parseInt(m[2], 10), cmd: m[3] });
+  }
+
+  // An Electron MAIN process (not a --type= helper) whose binary is dev-Electron
+  // or the packaged Unclaw shell (NOT "Unclaw Character", which is UE).
+  const isElectronMain = (cmd: string) =>
+    !cmd.includes('--type=') &&
+    (/Electron\.app\/Contents\/MacOS\/Electron(?:\s|$)/.test(cmd) ||
+      /\.app\/Contents\/MacOS\/Unclaw(?:\s|$)/.test(cmd));
+  // A login/interactive shell or terminal (leading-dash argv, `login`, Terminal/
+  // iTerm). Marks a process a human is running by hand (e.g. a dev's soul).
+  const isLoginShell = (cmd: string) =>
+    /(?:^|\/)-\w*sh(?:\s|$)/.test(cmd) ||
+    /(?:^|\/)login(?:\s|$)/.test(cmd) ||
+    /\/(?:Terminal|iTerm2?)\b/.test(cmd);
+
+  // Is there a LIVE foreign Unclaw instance? Its UE child is detached
+  // (start_new_session -> ppid 1), so it's indistinguishable from a dead-session
+  // orphan by metadata alone. When a sibling is live we must not sweep UE at all
+  // or we'd blank a healthy parallel instance's stream (the documented "dev
+  // launch kills the packaged app" hazard).
+  let foreignInstanceLive = false;
+  for (const [pid, { cmd }] of procs) {
+    if (pid !== myPid && isElectronMain(cmd)) { foreignInstanceLive = true; break; }
+  }
+
+  // Walk a candidate's ancestry to its root. A tree rooted at launchd (or a
+  // vanished parent) with no live Electron-main / login-shell ancestor is a
+  // genuine orphan from a dead session -> safe to sweep. A tree that passes
+  // through a live foreign Electron main or a terminal belongs to something
+  // still running -> leave it alone. (Orphaned trees keep their INTERNAL parent
+  // links alive, so "immediate parent alive" is not enough; we must reach the
+  // root.)
+  const isOrphanTree = (startPid: number): boolean => {
+    let cur = startPid;
+    const seen = new Set<number>();
+    while (true) {
+      const info = procs.get(cur);
+      if (!info) return true;              // ancestor gone -> reparented -> orphan
+      if (cur !== startPid) {
+        if (cur === myPid) return false;   // descends from THIS Electron
+        if (isElectronMain(info.cmd)) return false; // live foreign instance owns it
+        if (isLoginShell(info.cmd)) return false;   // a terminal owns it
+      }
+      if (info.ppid <= 1) return true;     // reached launchd, no live owner found
+      if (seen.has(cur)) return true;      // cycle guard
+      seen.add(cur);
+      cur = info.ppid;
+    }
+  };
+
+  const stale: Array<{ pid: number; cmd: string }> = [];
+  for (const [pid, { cmd }] of procs) {
     // Never touch our own process tree (Electron main, helper procs,
     // current soul if it's already mid-spawn).
     if (pid === myPid) continue;
     if (soulProc && pid === soulProc.pid) continue;
     if (!ourPatterns.some((re) => re.test(cmd))) continue;
-    // Filter out the .app path matching our DMG-bundled UE, we only
-    // care about orphans that haven't been reaped. A still-living
-    // Electron-main owner means the process belongs to a parallel
-    // Unclaw instance and we shouldn't touch it. Conservative: only
-    // count it as orphan if we can confirm the parent PID is launchd
-    // (PID 1) or otherwise dead.
+    // A live sibling's detached UE can't be told apart from an orphan, so skip
+    // ALL UE matches while any foreign instance is up.
+    if (foreignInstanceLive && new RegExp(`${ueAppName}\\.app`).test(cmd)) continue;
+    // Only sweep genuine orphans; spare anything owned by a live tree.
+    if (!isOrphanTree(pid)) continue;
     stale.push({ pid, cmd: cmd.slice(0, 120) });
   }
 

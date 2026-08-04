@@ -14,7 +14,7 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ArrowLeft, Plus, X, Pencil, Lock, Download } from 'lucide-react';
-import type { Agent } from '../types';
+import { AGENTS, type Agent } from '../types';
 import type { AgentInstance } from '../hooks/useAgentStack';
 import { agentPortrait } from '../assets/agents';
 import { ClawsIcon } from './ClawsBalance';
@@ -242,6 +242,51 @@ export function AddCharacterPicker({
   );
 }
 
+// ============ trait badge ============================================
+// A circled monogram marking something intrinsic about the character (as
+// opposed to the top-right badge, which marks a transient STATE: buy /
+// download / add). Two hues carry the meaning at 18px without a label —
+// C (Custom) takes the warm-red accent because provenance is the
+// distinguishing fact about these builds, O (Optimized) takes --live, the
+// same token Reminders uses for a good/completed state, so it reads as
+// "this one runs well". Same frosted material as the rest of the chrome;
+// the tint is a wash over it, never a solid chip.
+function TraitBadge({ letter, tint, title }: {
+  letter: string;
+  tint: string;
+  title: string;
+}) {
+  return (
+    <span
+      title={title}
+      aria-label={title}
+      style={{
+        width: 18,
+        height: 18,
+        borderRadius: '50%',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 9.5,
+        fontWeight: 800,
+        lineHeight: 1,
+        // Letterform sits a hair high inside a circle; nudge it back to the
+        // optical center.
+        paddingTop: 0.5,
+        color: `color-mix(in srgb, ${tint} 42%, #ffffff)`,
+        background: `color-mix(in srgb, ${tint} 20%, rgba(8, 10, 14, 0.62))`,
+        border: `1px solid color-mix(in srgb, ${tint} 52%, transparent)`,
+        backdropFilter: 'blur(8px)',
+        WebkitBackdropFilter: 'blur(8px)',
+        boxShadow: `0 2px 8px -3px rgba(0,0,0,0.75), 0 0 9px -3px color-mix(in srgb, ${tint} 70%, transparent)`,
+        textShadow: '0 1px 2px rgba(0,0,0,0.55)',
+      }}
+    >
+      {letter}
+    </span>
+  );
+}
+
 function CharacterCard({
   entry, delay, onPick, onBuy, onDownload,
 }: {
@@ -298,7 +343,10 @@ function CharacterCard({
       onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.22)'; }}
       onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.10)'; }}
     >
-      {/* portrait fill (or lettered fallback if the id has no art yet) */}
+      {/* portrait fill, or the name AS the art when the id has no portrait.
+          The nameplate is a deliberate treatment rather than a placeholder:
+          letterspaced caps over a soft warm wash, so a character with no
+          authored art still reads as designed instead of broken. */}
       {portrait ? (
         <img
           src={portrait}
@@ -323,12 +371,44 @@ function CharacterCard({
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontSize: 40,
+            padding: '0 10px 22px',
+            textAlign: 'center',
+            // Sized down for longer names so "Goblin" can't clip the card.
+            fontSize: agent.name.length > 5 ? 13 : 15,
             fontWeight: 700,
-            color: 'rgba(255,255,255,0.18)',
+            letterSpacing: '0.2em',
+            // The tracking pushes the optical center right; pad it back.
+            textIndent: '0.2em',
+            textTransform: 'uppercase',
+            lineHeight: 1.3,
+            color: 'rgba(255,255,255,0.5)',
+            textShadow: '0 1px 6px rgba(0,0,0,0.7)',
+            background:
+              'radial-gradient(ellipse at 50% 42%, rgba(196,68,68,0.16) 0%, rgba(196,68,68,0.05) 42%, transparent 72%)',
+            filter: locked ? 'saturate(0.55) brightness(0.7)' : undefined,
           }}
         >
-          {agent.name.charAt(0)}
+          {agent.name}
+        </span>
+      )}
+
+      {/* trait badges, top-LEFT so they never collide with the state badge
+          (+/download/price) that owns the top-right. */}
+      {(agent.custom || agent.optimized) && (
+        <span style={{
+          position: 'absolute',
+          top: 7,
+          left: 7,
+          display: 'inline-flex',
+          gap: 4,
+          zIndex: 2,
+        }}>
+          {agent.custom && (
+            <TraitBadge letter="C" tint="var(--accent, #c44444)" title="Custom character" />
+          )}
+          {agent.optimized && (
+            <TraitBadge letter="O" tint="var(--live, #8cbf8a)" title="Optimized build" />
+          )}
         </span>
       )}
 
@@ -456,6 +536,11 @@ function RosterPill({
   const [draft, setDraft] = useState('');
   const display = instance.name?.trim() || fallbackName;
   const portrait = agentPortrait(instance.agentId);
+  // Traits come off the catalog, not the instance: a renamed grace_custom is
+  // still a custom build. The pill is 20px, so only the C fits without turning
+  // the row into a badge soup — Optimized is implied by Custom for now and
+  // stays a picker-only detail.
+  const traits = AGENTS.find((a) => a.agentId === instance.agentId);
 
   const startEdit = () => { setDraft(instance.name ?? ''); setEditing(true); };
   const commit = () => { onRename(draft); setEditing(false); };
@@ -494,6 +579,9 @@ function RosterPill({
               style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'center 22%' }} />
           : display.charAt(0)}
       </span>
+      {traits?.custom && (
+        <TraitBadge letter="C" tint="var(--accent, #c44444)" title="Custom character" />
+      )}
       {editing ? (
         <input
           autoFocus

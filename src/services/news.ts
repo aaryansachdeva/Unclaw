@@ -45,6 +45,7 @@ export async function getNews(topic?: string): Promise<NewsResult> {
     res = await fetch(`${getSoulBaseUrl()}/news${qs}`, {
       method: 'GET',
       headers: { 'X-Gemini-Key': keys.gemini_search_api_key },
+      signal: AbortSignal.timeout(15000),
     });
   } catch (err) {
     return { available: false, error: `network: ${(err as Error).message}` };

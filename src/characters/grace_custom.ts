@@ -1,9 +1,15 @@
 import type { CharacterProfile } from './types';
 
-export const grace: CharacterProfile = {
-  id: 'grace',
+// Grace on the custom-character pipeline. Same person as `grace`, different
+// build — so the persona is intentionally hers. What must NOT be shared is the
+// `id`: chat memory, wardrobe, and the UE DA_Character card all hang off it, so
+// grace_custom keeps its own history and its own outfit. Before this file
+// existed, characterFor('grace_custom') fell through to the grace FALLBACK,
+// which is why the original Grace's config appeared to leak into this one.
+export const grace_custom: CharacterProfile = {
+  id: 'grace_custom',
   displayName: 'Grace',
-  blurb: 'Creative, warm, the friend who notices things.',
+  blurb: 'Creative, warm, the friend who notices things. Custom build.',
   voices: {
     elevenlabs: 'zmcVlqmyk3Jpn5AVYcAL',
     supertonic: 'grace',

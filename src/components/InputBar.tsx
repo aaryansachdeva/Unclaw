@@ -14,17 +14,20 @@ import {
   useEffect,
   useImperativeHandle,
   useMemo,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AnimatePresence,
   motion,
   useReducedMotion,
 } from 'framer-motion';
 import {
-  Plus, ArrowRight, ChevronLeft, ChevronRight,
+  Plus, ArrowRight, ChevronDown,
   PanelRightOpen, PanelRightClose,
+  Volume2, VolumeX,
 } from 'lucide-react';
 
 import { SheetKey } from '../hooks/useSheet';
@@ -66,6 +69,25 @@ interface InputBarProps {
   personaName: string;
   isSending: boolean;
   disabled: boolean;
+  /** Passthrough mode: UnClaw takes spoken turns from a user's external
+   *  coding agent. The text field is replaced by a "Passthrough mode
+   *  enabled" label + Exit button; the rest of the bar (agent switcher,
+   *  widgets, customization) stays live. */
+  passthrough?: boolean;
+  /** The external agent driving passthrough, e.g. "Claude Code" or
+   *  "Claude Code · UnClaw". When set, the banner reads "Connected to <agent>"
+   *  instead of the generic "Passthrough mode enabled". */
+  passthroughAgent?: string | null;
+  /** Leave passthrough mode (backs the Exit button in the text field). */
+  onExitPassthrough?: () => void;
+  /** Talkativeness level shown in the inline passthrough control. */
+  passthroughVerbosity?: 'quiet' | 'balanced' | 'chatty';
+  /** Whether the avatar is muted (inline mute toggle state). */
+  passthroughMuted?: boolean;
+  /** Set talkativeness from the inline control. */
+  onSetPassthroughVerbosity?: (v: 'quiet' | 'balanced' | 'chatty') => void;
+  /** Toggle mute from the inline control. */
+  onTogglePassthroughMuted?: () => void;
   /** True when the user has at least one attachment staged (e.g. a
    *  screenshot). Lets send fire with empty text — the attachment
    *  itself becomes the message. */
@@ -93,19 +115,20 @@ interface InputBarProps {
    *  directly in the same surface the user types into, no separate
    *  view. */
   voiceActive?: boolean;
-  /** Unconfirmed model output — what voice has heard but the
-   *  LocalAgreement-2 algorithm hasn't promoted to committed yet.
-   *  Renders as a light-gray overlay sitting on top of the
-   *  textarea, positioned right after the textarea's actual content
-   *  via an invisible spacer that mirrors `message`. Gives the user
-   *  immediate visual feedback while words are still firming up,
-   *  without polluting the textarea's editable content. */
-  voiceTentative?: string;
-  /** Persona switcher — chevron-prev / chevron-next, inline in row 2. */
-  onPrevPersona: () => void;
-  onNextPersona: () => void;
-  /** Clicking the persona name opens the "add new agent" picker. */
-  onPersonaNameClick?: () => void;
+  /** The unstable "tentative" tail from the streaming transcriber, shown as a
+   *  dim ghost after the committed text while `voiceActive`. Rendered in the
+   *  mirror (not the textarea `message`), so committed text is never drawn
+   *  twice — the bug that got the tail removed the first time. */
+  tentative?: string;
+  /** Persona switcher — the roster as a dropdown list, plus a + button to add.
+   *  `agents` is every roster instance in carousel order. */
+  agents: Array<{ id: string; name: string }>;
+  /** Currently selected roster instance id (or the Add slot). */
+  selectedAgentId: string;
+  /** Switch to a roster instance by id (dropdown pick). */
+  onSelectAgent: (id: string) => void;
+  /** Open the "add a new agent" picker (the + button). */
+  onAddAgent?: () => void;
   /** Disable the persona switcher when stream isn't connected. */
   personaDisabled?: boolean;
   /** Called when the user pastes an image into the textarea. Each
@@ -159,6 +182,13 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   personaName,
   isSending,
   disabled,
+  passthrough = false,
+  passthroughAgent = null,
+  onExitPassthrough,
+  passthroughVerbosity = 'balanced',
+  passthroughMuted = false,
+  onSetPassthroughVerbosity,
+  onTogglePassthroughMuted,
   hasAttachments = false,
   onSendMessage,
   onOpenSheet,
@@ -168,10 +198,11 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onExpress,
   voice,
   voiceActive = false,
-  voiceTentative = '',
-  onPrevPersona,
-  onNextPersona,
-  onPersonaNameClick,
+  tentative = '',
+  agents,
+  selectedAgentId,
+  onSelectAgent,
+  onAddAgent,
   personaDisabled = false,
   onPasteImage,
   onAttachImages,
@@ -204,8 +235,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   //      avoid the React-state-update race that would otherwise
   //      let trailing spaces survive into the next utterance).
   //   2. App calls setText() with whatever the textarea should show
-  //      (committed text only — tentative renders inline via the
-  //      mirror overlay above, driven by the voiceTentative prop).
+  //      (committed text only — unconfirmed/tentative words are never
+  //      drawn, so the bar can't show the same word twice).
   //   3. focus() returns keyboard focus to the textarea so the user
   //      can edit immediately after a voice session.
   useImperativeHandle(forwardedRef, () => ({
@@ -338,6 +369,16 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     if (slash.active) slashReset();
   }, [slash.active, slash.query, slashReset]);
 
+  // Live handle on the voice state for the PTT listeners below. `voice` is built
+  // as an object literal by the parent on every render, so depending on it
+  // directly re-ran the effect constantly , and since vadLevel setState fires per
+  // VAD frame (~30-60Hz) while the mic is open, the cleanup's
+  // `if (pttHeld) voice.stop()` fired a frame after keydown and killed the very
+  // utterance you were holding Space to record. Read through a ref instead and
+  // register the listeners ONCE, so cleanup only runs on a real unmount.
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
+
   // Hold-Space push-to-talk. Press Space to start the mic, release to
   // stop. Skips when the user is typing in any text field (otherwise
   // every space in chat would toggle voice). Skips while voice is
@@ -358,20 +399,21 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       if (e.repeat) return;
       if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
       if (isEditableTarget(e.target)) return;
-      if (voice.disabled) return;
+      const v = voiceRef.current;
+      if (v.disabled) return;
       // If voice is already active from a click toggle, leave it alone.
       // PTT should layer ON TOP of click-to-toggle, not steal it.
-      if (voice.active) return;
+      if (v.active) return;
       pttHeld = true;
       e.preventDefault();
-      voice.start();
+      v.start();
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.code !== 'Space') return;
       if (!pttHeld) return;
       pttHeld = false;
       e.preventDefault();
-      voice.stop();
+      voiceRef.current.stop();
     };
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
@@ -380,9 +422,9 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       window.removeEventListener('keyup', onKeyUp);
       // Stop on unmount if we were holding (covers user navigating away
       // mid-utterance — don't leave the mic open).
-      if (pttHeld) voice.stop();
+      if (pttHeld) voiceRef.current.stop();
     };
-  }, [voice]);
+  }, []);
 
   const handleSend = useCallback(() => {
     if (slash.active && slash.items.length > 0) {
@@ -691,14 +733,189 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             width: '100%',
           }}
         >
-          {/* Visible mirror overlay. Renders the textarea's committed
-              text PLUS any voice tentative text inline-merged in
-              light gray. Sits BEHIND the textarea (z-index < textarea)
-              and shares font/line-height/padding so its wrapping
-              matches the textarea's exactly — when the user types or
-              voice commits, the textarea's transparent characters
-              occupy the same columns as the mirror's visible ones,
-              so the cursor caret lands in the right spot. */}
+          {passthrough ? (
+            /* Passthrough mode: the text field is replaced by a status
+               label + an Exit button. The REST of the bar (agent switcher,
+               widgets, customization) stays live — only typed input is
+               off, since the avatar's words come from the user's agent. */
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                gap: 12,
+                minHeight: 22,
+              }}
+            >
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 9 }}>
+                <motion.span
+                  aria-hidden
+                  animate={reduce ? undefined : { opacity: [0.35, 0.9, 0.35] }}
+                  transition={{ duration: 2.6, repeat: Infinity, ease: 'easeInOut' }}
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: '50%',
+                    background: 'var(--accent)',
+                    boxShadow: '0 0 8px -1px var(--accent-glow)',
+                    flexShrink: 0,
+                  }}
+                />
+                <span
+                  style={{
+                    fontSize: 14,
+                    lineHeight: '22px',
+                    fontWeight: 700,
+                    letterSpacing: '0.01em',
+                    color: passthroughMuted ? 'var(--text-ghost)' : 'var(--text-primary)',
+                  }}
+                >
+                  {passthroughAgent
+                    ? (passthroughMuted ? `${passthroughAgent} · muted` : `Connected to ${passthroughAgent}`)
+                    : (passthroughMuted ? 'Passthrough mode · muted' : 'Passthrough mode enabled')}
+                </span>
+              </span>
+
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                {/* Talkativeness , how often the avatar speaks. Three-stop
+                    segmented control; drives both the agent-facing hint
+                    (soul echoes it on each speak) and the bridge's hard
+                    queue cap. */}
+                <span
+                  role="group"
+                  aria-label="Talkativeness"
+                  title="How much the avatar speaks"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    padding: 2,
+                    borderRadius: 999,
+                    background: 'var(--glass-bg-hover)',
+                    border: '1px solid var(--stroke-soft, rgba(255,255,255,0.10))',
+                    opacity: passthroughMuted ? 0.5 : 1,
+                    pointerEvents: passthroughMuted ? 'none' : 'auto',
+                    transition: 'opacity 0.15s var(--ease-out-quart)',
+                  }}
+                >
+                  {(['quiet', 'balanced', 'chatty'] as const).map((v) => {
+                    const on = passthroughVerbosity === v;
+                    const label = v === 'quiet' ? 'Quiet' : v === 'balanced' ? 'Balanced' : 'Chatty';
+                    return (
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() => onSetPassthroughVerbosity?.(v)}
+                        aria-pressed={on}
+                        style={{
+                          height: 22,
+                          padding: '0 10px',
+                          borderRadius: 999,
+                          border: 'none',
+                          background: on ? 'var(--accent)' : 'transparent',
+                          color: on ? '#fff' : 'var(--text-secondary)',
+                          fontFamily: 'inherit',
+                          fontSize: 11.5,
+                          fontWeight: 600,
+                          letterSpacing: '0.01em',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s var(--ease-out-quart)',
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </span>
+
+                {/* Mute , silence the avatar without leaving passthrough. */}
+                <button
+                  type="button"
+                  onClick={onTogglePassthroughMuted}
+                  aria-pressed={passthroughMuted}
+                  title={passthroughMuted ? 'Unmute avatar' : 'Mute avatar'}
+                  style={{
+                    flexShrink: 0,
+                    width: 28,
+                    height: 28,
+                    borderRadius: 8,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: passthroughMuted ? 'var(--accent-glow)' : 'transparent',
+                    border: 'none',
+                    color: passthroughMuted ? 'var(--accent)' : 'var(--text-secondary)',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s var(--ease-out-quart)',
+                  }}
+                  onMouseEnter={(e) => {
+                    if (passthroughMuted) return;
+                    e.currentTarget.style.background = 'var(--glass-bg-hover)';
+                    e.currentTarget.style.color = 'var(--text-primary)';
+                  }}
+                  onMouseLeave={(e) => {
+                    if (passthroughMuted) return;
+                    e.currentTarget.style.background = 'transparent';
+                    e.currentTarget.style.color = 'var(--text-secondary)';
+                  }}
+                >
+                  {passthroughMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={onExitPassthrough}
+                  title="Exit passthrough mode"
+                  style={{
+                    flexShrink: 0,
+                    height: 26,
+                    padding: '0 12px',
+                    borderRadius: 999,
+                    background: 'transparent',
+                    border: '1px solid var(--stroke-soft, rgba(255,255,255,0.14))',
+                    color: 'var(--text-secondary)',
+                    fontFamily: 'inherit',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    letterSpacing: '0.01em',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s var(--ease-out-quart)',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'var(--glass-bg-hover)';
+                    e.currentTarget.style.color = 'var(--text-primary)';
+                    e.currentTarget.style.borderColor = 'var(--accent)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'transparent';
+                    e.currentTarget.style.color = 'var(--text-secondary)';
+                    e.currentTarget.style.borderColor = 'var(--stroke-soft, rgba(255,255,255,0.14))';
+                  }}
+                >
+                  Exit
+                </button>
+              </span>
+            </div>
+          ) : (
+          <>
+          {/* Visible mirror overlay. Renders the textarea's committed text.
+              Sits BEHIND the textarea (z-index < textarea) and shares
+              font/line-height/padding so its wrapping matches the textarea's
+              exactly — when the user types or voice commits, the textarea's
+              transparent characters occupy the same columns as the mirror's
+              visible ones, so the cursor caret lands in the right spot.
+
+              While speaking, `message` holds the COMMITTED transcript and the
+              dim `tentative` span below appends the unstable tail flush after
+              it. This is the corrected version of the tail we removed once: the
+              old bug fed the span `committed + tentative` while `message` also
+              held committed, drawing every committed word twice. Now the span
+              carries ONLY `tentative` (App passes `streaming.tentative`), so
+              committed renders exactly once (dark) and the unconfirmed tail
+              trails it in dim ghost text — the same flush-suffix trick the
+              slash-completion ghost uses. LocalAgreement-2 rewrites the tail
+              until two inferences agree, so it shimmers slightly as words
+              settle into committed; that shimmer IS the live-dictation feel. */}
           <div
             aria-hidden
             style={{
@@ -723,13 +940,14 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             }}
           >
             {message}
-            {voiceActive && voiceTentative && (
-              <>
-                {message && !message.endsWith(' ') ? ' ' : ''}
-                <span style={{ color: 'rgba(255, 255, 255, 0.40)' }}>
-                  {voiceTentative}
-                </span>
-              </>
+            {/* Tentative (unconfirmed) voice tail — dim ghost after the
+                committed text. A leading space only when we're joining two
+                non-empty, non-space-bounded pieces so words don't glue. */}
+            {voiceActive && tentative.trim() && (
+              <span style={{ color: 'rgba(255, 255, 255, 0.4)' }}>
+                {message.length > 0 && !/\s$/.test(message) ? ' ' : ''}
+                {tentative.trim()}
+              </span>
             )}
             {/* Slash-command ghost-text autocomplete. Only shows when
                 there's a single best match the user is in the middle
@@ -819,6 +1037,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               </span>
             </div>
           )}
+          </>
+          )}
         </div>
 
         {/* Row 2: agent switcher (left) + action cluster (right) */}
@@ -829,63 +1049,16 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             gap: 8,
           }}
         >
-          {/* Inline agent switcher */}
-          <div
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 6,
-              flexShrink: 0,
-              opacity: personaDisabled ? 0.4 : 1,
-              transition: 'opacity 0.25s var(--ease-out-quart)',
-            }}
-          >
-            <InlineChevron
-              direction="prev"
-              onClick={onPrevPersona}
-              disabled={personaDisabled}
-            />
-            <button
-              type="button"
-              onClick={onPersonaNameClick}
-              disabled={personaDisabled || !onPersonaNameClick}
-              title={onPersonaNameClick ? 'Add a new agent' : undefined}
-              style={{
-                minWidth: 64,
-                textAlign: 'center',
-                fontSize: 13.5,
-                fontWeight: 600,
-                letterSpacing: '0.01em',
-                color: 'var(--text-primary)',
-                background: 'transparent',
-                border: 'none',
-                padding: '2px 4px',
-                borderRadius: 6,
-                cursor: (personaDisabled || !onPersonaNameClick) ? 'default' : 'pointer',
-                transition: 'opacity 150ms var(--ease-out-quart, ease)',
-              }}
-              onMouseEnter={(e) => { if (onPersonaNameClick && !personaDisabled) e.currentTarget.style.opacity = '0.62'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}
-            >
-              <AnimatePresence mode="wait">
-                <motion.span
-                  key={personaName}
-                  initial={reduce ? { opacity: 1 } : { opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
-                  transition={{ duration: 0.18, ease: EASE_OUT_EXPO }}
-                  style={{ display: 'inline-block' }}
-                >
-                  {personaName}
-                </motion.span>
-              </AnimatePresence>
-            </button>
-            <InlineChevron
-              direction="next"
-              onClick={onNextPersona}
-              disabled={personaDisabled}
-            />
-          </div>
+          {/* Agent switcher — dropdown list of the roster + a + button to add */}
+          <AgentSwitcher
+            personaName={personaName}
+            agents={agents}
+            selectedAgentId={selectedAgentId}
+            onSelect={onSelectAgent}
+            onAdd={onAddAgent}
+            disabled={personaDisabled}
+            reduce={reduce}
+          />
 
           {/* Spacer */}
           <div style={{ flex: 1 }} />
@@ -1030,54 +1203,241 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
 });
 
 // ---------------------------------------------------------------------
-// Inline chevron used by the agent switcher (row 2 of the input bar)
+// Agent switcher — the roster as a dropdown list + a + button (row 2)
 // ---------------------------------------------------------------------
 
-function InlineChevron({
-  direction,
-  onClick,
-  disabled,
+function AgentSwitcher({
+  personaName, agents, selectedAgentId, onSelect, onAdd, disabled, reduce,
 }: {
-  direction: 'prev' | 'next';
-  onClick: () => void;
+  personaName: string;
+  agents: Array<{ id: string; name: string }>;
+  selectedAgentId: string;
+  onSelect: (id: string) => void;
+  onAdd?: () => void;
   disabled: boolean;
+  reduce: boolean;
 }) {
-  const Icon = direction === 'prev' ? ChevronLeft : ChevronRight;
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const chipRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  // Fixed-viewport anchor for the portaled list. The list is rendered into
+  // document.body so it escapes the InputBar's `overflow: hidden` glass capsule
+  // (which would otherwise clip it to inside the bar). `bottom` anchors it just
+  // above the chip's top edge; the bar lives at the bottom of the window.
+  const [menuPos, setMenuPos] = useState<{ left: number; bottom: number; minWidth: number } | null>(null);
+
+  const measure = useCallback(() => {
+    const r = chipRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setMenuPos({
+      left: r.left,
+      bottom: window.innerHeight - r.top + 8,
+      minWidth: Math.max(176, r.width),
+    });
+  }, []);
+
+  // Measure synchronously before paint whenever the menu is open, so it never
+  // flashes at a stale position.
+  useLayoutEffect(() => { if (open) measure(); }, [open, measure]);
+
+  // Close on outside click / Escape; re-measure on resize (the list is fixed to
+  // the viewport, so a window resize shifts where the chip sits).
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t) || listRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    const onResize = () => measure();
+    window.addEventListener('pointerdown', onDown);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onResize);
+    };
+  }, [open, measure]);
+
+  const pick = (id: string) => {
+    setOpen(false);
+    if (id !== selectedAgentId) onSelect(id);
+  };
+
   return (
-    <motion.button
-      type="button"
-      whileHover={disabled ? undefined : { scale: 1.1 }}
-      whileTap={disabled ? undefined : { scale: 0.9 }}
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={direction === 'prev' ? 'Previous agent' : 'Next agent'}
+    <div
+      ref={rootRef}
       style={{
-        width: 22,
-        height: 22,
-        borderRadius: 6,
-        background: 'transparent',
-        border: 'none',
-        color: 'var(--text-secondary)',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        flexShrink: 0,
+        position: 'relative',
         display: 'inline-flex',
         alignItems: 'center',
-        justifyContent: 'center',
-        fontFamily: 'inherit',
-        transition: 'all 0.15s var(--ease-out-quart)',
-      }}
-      onMouseEnter={(e) => {
-        if (disabled) return;
-        e.currentTarget.style.background = 'var(--glass-bg-hover)';
-        e.currentTarget.style.color = 'var(--text-primary)';
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = 'transparent';
-        e.currentTarget.style.color = 'var(--text-secondary)';
+        gap: 4,
+        flexShrink: 0,
+        opacity: disabled ? 0.4 : 1,
+        transition: 'opacity 0.25s var(--ease-out-quart)',
       }}
     >
-      <Icon size={16} strokeWidth={3} style={{ transform: 'translateY(1px)' }} />
-    </motion.button>
+      {/* Current agent — click opens the roster list above the bar. */}
+      <button
+        ref={chipRef}
+        type="button"
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => !disabled && setOpen((o) => !o)}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 5,
+          maxWidth: 148,
+          fontSize: 13.5, fontWeight: 600, letterSpacing: '0.01em',
+          color: 'var(--text-primary)',
+          background: open ? 'var(--glass-bg-hover)' : 'transparent',
+          border: 'none', padding: '3px 7px', borderRadius: 7,
+          cursor: disabled ? 'default' : 'pointer',
+          transition: 'background 150ms var(--ease-out-quart)',
+        }}
+        onMouseEnter={(e) => { if (!disabled && !open) e.currentTarget.style.background = 'var(--glass-bg-hover)'; }}
+        onMouseLeave={(e) => { if (!open) e.currentTarget.style.background = 'transparent'; }}
+      >
+        <AnimatePresence mode="wait">
+          <motion.span
+            key={personaName}
+            initial={reduce ? { opacity: 1 } : { opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
+            transition={{ duration: 0.18, ease: EASE_OUT_EXPO }}
+            style={{
+              display: 'inline-block',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
+            {personaName}
+          </motion.span>
+        </AnimatePresence>
+        <ChevronDown
+          size={13} strokeWidth={2.75}
+          style={{
+            flexShrink: 0,
+            color: 'var(--text-ghost)',
+            transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+            transition: 'transform 200ms var(--ease-out-quart)',
+          }}
+        />
+      </button>
+
+      {/* + add a new agent */}
+      {onAdd && (
+        <motion.button
+          type="button"
+          whileHover={disabled ? undefined : { scale: 1.08 }}
+          whileTap={disabled ? undefined : { scale: 0.92 }}
+          onClick={() => { if (!disabled) { setOpen(false); onAdd(); } }}
+          disabled={disabled}
+          aria-label="Add a new agent"
+          title="Add a new agent"
+          style={{
+            width: 24, height: 24, borderRadius: 7,
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            background: 'transparent', border: 'none',
+            color: 'var(--text-secondary)',
+            cursor: disabled ? 'not-allowed' : 'pointer',
+            flexShrink: 0,
+            transition: 'background 150ms var(--ease-out-quart), color 150ms var(--ease-out-quart)',
+          }}
+          onMouseEnter={(e) => { if (disabled) return; e.currentTarget.style.background = 'var(--glass-bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+        >
+          <Plus size={15} strokeWidth={2.75} />
+        </motion.button>
+      )}
+
+      {/* Roster list — portaled to <body> so it escapes the InputBar's
+          `overflow: hidden` glass capsule (which otherwise clips it to inside
+          the bar). Fixed-positioned just above the chip; opens UPWARD (bar sits
+          at the bottom). Near-opaque slate: a dropdown can't composite a second
+          backdrop blur over the bar's own, so it uses a solid surface. */}
+      {createPortal(
+        <AnimatePresence>
+          {open && menuPos && agents.length > 0 && (
+            <motion.ul
+              ref={listRef}
+              role="listbox"
+              initial={reduce ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reduce ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.97 }}
+              transition={{ duration: 0.16, ease: EASE_OUT_EXPO }}
+              style={{
+                position: 'fixed',
+                bottom: menuPos.bottom,
+                left: menuPos.left,
+                minWidth: menuPos.minWidth,
+                maxHeight: 264,
+                overflowY: 'auto',
+                margin: 0, padding: 5, listStyle: 'none',
+                transformOrigin: 'bottom left',
+                background: 'rgba(30, 36, 50, 0.98)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 12,
+                boxShadow: '0 12px 34px -8px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.3)',
+                zIndex: 1000,
+              }}
+            >
+            {agents.map((a) => {
+              const active = a.id === selectedAgentId;
+              return (
+                <li key={a.id} role="option" aria-selected={active}>
+                  <button
+                    type="button"
+                    onClick={() => pick(a.id)}
+                    style={{
+                      width: '100%', textAlign: 'left',
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '7px 9px', borderRadius: 8,
+                      fontSize: 13, fontWeight: active ? 600 : 500,
+                      letterSpacing: '0.01em',
+                      color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      background: active ? 'var(--glass-bg-hover)' : 'transparent',
+                      border: 'none', cursor: 'pointer',
+                      transition: 'background 120ms var(--ease-out-quart), color 120ms var(--ease-out-quart)',
+                    }}
+                    onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; }}
+                    onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
+                  >
+                    {/* Presence dot. TODO: wire to real per-agent activity;
+                        for now every agent reads "idle" (there's no live
+                        task-status signal yet), so a hollow ring always. */}
+                    <span
+                      aria-hidden
+                      style={{
+                        width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                        background: 'transparent',
+                        border: '1.5px solid rgba(255,255,255,0.22)',
+                        transition: 'all 150ms var(--ease-out-quart)',
+                      }}
+                    />
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {a.name}
+                    </span>
+                    <span style={{
+                      flexShrink: 0,
+                      fontSize: 9.5, fontWeight: 600, letterSpacing: '0.06em',
+                      textTransform: 'uppercase',
+                      color: 'var(--text-ghost)',
+                    }}>
+                      Idle
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </motion.ul>
+        )}
+        </AnimatePresence>,
+        document.body,
+      )}
+    </div>
   );
 }
 
@@ -1133,18 +1493,12 @@ function PlusButton({
 }
 
 // ---------------------------------------------------------------------
-// Voice button — circular control. Shows wave glyph at rest; mini-bars
-// when voice mode is active; phase-offset wave keyframe when transcribing.
+// Voice button — circular control for continuous voice mode. A single mic
+// glyph that scales + glows smoothly with the live VAD level while you speak
+// (no WebGL). Inactive = white pill with a dark mic; active = dark orb with a
+// light mic; transcribing = warm accent. Motion carries the "listening"
+// signal, hue is spent only at the one moment of attention (DESIGN.md).
 // ---------------------------------------------------------------------
-
-const NUM_BARS = 4;
-const BAR_GAP = 2;
-const BAR_W = 2;
-const BAR_MIN = 2;
-const BAR_MAX = 12;
-const BAR_FALLOFF = 0.18;
-const WAVE_DELAYS = [0, 90, 90, 0];
-const WAVE_DURATION_MS = 900;
 
 function VoiceButton({
   voice,
@@ -1155,89 +1509,75 @@ function VoiceButton({
   isSending: boolean;
   reduce: boolean;
 }) {
-  const ringColor = voice.isTranscribing
-    ? 'var(--accent)'
-    : voice.isUserSpeaking
-      ? 'var(--live)'
-      : 'rgba(255,255,255,0.35)';
-  const barColor = voice.isTranscribing
-    ? 'rgba(40, 20, 20, 0.85)'
-    : voice.isUserSpeaking
-      ? 'rgba(20, 50, 28, 0.85)'
-      : 'rgba(20, 20, 20, 0.78)';
+  const active = voice.active;
+  const transcribing = voice.isTranscribing;
 
-  // Mode drives the bar visuals:
-  //   - 'transcribing' → phase-offset wave keyframe (CSS animation)
-  //   - 'live' → bar heights driven by VAD probability
-  //   - 'idle' → static decorative pattern (centered EQ shape)
-  const mode: BarMode = voice.isTranscribing
-    ? 'transcribing'
-    : voice.active
-      ? 'live'
-      : 'idle';
+  // The ONLY thing that moves the bars is real signal: the live VAD level while
+  // listening (so they rise as you actually speak), and a gentle constant while
+  // she's transcribing (no mic then, but the bars shouldn't look dead). Silent =
+  // resting fan, nothing animating. No decorative keyframe — that read as random.
+  const energy = Math.max(
+    0,
+    Math.min(1, active ? (transcribing ? 0.3 : voice.vadLevel) : 0),
+  );
 
-  // Plain button — visibility is owned by the parent wrapper div's
-  // opacity transition. Mixing framer-motion's initial/animate/exit
-  // here was causing a flicker on every re-render of the parent
-  // (wrapper opacity going to 0 + button still trying to scale-in).
-  // The breathing animation for `isSending` lives as a CSS animation
-  // instead so it's parent-state-independent.
+  // Dark bars at rest; warm red (--accent) while recording — the mic is live
+  // and capturing, so the bars glow red the whole time voice mode is on.
+  const barColor = active ? 'var(--accent)' : 'rgba(20, 20, 20, 0.85)';
+
+  // The pill stays light in every state (no dark orb) and carries no ring/
+  // outline — the bars alone signal state. Only the resting `isSending` breathe
+  // remains, as a CSS animation so it's parent-state-independent.
   return (
     <button
       type="button"
       onClick={voice.toggle}
       disabled={voice.disabled}
-      aria-label={voice.active ? 'Stop voice mode' : 'Start voice mode'}
+      aria-label={active ? 'Stop voice mode' : 'Start voice mode'}
       className="glass-btn"
       style={{
         flexShrink: 0,
         width: 36,
         height: 36,
         borderRadius: '50%',
-        background: voice.active ? '#ffffff' : 'rgba(255,255,255,0.92)',
-        border: `1px solid ${voice.active ? ringColor : 'rgba(255,255,255,0)'}`,
-        boxShadow: voice.active
-          ? `0 0 0 2px color-mix(in srgb, ${ringColor} 35%, transparent), 0 2px 8px rgba(0,0,0,0.25)`
-          : '0 2px 8px rgba(0,0,0,0.20)',
+        position: 'relative',
+        overflow: 'hidden',
+        background: 'rgba(255,255,255,0.92)',
+        border: 'none',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.20)',
         opacity: voice.disabled ? 0.4 : 1,
         cursor: voice.disabled ? 'not-allowed' : 'pointer',
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
         padding: 0,
-        animation: isSending && !reduce
+        animation: isSending && !active && !reduce
           ? 'voice-breathing 1.6s ease-in-out infinite'
           : undefined,
-        transition:
-          'background 0.25s var(--ease-out-quart), box-shadow 0.25s var(--ease-out-quart), border-color 0.25s var(--ease-out-quart)',
+        transition: 'box-shadow 0.25s var(--ease-out-quart)',
       }}
     >
-      <MiniBars
-        mode={mode}
-        vadLevel={voice.vadLevel}
-        color={barColor}
-      />
+      <VoiceBars energy={energy} color={barColor} />
     </button>
   );
 }
 
-type BarMode = 'idle' | 'live' | 'transcribing';
+// Equalizer bars for the voice orb. A center-tall fan that grows with the live
+// VAD `energy`: at rest it sits at a low resting height (BARS_REST), and each
+// bar's height rises smoothly toward its full weight as your voice level climbs.
+// Movement is driven entirely by `energy` (a CSS height transition lerps between
+// the ~60fps VAD updates), so the bars react to speech instead of animating on a
+// timer. No WebGL.
+// Steep center-tall fan: the middle bars dominate, edges fall off fast.
+const BAR_WEIGHTS = [0.35, 0.85, 1.0, 0.85, 0.35];
+const BARS_MAX_H = 24;
+const BARS_MIN_H = 3;
+const BARS_REST = 0.5; // resting fan height as a fraction of full, with no voice
+const BARS_GAP = 1.5;  // tight horizontal spacing between bars
 
-// Static "soundwave" pattern shown at rest. Decorative — reads as
-// audio bars even when no signal is driving them. Center bars taller,
-// edges shorter; combined with the BAR_FALLOFF math gives a tight
-// fan shape.
-const IDLE_PATTERN = [0.45, 0.85, 0.85, 0.45];
-
-function MiniBars({
-  mode, vadLevel, color,
-}: {
-  mode: BarMode;
-  vadLevel: number;
-  color: string;
-}) {
-  const totalW = NUM_BARS * BAR_W + (NUM_BARS - 1) * BAR_GAP;
-  const center = (NUM_BARS - 1) / 2;
+function VoiceBars({ energy, color }: { energy: number; color: string }) {
+  const e = Math.max(0, Math.min(1, energy));
+  const level = BARS_REST + (1 - BARS_REST) * e; // 0.4 (silent) → 1.0 (loud)
   return (
     <div
       aria-hidden
@@ -1245,44 +1585,23 @@ function MiniBars({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: BAR_GAP,
-        height: BAR_MAX,
-        width: totalW,
+        gap: BARS_GAP,
+        height: BARS_MAX_H,
       }}
     >
-      {Array.from({ length: NUM_BARS }).map((_, i) => {
-        const distance = Math.abs(i - center) / center;
-        let height: number;
-        if (mode === 'transcribing') {
-          // CSS keyframe scales these full-height bars; height stays fixed.
-          height = BAR_MAX;
-        } else if (mode === 'live') {
-          const local = Math.max(0, Math.min(1, vadLevel - distance * BAR_FALLOFF));
-          height = BAR_MIN + local * (BAR_MAX - BAR_MIN);
-        } else {
-          // idle — static decorative pattern.
-          const idle = IDLE_PATTERN[i] ?? 0.5;
-          height = BAR_MIN + idle * (BAR_MAX - BAR_MIN);
-        }
-        return (
-          <div
-            key={i}
-            style={{
-              width: BAR_W,
-              height,
-              borderRadius: 1,
-              background: color,
-              transformOrigin: 'center',
-              animation: mode === 'transcribing'
-                ? `voice-bar-wave ${WAVE_DURATION_MS}ms ease-in-out ${WAVE_DELAYS[i]}ms infinite`
-                : undefined,
-              transition: mode === 'transcribing'
-                ? 'background 250ms var(--ease-out-quart)'
-                : 'height 200ms var(--ease-out-quart), background 250ms var(--ease-out-quart)',
-            }}
-          />
-        );
-      })}
+      {BAR_WEIGHTS.map((w, i) => (
+        <div
+          key={i}
+          style={{
+            width: 2.5,
+            height: BARS_MIN_H + (BARS_MAX_H - BARS_MIN_H) * w * level,
+            borderRadius: 1.5,
+            background: color,
+            flexShrink: 0,
+            transition: 'height 120ms var(--ease-out-quart), background 220ms var(--ease-out-quart)',
+          }}
+        />
+      ))}
     </div>
   );
 }

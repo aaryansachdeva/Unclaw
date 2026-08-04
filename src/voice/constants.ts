@@ -47,6 +47,37 @@ export const MAX_UTTERANCE_MS = 30_000;
 export const BARGE_IN_PROB = 0.78;
 export const BARGE_IN_FRAMES = 8;             // ~256 ms of strong speech
 
+// How long the mic stays gated AFTER isAISpeaking() goes false.
+//
+// isAISpeaking is open-loop: App.tsx flips it true on dispatch and back
+// false on a setTimeout sized from soul's reported duration (falling back
+// to a flat 4 s when soul reports none). Nothing in the renderer observes
+// actual playback — the audio is rendered by Unreal, one WebRTC hop away,
+// and UE never reports "done" back. So the gate always closes a little
+// early (dispatch→playback latency) and sometimes wildly early (the 4 s
+// fallback on a 12 s reply). The tail the mic then hears is the avatar's
+// own voice, which is exactly the "transcription picks up the agent" bug.
+//
+// A hangover can't fix a 4 s-vs-12 s mismatch, but it does cover the
+// normal case: dispatch latency, speaker decay, and the AEC tail. Keep it
+// short enough that a user answering immediately isn't clipped.
+export const AI_SPEECH_TAIL_MS = 400;
+
+// Dead-band escape hatch for the endpointer.
+//
+// VAD_ACTIVATION_PROB (0.55) and VAD_DEACTIVATION_PROB (0.40) leave an
+// intentional hysteresis band: inside it the state machine holds, so a
+// brief dip mid-word doesn't start the trailing timer. The bug is that
+// `speech` has NO other exit — a probability that parks in (0.40, 0.55)
+// keeps the turn open forever, and that band is precisely where room
+// tone, breathing, and avatar bleed-through sit. The only escape was
+// MAX_UTTERANCE_MS, i.e. half a minute.
+//
+// So: hold through the band briefly (real hysteresis), then give up and
+// start trailing. This is the "hysteresis + watchdog" pairing from the
+// openjarvis useSpeech VAD, adapted to Silero probabilities.
+export const DEAD_BAND_TRAILING_FRAMES = 10;   // ~320 ms below activation
+
 // Whisper API. Matches soul's /transcribe proxy contract. Resolved
 // dynamically from the live HTTP port soul picked at boot (default 0 =
 // OS picks); see services/soulBase for the source of truth.

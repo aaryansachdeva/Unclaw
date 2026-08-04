@@ -94,6 +94,13 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
     void window.electronAPI?.soul?.restart?.();
   };
 
+  // Reveal the logs folder for support / self-debugging.
+  const handleOpenLogs = () => { void window.electronAPI?.soul?.openLogs?.(); };
+
+  // After ~25s of a normal boot, reassure the user this is expected on a
+  // cold first run (model loads) rather than a hang.
+  const showSlowHint = status === 'booting' && elapsed >= 25;
+
   // Clock tick.
   useEffect(() => {
     const anchor = spawnedAt ?? Date.now();
@@ -394,6 +401,13 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
         </div>
       )}
 
+      {/* NOTE: no relaunch/logs affordance during a healthy boot. This screen
+          is the brand moment — lobster, orbit, breath, nothing else. A boot
+          that is merely slow is not actionable, and buttons here read as an
+          error the user should respond to. The recovery pair lives on the two
+          screens where a stall IS real: the `failed` overlay below (boot gave
+          up) and StreamView's stalled state (soul up, stream never arrives). */}
+
       {/* Unrecoverable boot failure: a real reason + Retry, never an
           infinite spinner. Covers the whole void so it's unmissable. */}
       {status === 'failed' && (
@@ -448,24 +462,42 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
               </pre>
             </details>
           )}
-          <button
-            type="button"
-            onClick={handleRetry}
-            style={{
-              marginTop: 4,
-              padding: '10px 26px',
-              borderRadius: 999,
-              border: '1px solid rgba(196, 68, 68, 0.5)',
-              background: 'var(--accent-dim, rgba(196,68,68,0.16))',
-              color: 'rgba(255,255,255,0.95)',
-              fontSize: 13.5,
-              fontWeight: 600,
-              fontFamily: 'inherit',
-              cursor: 'pointer',
-            }}
-          >
-            Retry
-          </button>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 4 }}>
+            <button
+              type="button"
+              onClick={handleRetry}
+              style={{
+                padding: '10px 26px',
+                borderRadius: 999,
+                border: '1px solid rgba(196, 68, 68, 0.5)',
+                background: 'var(--accent-dim, rgba(196,68,68,0.16))',
+                color: 'rgba(255,255,255,0.95)',
+                fontSize: 13.5,
+                fontWeight: 600,
+                fontFamily: 'inherit',
+                cursor: 'pointer',
+              }}
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenLogs}
+              style={{
+                padding: '10px 20px',
+                borderRadius: 999,
+                border: '1px solid rgba(255, 255, 255, 0.16)',
+                background: 'rgba(255, 255, 255, 0.05)',
+                color: 'rgba(255, 255, 255, 0.7)',
+                fontSize: 13,
+                fontWeight: 500,
+                fontFamily: 'inherit',
+                cursor: 'pointer',
+              }}
+            >
+              Open logs
+            </button>
+          </div>
         </div>
       )}
 

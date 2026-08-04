@@ -28,14 +28,20 @@ import {
   getProvider,
   saveApiKeys,
   validateKeys,
+  thinkingCapabilityFor,
+  thinkingOptionsFor,
+  normalizeThinkingValue,
   type ApiKeysProfile,
   type GraphicsQuality,
   type KeyValidationOutcome,
   type KeyValidationResult,
   type LLMProviderId,
+  type ThinkingEffort,
+  type ThinkingCapability,
   type TtsProviderId,
 } from '../services/apiKeys';
 import { Dropdown } from './Onboarding/Dropdown';
+import { usePassthroughPrefs } from '../hooks/usePassthroughPrefs';
 import { Slider } from './Onboarding/Slider';
 import { TZ_CATALOG } from './Onboarding/IdentityStep';
 import {
@@ -113,6 +119,9 @@ interface PaneContext {
   update: <K extends keyof ApiKeysProfile>(key: K, value: ApiKeysProfile[K]) => void;
   setProvider: (next: LLMProviderId | null) => void;
   liveModelsByProvider: Partial<Record<LLMProviderId, string[]>>;
+  /** Per-model thinking capabilities accumulated from validations.
+   *  Gates the chat + agentic thinking selectors. */
+  thinkingCapsByModel: Record<string, ThinkingCapability>;
   isProbingKey: boolean;
   graphicsChanged: boolean;
   /** Latest /validate_keys outcome, surfaced to facets that need to
@@ -139,6 +148,21 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
   const [liveModelsByProvider, setLiveModelsByProvider] = useState<
     Partial<Record<LLMProviderId, string[]>>
   >({});
+  // Accumulated per-model thinking capabilities (chat + agentic), merged
+  // from every validation's `thinking_caps`. Drives the capability-gated
+  // thinking selectors without hardcoding model lists. Keyed by bare id.
+  const [thinkingCapsByModel, setThinkingCapsByModel] = useState<
+    Record<string, ThinkingCapability>
+  >({});
+  const mergeThinkingCaps = (res: KeyValidationResult) => {
+    const add = {
+      ...(res.llm?.thinking_caps ?? {}),
+      ...(res.agentic?.thinking_caps ?? {}),
+    };
+    if (Object.keys(add).length) {
+      setThinkingCapsByModel((prev) => ({ ...prev, ...add }));
+    }
+  };
   const [isProbingKey, setIsProbingKey] = useState(false);
   // User-settings draft (Profile facet). Loaded in parallel with apiKeys
   // on open; null while loading and if soul has no row yet. Save flow
@@ -243,6 +267,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
       setIsProbingKey(true);
       void validateKeys(draft)
         .then((res) => {
+          mergeThinkingCaps(res);
           if (res.llm.ok && res.llm.models && res.llm.models.length) {
             setLiveModelsByProvider((prev) => ({
               ...prev,
@@ -281,6 +306,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
       setIsProbingKey(true);
       void validateKeys(draft)
         .then((res) => {
+          mergeThinkingCaps(res);
           // Same pattern as the chat-side probe: when the agentic
           // response carries a model list (claude-code returns the
           // sonnet/opus/haiku catalog; future API providers may too),
@@ -315,6 +341,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
       setValidation(null);
       try {
         const result = await validateKeys(draft);
+        mergeThinkingCaps(result);
         setValidation(result);
         if (!result.llm.ok || !result.tts.ok) {
           setSaveState({
@@ -368,7 +395,8 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
   }, [dirty, original, profileOriginal, onClose]);
 
   const ctx: PaneContext = {
-    draft, update, setProvider, liveModelsByProvider, isProbingKey, graphicsChanged,
+    draft, update, setProvider, liveModelsByProvider, thinkingCapsByModel,
+    isProbingKey, graphicsChanged,
     validation, profile: profileDraft, updateProfile,
   };
 
@@ -569,7 +597,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
 // CHAT, LLM provider + model + key
 // =============================================================================
 
-function ChatFacet({ draft, update, setProvider, liveModelsByProvider, isProbingKey, validation }: PaneContext) {
+function ChatFacet({ draft, update, setProvider, liveModelsByProvider, thinkingCapsByModel, isProbingKey, validation }: PaneContext) {
   const info = getProvider(draft.llm_provider);
   return (
     <Composition
@@ -669,6 +697,27 @@ function ChatFacet({ draft, update, setProvider, liveModelsByProvider, isProbing
             />
           </FieldStack>
         )}
+
+        {/* Chat thinking lever, capability-gated by the selected model.
+            Graded -> Off/Low/Medium/High, binary -> Off/On, none ->
+            hidden. Caps come from soul's _thinking resolver via
+            /validate_keys; no model lists hardcoded here. */}
+        {(() => {
+          const cap = thinkingCapabilityFor(draft.llm_model, thinkingCapsByModel);
+          if (!cap) return null;
+          return (
+            <FieldStack
+              label="Thinking"
+              aside={<InlineHint>reasoning depth</InlineHint>}
+            >
+              <Dropdown
+                value={normalizeThinkingValue(cap, draft.chat_thinking_effort)}
+                onChange={(v) => update('chat_thinking_effort', (v as ThinkingEffort) || 'none')}
+                options={thinkingOptionsFor(cap)}
+              />
+            </FieldStack>
+          );
+        })()}
 
         <GroundingSection draft={draft} update={update} />
       </Stack>
@@ -866,8 +915,45 @@ function VoiceFacet({ draft, update }: PaneContext) {
             )}
           </>
         )}
+
+        <PassthroughVoiceControls />
       </Stack>
     </Composition>
+  );
+}
+
+/** Passthrough talkativeness + mute. Same controls as the inline bar,
+ *  surfaced here for discoverability outside passthrough mode. Reads the
+ *  shared usePassthroughPrefs store so it stays in lockstep with the bar
+ *  and the render bridge (no prop threading). */
+function PassthroughVoiceControls() {
+  const { prefs, setVerbosity, toggleMuted } = usePassthroughPrefs();
+  return (
+    <>
+      <FieldStack
+        label="Passthrough talkativeness"
+        aside={<InlineHint>how much the avatar speaks when driven by /unclaw</InlineHint>}
+      >
+        <Dropdown
+          value={prefs.verbosity}
+          onChange={(v) => setVerbosity(v as 'quiet' | 'balanced' | 'chatty')}
+          options={[
+            { id: 'quiet',    label: 'Quiet , results + questions only' },
+            { id: 'balanced', label: 'Balanced , natural check-ins' },
+            { id: 'chatty',   label: 'Chatty , running monologue' },
+          ]}
+          placeholder="Talkativeness"
+        />
+      </FieldStack>
+      <FieldStack label="Mute avatar" aside={<InlineHint>silence speech, stay in passthrough</InlineHint>}>
+        <Lever
+          on={prefs.muted}
+          onChange={() => toggleMuted()}
+          onLabel="Muted"
+          offLabel="On"
+        />
+      </FieldStack>
+    </>
   );
 }
 
@@ -884,12 +970,13 @@ function ttsHeadline(p: TtsProviderId): string {
 // AGENTIC, escalation backend + key + model
 // =============================================================================
 
-function AgenticFacet({ draft, update, validation, isProbingKey, liveModelsByProvider }: PaneContext) {
+function AgenticFacet({ draft, update, validation, isProbingKey, liveModelsByProvider, thinkingCapsByModel }: PaneContext) {
   const backends: { id: LLMProviderId; label: string; tag: string }[] = [
     { id: 'openai',      label: 'OpenAI',          tag: 'Responses API' },
     { id: 'anthropic',   label: 'Anthropic',       tag: 'Messages API' },
     { id: 'gemini',      label: 'Gemini',          tag: 'functionDeclarations' },
     { id: 'deepseek',    label: 'DeepSeek',        tag: 'OpenAI-compat tool loop' },
+    { id: 'glm',         label: 'GLM (Zhipu)',     tag: 'OpenAI-compat tool loop' },
     { id: 'claude-code', label: 'Claude Code CLI', tag: 'Pro/Max subscription' },
     { id: 'gemini-cli',  label: 'Gemini CLI',      tag: 'Free tier or Pro' },
     { id: 'codex',       label: 'Codex CLI',       tag: 'ChatGPT subscription' },
@@ -993,6 +1080,28 @@ function AgenticFacet({ draft, update, validation, isProbingKey, liveModelsByPro
                     />
                   </FieldStack>
                 </>
+              );
+            })()}
+
+            {/* Agentic thinking lever, capability-gated by the effective
+                agentic model (chat model when reusing local, else the
+                agentic model). Caps from soul's _thinking resolver. */}
+            {(() => {
+              const agModel = draft.agentic_provider === 'ollama'
+                ? draft.llm_model : draft.agentic_model;
+              const cap = thinkingCapabilityFor(agModel, thinkingCapsByModel);
+              if (!cap) return null;
+              return (
+                <FieldStack
+                  label="Thinking"
+                  aside={<InlineHint>reasoning depth</InlineHint>}
+                >
+                  <Dropdown
+                    value={normalizeThinkingValue(cap, draft.agentic_thinking_effort)}
+                    onChange={(v) => update('agentic_thinking_effort', (v as ThinkingEffort) || 'medium')}
+                    options={thinkingOptionsFor(cap)}
+                  />
+                </FieldStack>
               );
             })()}
           </>
