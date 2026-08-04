@@ -363,16 +363,54 @@ export function App() {
   //     not already retried for this click, we re-fire the focus
   //     IPC. One retry per click so we don't loop indefinitely if
   //     another app is legitimately holding focus.
+  //
+  // DRAG EXCEPTION (regression fix). The reclaim runs `app.focus({steal:
+  // true})` + `moveTop()` in the main process, which is an AppKit app
+  // activation. Doing that INSIDE a mousedown cancels the in-flight
+  // native mouse-tracking session, so the following mousemove/mouseup
+  // never reach the page. On ordinary chrome that is invisible (a click
+  // is down+up in one spot), but on the PixelStreaming <video> it kills
+  // camera drag outright: UE gets MouseDown, then nothing. Wheel-zoom
+  // survives because it involves no mousedown, which is exactly the
+  // "scroll works, drag doesn't" symptom.
+  //
+  // So: over the stream, defer the reclaim to mouseup. The click still
+  // focuses us (one gesture later, imperceptible) and the drag is left
+  // alone. `acceptFirstMouse: true` already delivers the click itself.
   useEffect(() => {
     let lastClickAt = 0;
     let retriedForClickAt = 0;
-    const onMouseDown = () => {
+    let deferredReclaim = false;
+    let buttonDown = false;
+
+    /** Is this event inside the streamed video (i.e. a UE camera gesture)? */
+    const overStream = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      return !!t && (t.tagName === 'VIDEO' || !!t.closest?.('video'));
+    };
+
+    const onMouseDown = (e: MouseEvent) => {
       lastClickAt = performance.now();
       retriedForClickAt = 0;
+      buttonDown = true;
+      deferredReclaim = false;
+      if (document.hasFocus()) return;
+      if (overStream(e)) { deferredReclaim = true; return; } // reclaim on mouseup
+      window.electronAPI?.focusWindow?.();
+    };
+
+    const onMouseUp = () => {
+      buttonDown = false;
+      if (!deferredReclaim) return;
+      deferredReclaim = false;
       if (document.hasFocus()) return;
       window.electronAPI?.focusWindow?.();
     };
+
     const onBlur = () => {
+      // Never reassert mid-drag: that is the same activation-during-
+      // tracking stall the mousedown path avoids.
+      if (buttonDown) return;
       const sinceClick = performance.now() - lastClickAt;
       if (sinceClick > 250) return;
       if (retriedForClickAt === lastClickAt) return;
@@ -384,10 +422,13 @@ export function App() {
         window.electronAPI?.focusWindow?.();
       });
     };
+
     window.addEventListener('mousedown', onMouseDown, true);
+    window.addEventListener('mouseup', onMouseUp, true);
     window.addEventListener('blur', onBlur, true);
     return () => {
       window.removeEventListener('mousedown', onMouseDown, true);
+      window.removeEventListener('mouseup', onMouseUp, true);
       window.removeEventListener('blur', onBlur, true);
     };
   }, []);

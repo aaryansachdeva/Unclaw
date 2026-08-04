@@ -426,6 +426,76 @@ export function usePixelStreaming({
     []
   );
 
+  // Stuck-button guard.
+  //
+  // The PixelStreaming SDK binds mousedown/mouseup on the video parent
+  // only. If the button goes down on the stream and comes up ANYWHERE
+  // else , pointer dragged out of the window, or macOS yanking key
+  // status from our floating always-on-top window mid-gesture , the
+  // matching MouseUp is never sent and UE is left believing the button
+  // is still held. From then on camera drags misbehave (UE is already
+  // "dragging" and every fresh press is a no-op) while wheel-zoom keeps
+  // working, since zoom never consults button state.
+  //
+  // Fix: watch for the release we would otherwise miss and synthesize a
+  // mouseup on the video so the SDK's own handler translates it into a
+  // real MouseUp for UE. Cheap (three listeners, no per-frame work) and
+  // self-correcting , a spurious extra mouseup is harmless because UE
+  // treats it as releasing an already-released button.
+  useEffect(() => {
+    const parent = videoParentRef.current;
+    if (!parent) return undefined;
+
+    // Which button is currently held on the stream, or -1 for none. Tracking the
+    // actual button matters: releasing button 0 for what was a right-drag would
+    // leave UE still holding the right button, which is the very state this
+    // guard exists to prevent.
+    let downButton = -1;
+
+    const target = (): HTMLElement => parent.querySelector('video') ?? parent;
+
+    const release = (x?: number, y?: number) => {
+      if (downButton < 0) return;
+      const button = downButton;
+      downButton = -1;
+      const el = target();
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('mouseup', {
+        bubbles: true,
+        cancelable: true,
+        button,
+        // Clamp into the video so UE resolves a sane in-viewport coord.
+        clientX: Math.min(Math.max(x ?? r.left + r.width / 2, r.left), r.right),
+        clientY: Math.min(Math.max(y ?? r.top + r.height / 2, r.top), r.bottom),
+      }));
+    };
+
+    const onDown = (e: MouseEvent) => { downButton = e.button; };
+    const onUp = () => { downButton = -1; };
+    // Button released outside the stream (or outside the window entirely).
+    // Capture-phase, so it runs BEFORE the parent's own mouseup handler ,
+    // hence the containment check: a release on the stream is the SDK's to
+    // handle and only needs the flag cleared.
+    const onWindowUp = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (t && parent.contains(t)) { downButton = -1; return; }
+      release(e.clientX, e.clientY);
+    };
+    // Window lost focus mid-drag , no mouseup is coming at all.
+    const onBlur = () => { release(); };
+
+    parent.addEventListener('mousedown', onDown);
+    parent.addEventListener('mouseup', onUp);
+    window.addEventListener('mouseup', onWindowUp, true);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      parent.removeEventListener('mousedown', onDown);
+      parent.removeEventListener('mouseup', onUp);
+      window.removeEventListener('mouseup', onWindowUp, true);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [connectionState]);
+
   return {
     videoParentRef,
     connectionState,
