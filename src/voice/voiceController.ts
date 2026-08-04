@@ -11,6 +11,7 @@
 // (useVoiceAgent) maps those events into hook state.
 
 import {
+  AI_SPEECH_TAIL_MS,
   BARGE_IN_FRAMES,
   BARGE_IN_PROB,
   FRAME_SIZE,
@@ -129,6 +130,15 @@ export class VoiceController {
 
   // Barge-in tracking when AI is talking.
   private bargeInFrames = 0;
+
+  // AI-speech gate. `opts.isAISpeaking()` is an open-loop estimate (see
+  // AI_SPEECH_TAIL_MS), so we latch it: any frame where it reads true
+  // pushes the gate deadline out by the hangover. The gate is closed
+  // only once that deadline passes, which covers dispatch→playback
+  // latency and speaker/AEC decay at the tail of a reply.
+  private aiGateUntilMs = 0;
+  /** Was the gate active on the previous frame? Detects entry/exit. */
+  private aiGateWasActive = false;
 
   // Streaming-feed lifecycle. The streaming WS opens lazily at the
   // start of each utterance and closes after finalize. Tracking the
@@ -389,22 +399,58 @@ export class VoiceController {
 
     // 3. Barge-in path: if AI is currently talking, raise the bar and only
     //    interrupt on a sustained, confident speech signal.
+    const now = performance.now();
     if (this.opts.isAISpeaking()) {
+      this.aiGateUntilMs = now + AI_SPEECH_TAIL_MS;
+    }
+    const aiGateActive = now < this.aiGateUntilMs;
+
+    if (aiGateActive) {
+      // Gate just closed over an in-flight user utterance. That only
+      // happens when the AI started talking over us, and whatever the
+      // endpointer holds is now unusable: resuming would keep the stale
+      // speechStartTimeMs and slice an utterance window that reaches
+      // back across the AI's entire reply, handing the agent its own
+      // voice. Abandon the turn instead.
+      if (!this.aiGateWasActive) {
+        if (this.prevState !== 'idle') {
+          console.info(
+            `[voice] AI started speaking during user state="${this.prevState}" ` +
+            `— abandoning the in-flight utterance`,
+          );
+        }
+        this.abandonUtterance();
+      }
+      this.aiGateWasActive = true;
+
       if (vadProb >= BARGE_IN_PROB) this.bargeInFrames += 1;
       else this.bargeInFrames = 0;
 
       if (this.bargeInFrames >= BARGE_IN_FRAMES) {
         this.bargeInFrames = 0;
+        // Drop the hangover immediately: the host is about to mute
+        // playback, and waiting out AI_SPEECH_TAIL_MS here would swallow
+        // the first 400 ms of the interruption — the very words the user
+        // raised their voice to say.
+        //
+        // Deliberately NOT clearing aiGateWasActive: isAISpeaking() stays
+        // true until the host reacts, so the next frame would re-arm the
+        // gate and read as a fresh entry, abandoning the interruption on
+        // every frame until the mute lands.
+        this.aiGateUntilMs = 0;
         this.emit({ kind: 'bargeIn' });
-        // Fall through to normal endpointer processing — once the host
-        // hook mutes AI playback, isAISpeaking() returns false and the
-        // user's words are captured normally.
       }
-      // While AI is speaking, don't run the endpointer — it would
-      // false-trigger on echo. We resume on the very next frame after
-      // isAISpeaking() flips back.
+      // While the gate is up, don't run the endpointer — it would
+      // false-trigger on the avatar's own voice bleeding into the mic.
       this.emit({ kind: 'frame', vadProb, smoothedProb: this.vad.smoothedProb, prosody });
       return;
+    }
+
+    if (this.aiGateWasActive) {
+      // Gate just lifted. Start the user's turn from a clean slate so no
+      // avatar audio captured during the hangover can seed an utterance.
+      this.aiGateWasActive = false;
+      this.abandonUtterance();
     }
 
     this.bargeInFrames = 0;
@@ -492,6 +538,30 @@ export class VoiceController {
     if (this.prevState !== 'idle') {
       this.prevState = 'idle';
       this.emit({ kind: 'state', state: 'idle' });
+    }
+  }
+
+  /** Throw away the in-flight turn without transcribing it.
+   *
+   *  Used at both edges of the AI-speech gate. Beyond the endpointer
+   *  reset this MUST close any streaming session: the WS is opened on
+   *  the idle→armed transition and only ever closed in handleEnded, so
+   *  a turn abandoned before endpointing would leave the socket open
+   *  and the next utterance would reuse a feed already primed with the
+   *  abandoned audio. */
+  private abandonUtterance(): void {
+    this.resetForNextUtterance();
+    this.bargeInFrames = 0;
+    if (this.streamingOpen && this.opts.streaming) {
+      const feed = this.opts.streaming;
+      const pending = this.streamingOpenPromise;
+      this.streamingOpen = false;
+      this.streamingOpenPromise = null;
+      // Wait out the handshake before stopping — calling stop() on a
+      // half-open socket leaves the server session dangling.
+      void Promise.resolve(pending)
+        .then(() => feed.stop())
+        .catch(() => { /* already gone */ });
     }
   }
 
