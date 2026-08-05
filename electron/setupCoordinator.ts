@@ -742,6 +742,14 @@ async function runStageModels(
   // Per-platform: Windows runs the ONNX checkpoints (CUDA EP); macOS runs the
   // Core ML .mlpackage bundles. Verify the actual model files each platform
   // needs — checking the wrong platform's artifacts would loop the stage.
+  // NEXT WINDOWS BUNDLE (decided 2026-08-05): t2f is retired (captured
+  // expression engine only) and ExpressModelv8/ is being dropped from
+  // runtime-*-win.zip, with soul-models/emotions.json added in its place.
+  // When that bundle ships, this win32 list MUST change in the SAME release:
+  //   - remove 'ExpressModelv8/checkpoints/t2f_fp16.onnx'
+  //   + add    'soul-models/emotions.json'
+  // Otherwise `allPresent` can never become true and the assets stage
+  // re-extracts the whole bundle on every single launch, forever.
   const required = process.platform === 'win32'
     ? [
         'Audio2Lipsync/python/src/checkpoints_onnx/v6_wavlm_base_last_fp16_native.onnx',
