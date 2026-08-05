@@ -213,10 +213,10 @@ export const MANIFEST: SetupManifest = {
   // AudioTestProject02.exe (extracts flat to <runtime>/unreal/). Includes the
   // bShareMaterialShaderCode=False shader fix (grey-eyes resolved).
   unrealWindows: {
-    url: 'https://files.fotonlabs.com/unreal/2026.0612.01.zip',
-    sha256: '48c028cced8c3f825c7c0865dc008ea0689702cf8436c61922d0055a401cabae',
-    sizeBytes: 2_523_558_279,
-    version: '2026.0612.01',
+    url: 'https://files.fotonlabs.com/unreal/2026.0805.03.zip',
+    sha256: '46adffeb4e8402f3a73b1b19dd3273eb799a009982ff45031d88a9292c8874e3',
+    sizeBytes: 3_310_715_009,
+    version: '2026.0805.03',
   },
 
   // runtimeAssetsWindows: the lipsync/T2F/express ONNX model + source tree the
@@ -228,10 +228,26 @@ export const MANIFEST: SetupManifest = {
   // out of the 5 GB checkpoints_onnx dir, plus t2f_fp16.onnx + best_v4.pt +
   // stats + the lipsync/express .py source. Mac-only .mlpackage excluded.
   runtimeAssetsWindows: {
-    url: 'https://files.fotonlabs.com/assets/runtime-2026.0613.01-win.zip',
-    sha256: 'c8befe532e7d61396a2b33d08b38d4f5089f4d5560c135bdae36a2aba6ab624a',
-    sizeBytes: 729_968_549,
-    version: '2026.0613.01',
+    url: 'https://files.fotonlabs.com/assets/runtime-2026.0805.04-win.zip',
+    sha256: '9d35dc196fe7737bf93419322565be31b6b4b96c186ed7ff1fe0f9c66e0d4c7f',
+    sizeBytes: 504_358_510,
+    version: '2026.0805.04',
+  },
+
+  // Linux (first release, UE 5.8). The assets bundle is byte-identical to
+  // the Windows one (pure ONNX + python, no platform bits) — same sha, two keys.
+  unrealLinux: {
+    url: 'https://files.fotonlabs.com/linux/unreal/unreal-2026.0805.02-linux.zip',
+    sha256: 'd3ce4de0ce11f462fe08a961efcd1563470e8ad80acdf2715066f8ac84634fe9',
+    sizeBytes: 3_271_558_187,
+    version: '2026.0805.02',
+  },
+
+  runtimeAssetsLinux: {
+    url: 'https://files.fotonlabs.com/linux/assets/runtime-2026.0805.04-linux.zip',
+    sha256: '9d35dc196fe7737bf93419322565be31b6b4b96c186ed7ff1fe0f9c66e0d4c7f',
+    sizeBytes: 504_358_510,
+    version: '2026.0805.04',
   },
 
   // Paid character paks. Cooked from AudioTestProject02 build 2026.0607.03 as

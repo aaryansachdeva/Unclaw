@@ -742,24 +742,27 @@ async function runStageModels(
   // Per-platform: Windows runs the ONNX checkpoints (CUDA EP); macOS runs the
   // Core ML .mlpackage bundles. Verify the actual model files each platform
   // needs — checking the wrong platform's artifacts would loop the stage.
-  // NEXT WINDOWS BUNDLE (decided 2026-08-05): t2f is retired (captured
-  // expression engine only) and ExpressModelv8/ is being dropped from
-  // runtime-*-win.zip, with soul-models/emotions.json added in its place.
-  // When that bundle ships, this win32 list MUST change in the SAME release:
-  //   - remove 'ExpressModelv8/checkpoints/t2f_fp16.onnx'
-  //   + add    'soul-models/emotions.json'
-  // Otherwise `allPresent` can never become true and the assets stage
-  // re-extracts the whole bundle on every single launch, forever.
-  const required = process.platform === 'win32'
+  // These are PRESENCE PROBES against the extracted bundle, so they must name
+  // files the CURRENT bundle actually contains. Naming one it no longer ships
+  // makes `allPresent` permanently false and re-extracts the whole thing on
+  // every launch, forever.
+  //
+  // 2026-08-05, win32 + linux: t2f is retired (captured expression engine
+  // only), so runtime-2026.0805.04-* dropped ExpressModelv8/ (~224 MB) and
+  // added soul-models/emotions.json. emotions.json is now the load-bearing
+  // asset — without it soul serves a neutral face for every utterance.
+  //
+  // macOS still ships the Core ML .mlpackage pair and is untouched here.
+  const required = process.platform === 'darwin'
     ? [
-        'Audio2Lipsync/python/src/checkpoints_onnx/v6_wavlm_base_last_fp16_native.onnx',
-        'ExpressModelv8/checkpoints/t2f_fp16.onnx',
-      ]
-    : [
         'Audio2Lipsync/python/src',
         'ExpressModelv8/src',
         'soul-models/lipsync_v6_fp16.mlpackage',
         'soul-models/t2f_v8_fp16.mlpackage',
+      ]
+    : [
+        'Audio2Lipsync/python/src/checkpoints_onnx/v6_wavlm_base_last_fp16_native.onnx',
+        'soul-models/emotions.json',
       ];
   const allPresent = required.every((rel) =>
     fs.existsSync(path.join(paths.assets, rel)),
