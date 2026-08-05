@@ -1034,13 +1034,75 @@ export function installedPakVersions(): Record<string, string> {
       const id = f.replace(/\.pak$/i, '');
       let version = 'unknown';
       try {
-        const v = fs.readFileSync(path.join(dir, `${id}.version`), 'utf8').trim();
-        if (v) version = v;
-      } catch { /* no sidecar => unknown */ }
+        const raw = fs.readFileSync(path.join(dir, `${id}.version`), 'utf8').trim();
+        if (raw.startsWith('{')) {
+          // New sidecar format: {version, pakSha256}. The sha is verified by
+          // quarantineStalePaks before soul/UE launch; here we only parse.
+          const meta = JSON.parse(raw) as { version?: string };
+          if (meta.version) version = meta.version;
+        } else if (raw) {
+          // Legacy plain-string sidecar: version claim with NO byte proof.
+          // Treated as its own value so drift detection still works, but
+          // quarantineStalePaks refuses to boot-mount legacy-stamped paks
+          // whose version does not match the manifest.
+          version = raw;
+        }
+      } catch { /* no/bad sidecar => unknown */ }
       out[id] = version;
     }
   } catch { /* ignore */ }
   return out;
+}
+
+/** First-impression guard (2026-08-05 incident): move any staged pak that is
+ *  NOT provably current out of the boot-mount stage dir before soul launches
+ *  UE. "Provably current" = sidecar version matches the manifest AND the
+ *  staged bytes hash to the sidecar's recorded pakSha256. Everything else
+ *  (drifted version, legacy sha-less stamp, hash mismatch) is parked in
+ *  stale/ — UE boots without it, the store flow re-downloads it, and a
+ *  mid-session mount brings it back. A missing paid character that arrives a
+ *  minute later beats a wedged first launch every time. */
+export async function quarantineStalePaks(
+  manifestVersions: Record<string, string | undefined>,
+): Promise<string[]> {
+  const parked: string[] = [];
+  try {
+    const dir = characterPaksStageDir();
+    if (!fs.existsSync(dir)) return parked;
+    const staleDir = path.join(dir, 'stale');
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.toLowerCase().endsWith('.pak')) continue;
+      const id = f.replace(/\.pak$/i, '');
+      const want = manifestVersions[id];
+      if (!want) continue; // not a manifest-managed pak; leave it alone
+      let ok = false;
+      try {
+        const raw = fs.readFileSync(pakVersionFile(id), 'utf8').trim();
+        if (raw.startsWith('{')) {
+          const meta = JSON.parse(raw) as { version?: string; pakSha256?: string };
+          ok = meta.version === want
+            && !!meta.pakSha256
+            && (await sha256File(path.join(dir, f))) === meta.pakSha256;
+        }
+        // Legacy plain-string sidecars are never ok: no byte proof.
+      } catch { ok = false; }
+      if (!ok) {
+        fs.mkdirSync(staleDir, { recursive: true });
+        fs.renameSync(path.join(dir, f), path.join(staleDir, f));
+        try { fs.renameSync(pakVersionFile(id), path.join(staleDir, `${id}.version`)); } catch { /* ok */ }
+        // Also evict the UE-container copy: run_soul stages from THIS dir,
+        // but a previous session's copy inside the sandbox container would
+        // still get mounted by UE at boot, which is the exact wedge we are
+        // preventing.
+        try { fs.unlinkSync(path.join(ueContainerPaksDir(), f)); } catch { /* none */ }
+        parked.push(id);
+        console.warn(`[pak] quarantined stale/unverified pak for '${id}' (want ${want}) — will re-download`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[pak] quarantine pass failed: ${(err as Error).message}`);
+  }
+  return parked;
 }
 
 export async function downloadAndExtractCharacterPak(
@@ -1085,11 +1147,20 @@ export async function downloadAndExtractCharacterPak(
   fs.mkdirSync(stageDir, { recursive: true });
   const stagedPak = path.join(stageDir, stagedName);
   fs.copyFileSync(srcPak, stagedPak);
-  // Stamp the staged version so a later provisioning pass can detect drift.
-  // Written AFTER the copy so a crash mid-copy leaves no false "current" mark.
+  // Stamp the staged version AND the staged pak's own sha256 so a later
+  // provisioning pass can detect drift or byte/stamp divergence. Written
+  // AFTER the copy so a crash mid-copy leaves no false "current" mark.
+  // The sha guard exists because of the 1.1.5 first-launch incident
+  // (2026-08-05): stale June pak bytes ended up stamped with the new
+  // version, UE boot-mounted them against a newer base build, and the app
+  // wedged on "getting Goblin ready". A version string alone cannot catch
+  // bytes-vs-stamp divergence; hashing the staged file can, always.
   try {
-    if (asset.version) fs.writeFileSync(pakVersionFile(characterId), asset.version);
-    else { try { fs.unlinkSync(pakVersionFile(characterId)); } catch { /* none */ } }
+    if (asset.version) {
+      const stagedSha = await sha256File(stagedPak);
+      fs.writeFileSync(pakVersionFile(characterId),
+        JSON.stringify({ version: asset.version, pakSha256: stagedSha }));
+    } else { try { fs.unlinkSync(pakVersionFile(characterId)); } catch { /* none */ } }
   } catch { /* non-fatal: worst case it re-downloads next launch */ }
 
   // (2) Best-effort copy into the UE sandbox container for an immediate

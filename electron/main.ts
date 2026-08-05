@@ -20,7 +20,7 @@ import fs from 'fs';
 import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
 import { startSoul, stopSoul, restartSoul, getSoulSnapshot, getSoulPorts, writeSoulKeysBridge, clearSoulKeysBridge } from './soulSupervisor';
-import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent, installedPakVersions } from './setupCoordinator';
+import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent, installedPakVersions, quarantineStalePaks } from './setupCoordinator';
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { runLocalIdentityInference, runLocalPhotoInference, type GroomArgs } from './identityInference';
@@ -1508,9 +1508,28 @@ app.whenReady().then(() => {
   // line. Streaming starts in the background; the React side renders
   // a LoadingScreen until it receives the 'soul:ready' IPC event.
   if (mainWindow) {
-    startSoul(mainWindow).catch((err) => {
-      console.warn('[unclaw] startSoul failed:', err);
-    });
+    // FIRST-LAUNCH GUARD: park any staged character pak that is not provably
+    // current (manifest version + byte hash both verified) BEFORE soul stages
+    // paks into UE. Boot-mounting a pak from a different UE build wedged the
+    // 1.1.5 first launch ("getting Goblin ready" forever); a briefly-missing
+    // paid character that re-downloads is strictly better. Sequential on
+    // purpose: soul must not race the quarantine.
+    const pakVersions: Record<string, string | undefined> = {};
+    for (const [id, entry] of Object.entries(MANIFEST.characterPaks ?? {})) {
+      pakVersions[id] = entry.version;
+    }
+    quarantineStalePaks(pakVersions)
+      .then((parked) => {
+        if (parked.length) {
+          console.warn(`[unclaw] quarantined stale paks before boot: ${parked.join(', ')}`);
+        }
+      })
+      .catch((err) => console.warn('[unclaw] pak quarantine failed:', err))
+      .finally(() => {
+        startSoul(mainWindow!).catch((err) => {
+          console.warn('[unclaw] startSoul failed:', err);
+        });
+      });
   }
 });
 
