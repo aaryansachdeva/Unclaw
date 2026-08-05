@@ -1318,6 +1318,22 @@ app.on('open-url', (event, url) => {
   handleDeepLink(url);
 });
 
+// COLD START on Windows / Linux. Those platforms have no 'open-url' event —
+// the OS launches the app with the link as an ARGV entry. 'second-instance'
+// only fires when a copy is ALREADY running, so with Unclaw closed the link
+// would otherwise be dropped on the floor: `unclaw speak` would start the app
+// and passthrough would never engage. Scan our own argv once at startup and
+// stash it the same way handleDeepLink's cold-start branch does; the renderer
+// pulls it via 'deep-link:get-pending' when it mounts.
+//
+// macOS is excluded deliberately — it delivers via open-url and would
+// double-handle. In dev, argv also carries the script path, hence the
+// protocol-prefix match rather than a positional index.
+if (process.platform !== 'darwin') {
+  const argvLink = process.argv.find((a) => a.startsWith(`${DEEP_LINK_PROTOCOL}://`));
+  if (argvLink) pendingDeepLink = argvLink;
+}
+
 // Register as the default handler for unclaw:// .
 if (process.defaultApp && process.argv.length >= 2) {
   app.setAsDefaultProtocolClient(DEEP_LINK_PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
