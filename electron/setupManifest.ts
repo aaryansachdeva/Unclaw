@@ -69,6 +69,14 @@ export interface SetupManifest {
   unrealWindows: RemoteAsset;
   runtimeAssetsWindows: RemoteAsset;
 
+  /** Linux variants. Optional because they are not published yet — the
+   *  selectors in unrealAsset() / runtimeAssetsAsset() throw a clear error on
+   *  Linux until these exist, which is deliberately louder than silently
+   *  handing Linux the macOS `.app` + Core ML bundles. Populate them the same
+   *  way as the Windows pair once a Linux UE build is cooked. */
+  unrealLinux?: RemoteAsset;
+  runtimeAssetsLinux?: RemoteAsset;
+
   /** Paid character paks, keyed by stable character id (ava/goblin/chris/joi).
    *  These are NOT downloaded at setup time; they are fetched on demand after
    *  purchase (entitlement checked by the store Worker, which hands back a
@@ -95,34 +103,67 @@ export interface CharacterPakAsset {
    *  characters/<id>/<platform>/current.zip. */
   url: string;
   /** Per-platform pak bytes. The client picks by process.platform and
-   *  SHA-verifies the download against the matching entry. */
+   *  SHA-verifies the download against the matching entry. `linux` is optional
+   *  until Linux paks are cooked; characterPakForPlatform() throws a clear
+   *  error there rather than verifying Linux bytes against a Mac hash. */
   mac: CharacterPakPlatformAsset;
   windows: CharacterPakPlatformAsset;
+  linux?: CharacterPakPlatformAsset;
 }
 
-/** Pick the pak bytes for the running platform (Windows → windows, else mac). */
+/** The three platforms we publish artifacts for. Kept explicit (rather than
+ *  a win32/else split) so a new platform can never silently inherit another
+ *  platform's binaries — a Linux build downloading the Mac UE `.app` would
+ *  "succeed" at every step and then fail to launch with no useful error. */
+export type ArtifactPlatform = 'windows' | 'mac' | 'linux';
+
+export function artifactPlatform(): ArtifactPlatform {
+  if (process.platform === 'win32') return 'windows';
+  if (process.platform === 'darwin') return 'mac';
+  return 'linux';
+}
+
+/** Pick the pak bytes for the running platform. */
 export function characterPakForPlatform(
   entry: CharacterPakAsset,
 ): CharacterPakPlatformAsset {
-  return process.platform === 'win32' ? entry.windows : entry.mac;
+  const p = artifactPlatform();
+  if (p === 'windows') return entry.windows;
+  if (p === 'mac') return entry.mac;
+  if (!entry.linux) {
+    throw new Error(
+      `character pak '${entry.characterId}' has no linux build published yet`);
+  }
+  return entry.linux;
 }
 
 /** Query-string platform token the client appends to the store Worker's
  *  /download endpoint so it presigns the matching platform key. */
-export function storePlatformParam(): 'windows' | 'mac' {
-  return process.platform === 'win32' ? 'windows' : 'mac';
+export function storePlatformParam(): ArtifactPlatform {
+  return artifactPlatform();
 }
 
-/** The UE bundle for the running platform (Windows → unrealWindows, else mac). */
+/** The UE bundle for the running platform. */
 export function unrealAsset(): RemoteAsset {
-  return process.platform === 'win32' ? MANIFEST.unrealWindows : MANIFEST.unreal;
+  const p = artifactPlatform();
+  if (p === 'windows') return MANIFEST.unrealWindows;
+  if (p === 'mac') return MANIFEST.unreal;
+  if (!MANIFEST.unrealLinux) {
+    throw new Error('no Linux UE bundle published yet (MANIFEST.unrealLinux)');
+  }
+  return MANIFEST.unrealLinux;
 }
 
 /** The runtime-assets bundle for the running platform. */
 export function runtimeAssetsAsset(): RemoteAsset {
-  return process.platform === 'win32'
-    ? MANIFEST.runtimeAssetsWindows
-    : MANIFEST.runtimeAssets;
+  const p = artifactPlatform();
+  if (p === 'windows') return MANIFEST.runtimeAssetsWindows;
+  if (p === 'mac') return MANIFEST.runtimeAssets;
+  if (!MANIFEST.runtimeAssetsLinux) {
+    throw new Error(
+      'no Linux runtime-assets bundle published yet (MANIFEST.runtimeAssetsLinux)');
+  }
+  return MANIFEST.runtimeAssetsLinux;
 }
 
 export const MANIFEST: SetupManifest = {

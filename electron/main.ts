@@ -618,18 +618,47 @@ ipcMain.handle('terminal:open-with-command', async (_event, command: string) => 
       });
     });
   }
-  // macOS: osascript injects the command into a fresh Terminal tab rather
-  // than `open -a Terminal` so we don't clobber an existing session.
-  const safe = command.replace(/"/g, '\\"');
+  if (process.platform === 'darwin') {
+    // macOS: osascript injects the command into a fresh Terminal tab rather
+    // than `open -a Terminal` so we don't clobber an existing session.
+    const safe = command.replace(/"/g, '\\"');
+    return new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      exec(
+        `osascript -e 'tell application "Terminal" to do script "${safe}"' ` +
+          `-e 'tell application "Terminal" to activate'`,
+        (err) => {
+          if (err) resolve({ ok: false, error: err.message });
+          else resolve({ ok: true });
+        },
+      );
+    });
+  }
+  // Linux: there is no single terminal app, so try the common emulators in
+  // order and report failure only if none exist. `-e` is honored by all of
+  // these; we hold the shell open with `; exec $SHELL` so the user can read
+  // the output (the equivalent of cmd /k).
+  const safeSh = command.replace(/'/g, `'\\''`);
+  const held = `${command}; exec $SHELL`;
+  const heldSafe = held.replace(/'/g, `'\\''`);
+  const terminals = [
+    `x-terminal-emulator -e bash -lc '${heldSafe}'`,
+    `gnome-terminal -- bash -lc '${heldSafe}'`,
+    `konsole -e bash -lc '${heldSafe}'`,
+    `xfce4-terminal -e "bash -lc '${safeSh}'"`,
+    `xterm -e bash -lc '${heldSafe}'`,
+  ];
   return new Promise<{ ok: boolean; error?: string }>((resolve) => {
-    exec(
-      `osascript -e 'tell application "Terminal" to do script "${safe}"' ` +
-        `-e 'tell application "Terminal" to activate'`,
-      (err) => {
-        if (err) resolve({ ok: false, error: err.message });
+    const tryNext = (i: number): void => {
+      if (i >= terminals.length) {
+        resolve({ ok: false, error: 'no supported terminal emulator found' });
+        return;
+      }
+      exec(terminals[i], (err) => {
+        if (err) tryNext(i + 1);
         else resolve({ ok: true });
-      },
-    );
+      });
+    };
+    tryNext(0);
   });
 });
 

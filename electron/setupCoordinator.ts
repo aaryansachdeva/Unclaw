@@ -629,12 +629,12 @@ async function runStageUnreal(
   window: BrowserWindow,
   paths: ReturnType<typeof runtimePaths>,
 ): Promise<void> {
-  // macOS ships a `.app` bundle; the Windows packaged build extracts as a
-  // plain folder (AudioTestProject02/ + launcher exe), so the install root IS
+  // macOS ships a `.app` bundle; the Windows AND Linux packaged builds extract
+  // as a plain folder (AudioTestProject02/ + launcher), so the install root IS
   // the unreal dir. Quarantine-strip below no-ops off macOS regardless.
-  const installedApp = process.platform === 'win32'
-    ? paths.unreal
-    : path.join(paths.unreal, 'Unclaw Character.app');
+  const installedApp = process.platform === 'darwin'
+    ? path.join(paths.unreal, 'Unclaw Character.app')
+    : paths.unreal;
   // Per-asset version sentinel, separate from the .setup-complete marker
   // because the wizard may need to re-fetch this specific category without
   // re-running every stage. Holds the asset's SHA so a manifest bump
@@ -1406,8 +1406,14 @@ export async function extractZip(
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
       `Expand-Archive -LiteralPath ${q(zipPath)} -DestinationPath ${q(destDir)} -Force`,
     ], { stream: true });
-  } else {
+  } else if (process.platform === 'darwin') {
     await runCommand(window, '/usr/bin/ditto', ['-x', '-k', zipPath, destDir], { stream: true });
+  } else {
+    // Linux: `ditto` is macOS-only. bsdtar is fine here (the drive-letter
+    // problem that rules it out on Windows doesn't exist on POSIX paths), and
+    // `tar` is present on every distro we care about, unlike `unzip` which is
+    // not installed by default on minimal images.
+    await runCommand(window, 'tar', ['-xf', zipPath, '-C', destDir], { stream: true });
   }
 }
 
@@ -1431,9 +1437,14 @@ function venvPythonPath(pythonEnv: string): string {
     : path.join(pythonEnv, 'bin', 'python');
 }
 
-/** Platform-specific soul pip requirements filename. */
+/** Platform-specific soul pip requirements filename. Linux must NOT fall back
+ *  to the mac file: that one pulls mlx / mlx-whisper / coremltools, which are
+ *  Apple-Silicon-only and fail to build on Linux, and it omits the CUDA wheels
+ *  Linux needs. */
 function requirementsFileName(): string {
-  return process.platform === 'win32' ? 'requirements-windows.txt' : 'requirements-mac.txt';
+  if (process.platform === 'win32') return 'requirements-windows.txt';
+  if (process.platform === 'darwin') return 'requirements-mac.txt';
+  return 'requirements-linux.txt';
 }
 
 // ----------------------------------------------------------------------
