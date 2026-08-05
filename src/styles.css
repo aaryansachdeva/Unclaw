@@ -160,6 +160,22 @@ video {
   inset: 0 !important;
 }
 
+/* Gamut match: make the stream read like UE's own (color-unmanaged) window.
+   The filter is defined in StreamView.tsx next to the rationale; the class is
+   toggled there. Applies to the stream only; app chrome stays honest sRGB.
+
+   Gated on the display actually being wide-gamut: on a plain sRGB monitor
+   Chromium's color management is a no-op, so the expansion would NOT be
+   cancelled and the stream would oversaturate. On sRGB panels UE's unmanaged
+   window and honest sRGB coincide anyway, so no filter is the correct match
+   there. Chromium re-evaluates this per-window when it moves between
+   displays. */
+@media (color-gamut: p3) {
+  .stream-gamut-match video {
+    filter: url(#ue-gamut-match);
+  }
+}
+
 textarea {
   user-select: text;
   font-family: inherit;

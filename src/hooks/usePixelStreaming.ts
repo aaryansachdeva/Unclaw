@@ -160,7 +160,14 @@ export function usePixelStreaming({
     // jitter + the layered connect-time fires produce duplicates); reset on
     // each webRtcConnected so a fresh session always gets one real send even
     // if a pre-connect attempt was dropped with the data channel closed.
-    const lastSentRes = { w: 0, h: 0 };
+    // Sentinel is -1, NOT 0. With {0,0} a not-yet-laid-out element (which
+    // measures 0x0) is indistinguishable from "already sent this size", so the
+    // dedupe below silently swallowed the send. The timed fires all land in the
+    // first 3s and the ResizeObserver only reports SUBSEQUENT changes, so if the
+    // window never resized afterwards UE stayed at its launch -ResX/-ResY
+    // (720x1280) for the whole session and the browser upscaled ~1.6x — a soft
+    // avatar with no error anywhere. Observed 2026-08-04.
+    const lastSentRes = { w: -1, h: -1 };
     const installDprResolutionOverride = (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vp: any,
@@ -191,6 +198,10 @@ export function usePixelStreaming({
         }
         w -= w % 2; // even dims: H264 4:2:0 chroma subsampling needs them
         h -= h % 2;
+        // Not laid out yet. Bail WITHOUT recording, so a later fire still gets
+        // its chance — recording a bogus size here is what stranded UE at its
+        // launch resolution.
+        if (w < 64 || h < 64) return;
         if (w === lastSentRes.w && h === lastSentRes.h) return;
         lastSentRes.w = w;
         lastSentRes.h = h;
@@ -291,9 +302,12 @@ export function usePixelStreaming({
     ps.addEventListener('webRtcConnected', () => {
       setConnectionState('connected');
       // New session: forget the dedupe state so the first resolution send of
-      // this connection always goes out on the wire.
-      lastSentRes.w = 0;
-      lastSentRes.h = 0;
+      // this connection always goes out on the wire. MUST be -1, not 0 — UE
+      // reboots at its launch -ResX/-ResY, so if this connection is a
+      // reconnect after a UE restart we have to re-send even the size we
+      // already sent last time, and 0 would alias with an unlaid-out element.
+      lastSentRes.w = -1;
+      lastSentRes.h = -1;
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
@@ -361,6 +375,7 @@ export function usePixelStreaming({
       setTimeout(forceViewportResolutionUpdate, 1000);
       setTimeout(forceViewportResolutionUpdate, 2000);
       setTimeout(forceViewportResolutionUpdate, 3000);
+      // (No backstop here — the permanent reconciler below owns that job.)
       // One-time decoder diagnostic ~4s after stream start (stats need a few
       // decoded frames before decoderImplementation populates). See
       // logDecoderImplementation for why this exists.
@@ -381,6 +396,57 @@ export function usePixelStreaming({
       }, 150);
     });
     ro.observe(videoParentRef.current);
+
+    // Resolution reconciler — the guarantee that UE is ALWAYS rendering at the
+    // size we actually display.
+    //
+    // Getting this wrong is invisible: no error, no warning, just a soft avatar
+    // because UE stayed at its launch -ResX/-ResY and the browser upscaled. It
+    // happened (2026-08-04, stranded at 720x1280 for a whole session), so this
+    // no longer relies on catching a moment in time.
+    //
+    // Every event-driven trigger we have is a one-shot that can miss:
+    //   * the 500ms/1s/2s/3s fires all land before a slow or occluded window
+    //     has laid out, and then never run again;
+    //   * ResizeObserver only reports SUBSEQUENT size changes, so a window that
+    //     is never resized never recovers;
+    //   * a UE restart silently reverts it to the launch resolution;
+    //   * dragging the window to a display with a different devicePixelRatio
+    //     changes the target with no resize event on our element.
+    //
+    // So instead of trying to enumerate the moments, we converge continuously.
+    // This is a level-triggered check, not edge-triggered: recompute the target
+    // and let the dedupe decide. When nothing changed it costs one multiply and
+    // a comparison and sends NOTHING, so it is free in the steady state and
+    // self-heals every failure mode above.
+    //
+    // CLOSED LOOP (2026-08-04, second occurrence): the dedupe compares against
+    // what we SENT, but a send can be lost in the connect race (the Command
+    // lands before UE's data channel / handler is ready) — after which every
+    // future fire is swallowed and UE renders at launch resolution for the
+    // whole session. The frontend state alone cannot detect that. The stream
+    // itself can: the <video> element's intrinsic size IS the resolution UE is
+    // actually rendering. If it disagrees with what we believe we set, the
+    // belief is wrong — drop it so this same tick re-sends. Re-sending an
+    // already-applied resolution is a no-op UE-side (r.SetRes with the current
+    // value), so a transient mismatch while UE is mid-apply costs nothing, and
+    // a genuinely lost send now recovers within one 3s tick instead of never.
+    const reconcile = window.setInterval(() => {
+      const video = videoParentRef.current?.querySelector('video');
+      if (
+        video && video.videoWidth > 0 && lastSentRes.w > 0
+        && (video.videoWidth !== lastSentRes.w || video.videoHeight !== lastSentRes.h)
+      ) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ps] stream is ${video.videoWidth}x${video.videoHeight} but target is `
+          + `${lastSentRes.w}x${lastSentRes.h} — resolution send was lost, re-sending`,
+        );
+        lastSentRes.w = -1;
+        lastSentRes.h = -1;
+      }
+      forceViewportResolutionUpdate();
+    }, 3000);
     ps.addEventListener('webRtcDisconnected', () => {
       setConnectionState('connecting');
       scheduleRetry();
@@ -393,6 +459,7 @@ export function usePixelStreaming({
     return () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       if (resizeTimer) clearTimeout(resizeTimer);
+      clearInterval(reconcile);
       ro.disconnect();
       ps.removeResponseEventListener('unclaw-ack-router');
       // Reject any in-flight ack promises so callers don't hang forever
@@ -441,6 +508,76 @@ export function usePixelStreaming({
     },
     []
   );
+
+  // Stuck-button guard.
+  //
+  // The PixelStreaming SDK binds mousedown/mouseup on the video parent
+  // only. If the button goes down on the stream and comes up ANYWHERE
+  // else , pointer dragged out of the window, or macOS yanking key
+  // status from our floating always-on-top window mid-gesture , the
+  // matching MouseUp is never sent and UE is left believing the button
+  // is still held. From then on camera drags misbehave (UE is already
+  // "dragging" and every fresh press is a no-op) while wheel-zoom keeps
+  // working, since zoom never consults button state.
+  //
+  // Fix: watch for the release we would otherwise miss and synthesize a
+  // mouseup on the video so the SDK's own handler translates it into a
+  // real MouseUp for UE. Cheap (three listeners, no per-frame work) and
+  // self-correcting , a spurious extra mouseup is harmless because UE
+  // treats it as releasing an already-released button.
+  useEffect(() => {
+    const parent = videoParentRef.current;
+    if (!parent) return undefined;
+
+    // Which button is currently held on the stream, or -1 for none. Tracking the
+    // actual button matters: releasing button 0 for what was a right-drag would
+    // leave UE still holding the right button, which is the very state this
+    // guard exists to prevent.
+    let downButton = -1;
+
+    const target = (): HTMLElement => parent.querySelector('video') ?? parent;
+
+    const release = (x?: number, y?: number) => {
+      if (downButton < 0) return;
+      const button = downButton;
+      downButton = -1;
+      const el = target();
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('mouseup', {
+        bubbles: true,
+        cancelable: true,
+        button,
+        // Clamp into the video so UE resolves a sane in-viewport coord.
+        clientX: Math.min(Math.max(x ?? r.left + r.width / 2, r.left), r.right),
+        clientY: Math.min(Math.max(y ?? r.top + r.height / 2, r.top), r.bottom),
+      }));
+    };
+
+    const onDown = (e: MouseEvent) => { downButton = e.button; };
+    const onUp = () => { downButton = -1; };
+    // Button released outside the stream (or outside the window entirely).
+    // Capture-phase, so it runs BEFORE the parent's own mouseup handler ,
+    // hence the containment check: a release on the stream is the SDK's to
+    // handle and only needs the flag cleared.
+    const onWindowUp = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (t && parent.contains(t)) { downButton = -1; return; }
+      release(e.clientX, e.clientY);
+    };
+    // Window lost focus mid-drag , no mouseup is coming at all.
+    const onBlur = () => { release(); };
+
+    parent.addEventListener('mousedown', onDown);
+    parent.addEventListener('mouseup', onUp);
+    window.addEventListener('mouseup', onWindowUp, true);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      parent.removeEventListener('mousedown', onDown);
+      parent.removeEventListener('mouseup', onUp);
+      window.removeEventListener('mouseup', onWindowUp, true);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [connectionState]);
 
   return {
     videoParentRef,
