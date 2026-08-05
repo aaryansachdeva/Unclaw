@@ -167,7 +167,11 @@ export function runtimeAssetsAsset(): RemoteAsset {
 }
 
 export const MANIFEST: SetupManifest = {
-  releaseTag: '2026.0720.01-mac',
+  // Bumped whenever ANY bundle below changes, so existing installs re-run the
+  // wizard for the new artifacts. Dropped the '-mac' suffix at 1.1.5: this
+  // manifest is now shared by all three platforms (each carries its own
+  // per-bundle version), so a platform suffix here was misleading.
+  releaseTag: '2026.0805.01',
   pythonVersion: '3.11',
   minFreeDiskBytes: 15 * 1024 * 1024 * 1024, // 15 GB
 
