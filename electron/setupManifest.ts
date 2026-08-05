@@ -260,6 +260,10 @@ export const MANIFEST: SetupManifest = {
         sha256: '77fbfdb846dff62dd9a1be8c6de44f5a1740fe1941e6a640bfcd6da78f638e33',
         sizeBytes: 177_344_968,
       },
+      linux: {
+        sha256: '6d667c4bbab19396b1ec97c904afa5e05d0731e12af9488ce34278861b037569',
+        sizeBytes: 149_936_045,
+      },
     },
     goblin: {
       characterId: 'goblin',
@@ -272,6 +276,10 @@ export const MANIFEST: SetupManifest = {
       windows: {
         sha256: '1676aa23eb3408a74032c892ac86926c67de92c90d8e49989a4a051ea3b0d868',
         sizeBytes: 87_279_140,
+      },
+      linux: {
+        sha256: '657f0eea2771d018ad9a44c0cbf03de95144d3ef17660a2712cde16a1cb20eed',
+        sizeBytes: 109_241_115,
       },
     },
     chris: {
@@ -286,6 +294,10 @@ export const MANIFEST: SetupManifest = {
         sha256: '011078b17d5a345e6ddc4eb220b0a3da7524702b2c3d01563507c02f1ee8e0df',
         sizeBytes: 129_136_215,
       },
+      linux: {
+        sha256: '9030af7928799f492c0e3c929e44cddd5036f80aafbb3f123250de88de33c27f',
+        sizeBytes: 147_351_511,
+      },
     },
     joi: {
       characterId: 'joi',
@@ -298,6 +310,10 @@ export const MANIFEST: SetupManifest = {
       windows: {
         sha256: '10af1338b4543205dad983384d7e007a26020ede0925d0dd610d003b2d90fb50',
         sizeBytes: 135_684_090,
+      },
+      linux: {
+        sha256: '2e797b1bab9960e14141fba2dfb47a98945fa9084b4526e91a76624a2aedb644',
+        sizeBytes: 157_671_577,
       },
     },
   },
