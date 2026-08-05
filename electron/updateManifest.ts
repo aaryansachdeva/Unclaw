@@ -120,5 +120,23 @@ export const FALLBACK_MANIFEST: UpdateManifest = {
   },
 };
 
-export const REMOTE_MANIFEST_URL =
-  'https://files.fotonlabs.com/mac/updates/latest.json';
+/** Per-platform runtime-update manifest.
+ *
+ *  MUST be platform-scoped: the categories it advertises (unreal, assets)
+ *  point at platform-specific bundles. A Windows client reading the mac
+ *  manifest would download the macOS UE `.app` and the Core ML asset tree,
+ *  "succeed" at every step, and then fail to launch with no useful error.
+ *
+ *  Key namespaces mirror the artifact layout already in the bucket:
+ *    mac     mac/unreal/,   mac/assets/    -> mac/updates/latest.json
+ *    windows unreal/,       assets/        -> updates/latest.json      (root)
+ *    linux   linux/unreal/, linux/assets/  -> linux/updates/latest.json
+ */
+function remoteManifestUrl(): string {
+  const base = 'https://files.fotonlabs.com';
+  if (process.platform === 'darwin') return `${base}/mac/updates/latest.json`;
+  if (process.platform === 'win32') return `${base}/updates/latest.json`;
+  return `${base}/linux/updates/latest.json`;
+}
+
+export const REMOTE_MANIFEST_URL = remoteManifestUrl();
