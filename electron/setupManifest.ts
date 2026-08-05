@@ -145,12 +145,17 @@ export const MANIFEST: SetupManifest = {
     // absent, so every packaged install ran mood-less for a month. Lesson:
     // any new data blob soul reads must be added HERE (and to remote
     // latest.json `assets`) the same day its loader lands.
-    url: 'https://files.fotonlabs.com/mac/assets/runtime-2026.0805.01-mac.zip',
-    sha256: '6fcdf57914b18b2e72566796da0ec9c79a39150e4252c796098ed02b240a21fa',
-    sizeBytes: 1_204_949_073,
+    // 2026.0805.02: t2f RETIRED — ExpressModelv8/ and the t2f_v8 weights are
+    // gone (405MB smaller); the captured engine (emotions.json) is the only
+    // expression generator and soul's run_text2face wrapper serves it for
+    // every caller including /express. Pairs with the soul commit
+    // "expression: retire the t2f neural model".
+    url: 'https://files.fotonlabs.com/mac/assets/runtime-2026.0805.02-mac.zip',
+    sha256: 'ab058f38206ce6bbe843e97a5de9fb46cb9d35b47ce8e39bdbe438b08a499683',
+    sizeBytes: 800_421_228,
     // Seeds the updater ledger (see unreal above). MUST equal the `assets`
     // version in remote latest.json.
-    version: '2026.0805.01',
+    version: '2026.0805.02',
   },
 
   // Paid character paks. Cooked from AudioTestProject02 build 2026.0607.03 as
