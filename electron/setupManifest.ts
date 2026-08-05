@@ -194,7 +194,7 @@ export const MANIFEST: SetupManifest = {
     sizeBytes: 3_254_313_571,
     // Seeds the updater ledger so a fresh install doesn't re-download this
     // ~3 GB bundle. MUST equal the `unreal` version in remote latest.json.
-    version: '2026.0720.09',
+    version: '2026.0805.03',
   },
 
   runtimeAssets: {
@@ -250,15 +250,15 @@ export const MANIFEST: SetupManifest = {
   characterPaks: {
     ava: {
       characterId: 'ava',
-      version: '2026.0720.09',
+      version: '2026.0805.03',
       url: 'https://store.unclaw.io/store/characters/ava/download',
       mac: {
         sha256: '70cedb0d1c83607c92b821c904497d50add4490f7d0f51a83a99bb2bbe1d58b5',
         sizeBytes: 155_299_587,
       },
       windows: {
-        sha256: '77fbfdb846dff62dd9a1be8c6de44f5a1740fe1941e6a640bfcd6da78f638e33',
-        sizeBytes: 177_344_968,
+        sha256: '8a68198932039e5da3320a876dc8a0f1a9db49c6b5fcb853ccf5521e0cf9c81e',
+        sizeBytes: 151_636_517,
       },
       linux: {
         sha256: '6d667c4bbab19396b1ec97c904afa5e05d0731e12af9488ce34278861b037569',
@@ -267,15 +267,15 @@ export const MANIFEST: SetupManifest = {
     },
     goblin: {
       characterId: 'goblin',
-      version: '2026.0720.09',
+      version: '2026.0805.03',
       url: 'https://store.unclaw.io/store/characters/goblin/download',
       mac: {
         sha256: 'd1f621e9e6ea689a9cb6f5e7db654616d930f47a45f794b0a4a5ea34d6c3a37e',
         sizeBytes: 114_602_929,
       },
       windows: {
-        sha256: '1676aa23eb3408a74032c892ac86926c67de92c90d8e49989a4a051ea3b0d868',
-        sizeBytes: 87_279_140,
+        sha256: '315f9052475ec98b9afe42e71df3b5176a32ec66260b5b7ffe5454bac48661e7',
+        sizeBytes: 110_910_478,
       },
       linux: {
         sha256: '657f0eea2771d018ad9a44c0cbf03de95144d3ef17660a2712cde16a1cb20eed',
@@ -284,15 +284,15 @@ export const MANIFEST: SetupManifest = {
     },
     chris: {
       characterId: 'chris',
-      version: '2026.0720.09',
+      version: '2026.0805.03',
       url: 'https://store.unclaw.io/store/characters/chris/download',
       mac: {
         sha256: '6f7807dc863f1547fa960b80a1c7ec5a7325c748ad639cf7a6b66942144bb23a',
         sizeBytes: 152_690_993,
       },
       windows: {
-        sha256: '011078b17d5a345e6ddc4eb220b0a3da7524702b2c3d01563507c02f1ee8e0df',
-        sizeBytes: 129_136_215,
+        sha256: '9b163624222b2081f93994e725a105b51d911754c5fc4690b849fef1aa770b2d',
+        sizeBytes: 148_886_257,
       },
       linux: {
         sha256: '9030af7928799f492c0e3c929e44cddd5036f80aafbb3f123250de88de33c27f',
@@ -301,15 +301,15 @@ export const MANIFEST: SetupManifest = {
     },
     joi: {
       characterId: 'joi',
-      version: '2026.0720.09',
+      version: '2026.0805.03',
       url: 'https://store.unclaw.io/store/characters/joi/download',
       mac: {
         sha256: '028e3c691d81762abf8110847a09cb1f33c3edfd58b75b5caf9dc93b3a284f4c',
         sizeBytes: 163_035_405,
       },
       windows: {
-        sha256: '10af1338b4543205dad983384d7e007a26020ede0925d0dd610d003b2d90fb50',
-        sizeBytes: 135_684_090,
+        sha256: '27d6b2af3985bfe8e438672f23c2ee6a3f3ec39ccf43af27a33e221797d6280f',
+        sizeBytes: 159_355_986,
       },
       linux: {
         sha256: '2e797b1bab9960e14141fba2dfb47a98945fa9084b4526e91a76624a2aedb644',
