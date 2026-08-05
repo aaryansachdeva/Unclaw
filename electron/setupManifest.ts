@@ -139,12 +139,18 @@ export const MANIFEST: SetupManifest = {
   },
 
   runtimeAssets: {
-    url: 'https://files.fotonlabs.com/mac/assets/runtime-2026.0523.01-mac.zip',
-    sha256: 'c143b8feadd8d15bc603dbffcbc6812f43b63e7ab26239c12f6d1a9b26bb8524',
-    sizeBytes: 1_204_449_785,
+    // 2026.0805.01: adds soul-models/emotions.json (mood/expression library).
+    // It shipped nowhere despite the code path landing 2026-07-06 — the
+    // bundle predated it and expression.py fails SILENT when the file is
+    // absent, so every packaged install ran mood-less for a month. Lesson:
+    // any new data blob soul reads must be added HERE (and to remote
+    // latest.json `assets`) the same day its loader lands.
+    url: 'https://files.fotonlabs.com/mac/assets/runtime-2026.0805.01-mac.zip',
+    sha256: '6fcdf57914b18b2e72566796da0ec9c79a39150e4252c796098ed02b240a21fa',
+    sizeBytes: 1_204_949_073,
     // Seeds the updater ledger (see unreal above). MUST equal the `assets`
     // version in remote latest.json.
-    version: '2026.0523.01',
+    version: '2026.0805.01',
   },
 
   // Paid character paks. Cooked from AudioTestProject02 build 2026.0607.03 as
