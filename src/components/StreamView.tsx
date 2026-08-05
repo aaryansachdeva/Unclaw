@@ -4,6 +4,64 @@ import { ConnectionState } from '../hooks/usePixelStreaming';
 import logoUrl from '../assets/logo.png';
 
 const MIN_LOADING_MS = 2000;
+
+// ---------------------------------------------------------------------------
+// Stream gamut match (the Mac "faded colors" fix)
+//
+// UE on Mac never sets a colorspace on its CAMetalLayer (verified in 5.8
+// MetalViewport.cpp), so the editor and the packaged app window are
+// color-UNMANAGED: their sRGB pixel values go raw to the panel, and on the
+// wide-gamut P3 displays every modern Mac ships, raw sRGB numbers read as P3
+// coordinates. That reinterpretation widens saturation, and it is the look
+// everyone tunes the character against in the editor.
+//
+// Chromium, by contrast, IS color-managed: it converts the decoded stream to
+// honest sRGB and maps it correctly onto the P3 panel. Correct, but visibly
+// duller than the UE window next to it. No encoder/YUV-side change can close
+// that gap; a mathematically perfect pipeline lands exactly on the duller look.
+//
+// So we reproduce UE's unmanaged presentation for the stream only: a
+// linear-space P3->sRGB matrix applied to the video. Chromium then runs its
+// sRGB->P3 management on the pre-distorted pixels and the two transforms
+// cancel, leaving the panel with the same raw values the UE window would have
+// pushed. Identity on P3 displays; on a plain sRGB external monitor it
+// slightly oversaturates, in the same direction the editor itself would.
+//
+// The matrix is the standard linear Display-P3 -> sRGB conversion (D65).
+// color-interpolation-filters must be linearRGB (the SVG default, set
+// explicitly) so the matrix runs on linearized values, not gamma-encoded ones.
+// Out-of-range results clamp, which is the same gamut clip the panel applies.
+const GAMUT_MATRIX = [
+  1.224940, -0.224940, 0, 0, 0,
+  -0.042057, 1.042057, 0, 0, 0,
+  -0.019638, -0.078636, 1.098265, 0, 0,
+  0, 0, 0, 1, 0,
+].join(' ');
+
+// Presence of the key disables the filter (default is ON).
+const GAMUT_OFF_KEY = 'unclaw-stream-gamut-off';
+
+/** Average decoded RGB of the stream's center patch, as Chromium interprets
+ *  it (canvas readback is sRGB and ignores CSS filters). This isolates the
+ *  DECODE layer: if these numbers match the UE backbuffer for the same scene,
+ *  the YUV matrix/range signaling is correct and any remaining visual gap is
+ *  display management, which the gamut filter owns. */
+function sampleStreamRGB(): { r: number; g: number; b: number } | null {
+  const v = document.querySelector('video');
+  if (!v || !(v instanceof HTMLVideoElement) || v.videoWidth < 256 || v.videoHeight < 256) return null;
+  const S = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = S;
+  canvas.height = S;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(v, (v.videoWidth - 256) / 2, (v.videoHeight - 256) / 2, 256, 256, 0, 0, S, S);
+  const d = ctx.getImageData(0, 0, S, S).data;
+  let r = 0, g = 0, b = 0;
+  const n = S * S;
+  for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; }
+  return { r: +(r / n).toFixed(1), g: +(g / n).toFixed(1), b: +(b / n).toFixed(1) };
+}
 // How long the stream can sit un-connected before we surface a recovery
 // affordance. When UE fails to launch, soul (and its signalling server) are
 // healthy but there's no streamer peer, so the connection stays 'connecting'
@@ -19,6 +77,39 @@ interface StreamViewProps {
 
 export function StreamView({ videoParentRef, connectionState }: StreamViewProps) {
   const streamReady = connectionState === 'connected';
+
+  // Gamut match on by default on EVERY platform; persisted opt-out for A/B.
+  // The CSS @media (color-gamut: p3) gate is the real switch, and it is the
+  // correct one on all three OSes: it turns on exactly when the display is
+  // wide-gamut AND Chromium is color-managing into it, which is precisely
+  // when the cancellation math holds. UE windows are color-unmanaged
+  // everywhere (Mac Metal layer, Windows DWM without ACM, Linux
+  // compositors), so "match the unmanaged UE look" is the right target for
+  // the stock Windows/Linux Pixel Streaming plugin just as much as for the
+  // NativeMac one. On plain sRGB monitors the query is false and the filter
+  // is inert, which is also correct: there, unmanaged and honest sRGB
+  // coincide.
+  const [gamutOn, setGamutOn] = useState(() => localStorage.getItem(GAMUT_OFF_KEY) == null);
+
+  // Dev/live-tuning console surface:
+  //   __unclawStream.gamut(false)  toggle the P3 match without a reload
+  //   __unclawStream.sample()      decoded center-patch RGB (see helper above)
+  useEffect(() => {
+    const api = {
+      gamut: (on: boolean) => {
+        setGamutOn(on);
+        if (on) localStorage.removeItem(GAMUT_OFF_KEY);
+        else localStorage.setItem(GAMUT_OFF_KEY, '1');
+        return `stream gamut match: ${on ? 'ON (UE-window look)' : 'OFF (honest sRGB)'}`;
+      },
+      sample: sampleStreamRGB,
+    };
+    (window as unknown as Record<string, unknown>).__unclawStream = api;
+    return () => {
+      const w = window as unknown as Record<string, unknown>;
+      if (w.__unclawStream === api) delete w.__unclawStream;
+    };
+  }, []);
 
   // Enforce a minimum display duration on the loading screen so it never flashes.
   const [canShowStream, setCanShowStream] = useState(false);
@@ -63,7 +154,13 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
 
   return (
     <div className="absolute inset-0 overflow-hidden" style={{ background: 'var(--bg-void)' }}>
-      <div ref={videoParentRef} className="absolute inset-0" />
+      {/* Filter definition for the gamut match. Zero-size, never paints. */}
+      <svg width="0" height="0" style={{ position: 'absolute' }} aria-hidden="true">
+        <filter id="ue-gamut-match" colorInterpolationFilters="linearRGB">
+          <feColorMatrix type="matrix" values={GAMUT_MATRIX} />
+        </filter>
+      </svg>
+      <div ref={videoParentRef} className={`absolute inset-0${gamutOn ? ' stream-gamut-match' : ''}`} />
 
       {/* Bottom vignette */}
       <AnimatePresence>
