@@ -16,11 +16,13 @@ import { WeatherPanel } from './components/Weather';
 // customization surface itself is CustomWardrobe (drives every character now).
 import { ACCENT_COLORS, BG_COLORS, BG_GLOW_DEFAULT, LIGHT_INTENSITY_DEFAULT, CLOTHING_COLORS } from './components/CustomizationOverlay';
 import { CustomWardrobe } from './components/CustomWardrobe';
+import { IDENTITY_HOSTS } from './wardrobe/catalog';
 import { CameraModeToggle } from './components/CameraModeToggle';
 import { StreamEffects } from './components/StreamEffects';
 import { dressCharacter, type DressScope } from './wardrobe/dressCharacter';
 import { wardrobeDefaultsFor } from './wardrobe/catalog';
 import { cameraCustomize, cameraForMode, cameraDefaultFor, type CameraMode } from './wardrobe/camera';
+import { blendAxesForCamera } from './wardrobe/camera';
 import { PulseGrid } from './components/PulseGrid';
 import { hexToRgb01, round3 } from './components/ColorPickerPanel';
 import { useEnvironment } from './hooks/useEnvironment';
@@ -68,8 +70,8 @@ import {
 import { resetEverything } from './services/accountReset';
 import { fetchApiKeys, modelSupportsVision } from './services/apiKeys';
 import { Wizard } from './components/Onboarding/Wizard';
-import { characterFor } from './characters';
-import { AGENTS, GENERIC_MALE_AGENT, type Agent } from './types';
+import { voicesForInstance, characterFor } from './characters';
+import { AGENTS, GENERIC_MALE_AGENT, UNIFIED_AGENT, type Agent } from './types';
 import { useAgentStack, BASE_AGENT, BASE_INSTANCE_ID, type AgentInstance } from './hooks/useAgentStack';
 import { AddCharacterPicker, type StoreEntry } from './components/AddCharacterPicker';
 import { AddCustomOverlay } from './components/AddCustomOverlay';
@@ -664,6 +666,8 @@ function AppMain() {
   // Fresh photo-identity generation: agentId whose next characterReady should
   // land the user in the customization UI (name + style the new character).
   const customizeOnReadyRef = useRef<string | null>(null);
+  /** Every skin generated for the open character, so earlier ones stay pickable. */
+  const [skins, setSkins] = useState<Array<{ path: string; label: string }>>([]);
   const openCustomizationRef = useRef<(() => void) | null>(null);
   // Live post-effect preview while customizing. Effects never reach UE (they're
   // composited over the <video> here), so they can't ride the descriptor path
@@ -919,6 +923,7 @@ function AppMain() {
       // Resolvable for roster/name/wardrobe purposes, but never a store card
       // (storeEntries maps AGENTS only).
       [GENERIC_MALE_AGENT.agentId]: GENERIC_MALE_AGENT,
+      [UNIFIED_AGENT.agentId]: UNIFIED_AGENT,
     }),
     [],
   );
@@ -973,6 +978,23 @@ function AppMain() {
     ? null
     : agentStack.find((i) => i.id === selectedInstanceId) ?? agentStack[0];
   const activeAgentId = currentInstance?.agentId ?? null;
+
+  // Placed after currentInstance is declared, deliberately: the dependency
+  // array is evaluated during render, so an earlier position is a temporal
+  // dead zone at runtime even though tsc stays quiet about it.
+  useEffect(() => {
+    if (!customizationActive) return;
+    const id = currentInstance?.identity?.sessionId
+      ?? currentInstance?.identity?.dnaPath?.split('/Identity/')[1]?.split('/')[0];
+    const api = window.electronAPI?.identity;
+    if (!id || !api?.listBasecolors) { setSkins([]); return; }
+    let alive = true;
+    void api.listBasecolors({ localId: id }).then((r) => {
+      if (alive) setSkins(r?.skins ?? []);
+    }).catch(() => { /* the picker just stays empty */ });
+    return () => { alive = false; };
+  }, [customizationActive, currentInstance?.identity?.dnaPath, currentInstance?.identity?.sessionId]);
+
   const activeInstanceName = currentInstance?.name?.trim() || null;
 
   // persona = AI voice + chat memory. Falls back to Grace for characters with
@@ -986,6 +1008,11 @@ function AppMain() {
   // the display name. A renamed instance keeps the type's persona + voice; only
   // the name is swapped. Unknown id (Add slot) -> Grace.
   const persona = characterFor(activeAgentId, personaCustomName);
+  // Voice follows the photo-read gender for generated characters: feminine ->
+  // Grace's voice, masculine -> Mark's. Preset agents have no identity gender,
+  // so they keep their own.
+  const personaVoices = voicesForInstance(
+    activeAgentId, currentInstance?.identity?.gender ?? null, personaCustomName);
   // Chat history is keyed by the ROSTER INSTANCE, not the persona — so two
   // Marks, a renamed Ava, and base Grace each remember independently (persona
   // collapses every non-Grace/Mark character onto Grace, which would otherwise
@@ -2237,7 +2264,7 @@ function AppMain() {
       try {
         for await (const chunk of streamChatViaSoul(trimmed, {
           systemExtension: systemExt,
-          voices: persona.voices,
+          voices: personaVoices,
           history,
           signal: ac.signal,
         })) {
@@ -2302,7 +2329,7 @@ function AppMain() {
         if (escalationFallback) {
           const fallback = await chatViaSoul(trimmed, {
             systemExtension: systemExt,
-            voices: persona.voices,
+            voices: personaVoices,
             history,
             images: pendingImages.map((img) => img.base64),
           });
@@ -2358,7 +2385,7 @@ function AppMain() {
     try {
       const result = await chatViaSoul(trimmed, {
         systemExtension: systemExt,
-        voices: persona.voices,
+        voices: personaVoices,
         history,
         images: pendingImages.map((img) => img.base64),
       });
@@ -2803,18 +2830,115 @@ function AppMain() {
   // is renderer-owned state that must be re-asserted after every spawn.
   const emitApplyIdentity = useCallback((inst?: AgentInstance | null) => {
     const identity = inst?.identity;
-    if (!identity?.blobPath || !pixelStreaming) return;
+    // Gate on the DNA, not the blob: the H3D tier produces a .dna + .ujnt and no
+    // blob at all, and gating on blobPath silently dropped those identities.
+    if (!identity?.dnaPath || !pixelStreaming) return;
     pixelStreaming.emitUIInteraction({
       EventType: 'applyIdentity',
-      dnaPath: identity.dnaPath ?? '',
-      blobPath: identity.blobPath,
+      dnaPath: identity.dnaPath,
+      // Superset descriptor: the v1 node reads blobPath, the v2 node reads
+      // jointsPath and ignores the rest, so this is correct either side of the
+      // Blueprint swap.
+      blobPath: identity.blobPath ?? '',
+      jointsPath: identity.jointsPath ?? '',
       baseColorPath: identity.baseColorPath ?? '',
+      normalPath: identity.normalPath ?? '',
+      weight: 1.0,
       Timestamp: new Date().toISOString(),
     });
     console.log('[identity] applyIdentity sent for', inst?.agentId, identity);
   }, [pixelStreaming]);
   const emitApplyIdentityRef = useRef(emitApplyIdentity);
   emitApplyIdentityRef.current = emitApplyIdentity;
+
+  // Vision-read body build -> the unified slider axes. Sent right after the
+  // identity so the body matches the face. Harmless on non-unified hosts: the
+  // subsystem logs "no BodyBlendComponent" and returns false.
+  const emitBodyBlends = useCallback((inst?: AgentInstance | null) => {
+    const build = inst?.identity?.build;
+    const gender = inst?.identity?.gender;
+    if ((!build && !gender) || !pixelStreaming) return;
+
+    // The unified rig exposes 8 body axes and 16 face axes as <Axis>_Lo/_Hi
+    // morph pairs. BodyBlendComponent dispatches a single descriptor to BOTH
+    // meshes (it picks FaceData or BodyData per component), so the face follows
+    // the body automatically and a heavier or more feminine body cannot end up
+    // wearing a head that does not match it.
+    // Shared with the camera correction, deliberately: the framing is computed
+    // from these same numbers, so two copies would silently drift and the face
+    // would sit off-centre for reasons nobody could find.
+    //
+    // Every value is mid-range, never near +/-1. A wrong guess about a stranger
+    // should read as "close enough" rather than as a caricature, and the
+    // extremes belong to the user's sliders.
+    const axes = blendAxesForCamera(gender, build);
+
+    // HEIGHT IS NEVER SENT, on purpose. A Height axis exists on both meshes, but
+    // it is the user's slider: including it here would silently overwrite their
+    // choice on every spawn and every warm reconnect, which is the same re-apply
+    // trap that made the backdrop revert.
+    if (Object.keys(axes).length === 0) return;
+    pixelStreaming.emitUIInteraction({
+      EventType: 'setBlendsUnified',
+      axes,
+      Timestamp: new Date().toISOString(),
+    });
+    console.log('[identity] setBlendsUnified sent for', inst?.agentId, { gender, build, axes });
+  }, [pixelStreaming]);
+
+  const emitBodyBlendsRef = useRef(emitBodyBlends);
+  emitBodyBlendsRef.current = emitBodyBlends;
+
+  // Photo-read hair and eye colour. Sent AFTER the dress chain, never before:
+  // hair colour creates dynamic material instances on the groom components, and
+  // swapping the hairstyle replaces those components and takes the colour with
+  // them. Re-sent on every spawn and reconcile for the same reason the identity
+  // and the environment are, since UE forgets renderer-owned state.
+  const emitAppearanceColors = useCallback((w?: WardrobeSettings | null) => {
+    if (!pixelStreaming || !w) return;
+    if (w.hairColor && (w.hairColor.melanin !== undefined || w.hairColor.redness !== undefined)) {
+      pixelStreaming.emitUIInteraction({
+        EventType: 'changeHairColor',
+        melanin: w.hairColor.melanin,
+        redness: w.hairColor.redness,
+        // Hair and brows only: real lashes stay dark whatever the hair does.
+        targets: ['hair', 'brows'],
+        Timestamp: new Date().toISOString(),
+      });
+      console.log('[appearance] changeHairColor sent', w.hairColor);
+    }
+    if (w.eyeColor?.iris) {
+      pixelStreaming.emitUIInteraction({
+        EventType: 'changeEyeColor',
+        iris: w.eyeColor.iris,
+        Timestamp: new Date().toISOString(),
+      });
+      console.log('[appearance] changeEyeColor sent', w.eyeColor.iris);
+    }
+  }, [pixelStreaming]);
+  const emitAppearanceColorsRef = useRef(emitAppearanceColors);
+  emitAppearanceColorsRef.current = emitAppearanceColors;
+
+  // Log UE's appearance acks. The Blueprint already sends them and nothing was
+  // listening, which is why "hair colour did not apply" could not be pinned to a
+  // side: no ack at all means the descriptor never reached UE, an ack with
+  // failure means it arrived and matched no material.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const onResp = (resp: string) => {
+      try {
+        const m = JSON.parse(resp);
+        if (typeof m?.EventType === 'string'
+            && /^change(Hair|Eye)Color/.test(m.EventType)) {
+          console.log('[appearance] UE ack:', m.EventType, m);
+        }
+      } catch { /* not ours */ }
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ps = pixelStreaming as any;
+    ps.addResponseEventListener?.('unclaw-appearance-ack', onResp);
+    return () => ps.removeResponseEventListener?.('unclaw-appearance-ack');
+  }, [pixelStreaming]);
 
   // Log UE's identityApplied ack (observability only; the apply is UE-side
   // synchronous, nothing downstream blocks on this).
@@ -2948,9 +3072,15 @@ function AppMain() {
   const applyCamera = useCallback((agentIdOverride?: string | null) => {
     if (!pixelStreaming) return;
     const aid = agentIdOverride ?? activeAgentId;
+    // Body shape moves the head: MascFem alone shifts it 12.2 cm end to end, and
+    // the build axes add several more. Without this the face drifts up or down
+    // in frame depending on how the character is built.
+    const axes = blendAxesForCamera(
+      currentInstance?.identity?.gender, currentInstance?.identity?.build,
+    );
     const [x, y, z] = customizationActive
-      ? (customizeCloseUp ? cameraDefaultFor(aid) : cameraCustomize(aid))
-      : cameraForMode(aid, cameraMode);
+      ? (customizeCloseUp ? cameraDefaultFor(aid, axes) : cameraCustomize(aid, axes))
+      : cameraForMode(aid, cameraMode, axes);
     pixelStreaming.emitUIInteraction({
       EventType: 'updateCameraFromLocation',
       'locB.x': round3(x),
@@ -2958,7 +3088,8 @@ function AppMain() {
       'locB.z': round3(z),
       Timestamp: new Date().toISOString(),
     });
-  }, [pixelStreaming, activeAgentId, customizationActive, customizeCloseUp, cameraMode]);
+  }, [pixelStreaming, activeAgentId, customizationActive, customizeCloseUp, cameraMode,
+      currentInstance?.identity?.gender, currentInstance?.identity?.build]);
   const applyCameraRef = useRef(applyCamera);
   applyCameraRef.current = applyCamera;
 
@@ -3099,7 +3230,12 @@ function AppMain() {
       }
       // Stale/racing-signal guard: only dress when the character UE actually
       // spawned (msg.agentId) matches the instance we're targeting.
-      if (inst && typeof msg.agentId === 'string' && msg.agentId && inst.agentId !== msg.agentId) {
+      // Case-insensitive: UE echoes the id it spawned and the casing has not
+      // always matched ours. A mismatch here skips the customization open AND
+      // the whole dress chain, so a stray capital reads as "hair, brows and the
+      // naming screen all silently missing".
+      if (inst && typeof msg.agentId === 'string' && msg.agentId
+          && inst.agentId.toLowerCase() !== msg.agentId.toLowerCase()) {
         return;
       }
       // If this ready signal completes the swap we initiated, the scene half
@@ -3122,10 +3258,22 @@ function AppMain() {
       // UE acks with identityApplied (logged below); the morph/DNA apply is
       // synchronous UE-side so the dress chain can pipeline behind it.
       emitApplyIdentityRef.current?.(inst);
+      emitBodyBlendsRef.current?.(inst);
       // Fresh-generation landing: open the customization UI (name + style)
       // once the newly created custom character is actually on stage.
-      if (customizeOnReadyRef.current && customizeOnReadyRef.current === spawned) {
+      // Case-insensitive for the same reason the guard above is: UE echoes the
+      // id it spawned and the casing has not always matched ours.
+      if (customizeOnReadyRef.current
+          && customizeOnReadyRef.current.toLowerCase() === String(spawned).toLowerCase()) {
         customizeOnReadyRef.current = null;
+        // Celebrate as the customization page arrives with the finished
+        // character. Scoped to a fresh generation only, never an ordinary
+        // switch, so it stays a moment rather than becoming wallpaper.
+        pixelStreaming?.emitUIInteraction({
+          EventType: 'fireworks',
+          Timestamp: new Date().toISOString(),
+        });
+        console.log('[fx] fireworks sent for', spawned);
         openCustomizationRef.current?.();
       }
       // Dress the per-character OUTFIT (clothing/colors/blends) now that the body
@@ -3134,10 +3282,16 @@ function AppMain() {
       // chain. A continued switch reuses its epoch; any other arrival (a swap
       // driven from outside switchUeToAgent, or a stale pending entry) dresses
       // under a fresh epoch.
+      // Hair colour must land AFTER the groom does: it creates dynamic material
+      // instances on the groom components, and swapping the hairstyle replaces
+      // those components, taking the colour with them. Same shape as the groom
+      // race that ate hair descriptors on switch.
       void applyInstanceWardrobe(
         inst?.wardrobe, inst?.agentId,
         continuesSwitch ? { scope: 'outfit', epoch: pending.epoch } : undefined,
-      );
+      ).then(() => {
+        emitAppearanceColorsRef.current?.(inst?.wardrobe);
+      });
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const ps = pixelStreaming as any;
@@ -3300,6 +3454,8 @@ function AppMain() {
         // Identity before outfit, same as the characterReady path: this
         // reconcile lands on an already-live character with no ready signal.
         emitApplyIdentityRef.current?.(inst);
+        emitBodyBlendsRef.current?.(inst);
+        emitAppearanceColorsRef.current?.(inst?.wardrobe);
         void applyInstanceWardrobe(inst.wardrobe, inst.agentId);
         // Re-assert the GLOBAL environment (backdrop color + key light) too.
         // No characterReady fires on this path, so without this the saved
@@ -4071,6 +4227,42 @@ function AppMain() {
           <CustomWardrobe
             key="custom-wardrobe"
             agentId={activeAgentId}
+            skins={skins}
+            activeSkin={currentInstance?.identity?.baseColorPath ?? null}
+            onPickSkin={(pathStr) => {
+              if (!currentInstance) return;
+              setInstanceIdentity(currentInstance.id, {
+                ...(currentInstance.identity ?? {}),
+                baseColorPath: pathStr,
+              });
+              emitApplyIdentityRef.current?.({
+                ...currentInstance,
+                identity: { ...(currentInstance.identity ?? {}), baseColorPath: pathStr },
+              } as typeof currentInstance);
+            }}
+            onRegenSkin={async () => {
+              // The identity's own folder name is its localId, so the new
+              // texture lands beside the .dna it belongs to.
+              const id = currentInstance?.identity?.sessionId
+                ?? currentInstance?.identity?.dnaPath?.split('/Identity/')[1]?.split('/')[0];
+              const api = window.electronAPI?.identity;
+              if (!id || !api?.regenBasecolor) return false;
+              const res = await api.regenBasecolor({ localId: id });
+              if (res.skins) setSkins(res.skins);
+              if (!res.ok || !res.baseColorPath) return false;
+              // Re-send the identity with the new texture. The descriptor is a
+              // superset, so this re-asserts the whole face rather than needing
+              // a basecolor-only path in UE.
+              setInstanceIdentity(currentInstance!.id, {
+                ...(currentInstance!.identity ?? {}),
+                baseColorPath: res.baseColorPath,
+              });
+              emitApplyIdentityRef.current?.({
+                ...currentInstance!,
+                identity: { ...(currentInstance!.identity ?? {}), baseColorPath: res.baseColorPath },
+              } as typeof currentInstance);
+              return true;
+            }}
             initial={{
               ...(currentInstance?.wardrobe ?? {}),
               // Environment (backdrop + light + effect) is GLOBAL: overlay the
@@ -4086,7 +4278,7 @@ function AppMain() {
             bgMode={environment.bgmode}
             onBgMode={(m) => setEnvironment({ bgmode: m })}
             instanceName={currentInstance?.name ?? ''}
-            onRenameInstance={currentInstance?.agentId === 'm_generic' && currentInstance
+            onRenameInstance={currentInstance && IDENTITY_HOSTS.has(currentInstance.agentId)
               ? (name) => renameInstance(currentInstance.id, name)
               : undefined}
           />
@@ -4112,7 +4304,7 @@ function AppMain() {
             onCancel={handleCancelAdd}
             onAddCustom={() => setAddCustomOpen(true)}
             customInstances={agentStack
-              .filter((i) => i.agentId === 'm_generic')
+              .filter((i) => IDENTITY_HOSTS.has(i.agentId))
               .map((i) => ({ instanceId: i.id, name: i.name?.trim() || 'Custom' }))}
             onPickInstance={(instanceId) => selectInstance(instanceId, 1)}
           />
@@ -4126,26 +4318,39 @@ function AppMain() {
             key="add-custom"
             authToken={authToken ?? null}
             onClose={() => setAddCustomOpen(false)}
-            onIdentityReady={({ dnaPath, blobPath, baseColorPath, grooming }) => {
+            onIdentityReady={({ dnaPath, blobPath, baseColorPath, jointsPath, normalPath, grooming }) => {
               // The local pipeline produced the identity artifacts: create the
               // custom instance on the generic host and switch to it. The
               // characterReady handler sends applyIdentity once UE reports the
               // spawn complete (and again on every future reconcile), then
               // lands the user in the customization UI to name + style it.
-              const id = addInstance('m_generic');
-              setInstanceIdentity(id, { dnaPath, blobPath, baseColorPath, gender: grooming?.gender });
+              const id = addInstance(UNIFIED_AGENT.agentId);
+              setInstanceIdentity(id, {
+                dnaPath, blobPath, baseColorPath, jointsPath, normalPath,
+                gender: grooming?.gender, build: grooming?.build,
+              });
               // Vision-picked grooming becomes the instance's starting
               // wardrobe, so the character spawns with hair/brows/lashes
               // matched to the photo instead of the generic's defaults.
               const wardrobe: WardrobeSettings | null = grooming
-                ? { hairIndex: grooming.hairIndex, browIndex: grooming.browIndex, lashIndex: grooming.lashIndex }
+                ? {
+                    hairIndex: grooming.hairIndex,
+                    browIndex: grooming.browIndex,
+                    lashIndex: grooming.lashIndex,
+                    // Colours come from the same photo read. The main process
+                    // resolved the names it picked into material values, so a
+                    // custom character arrives coloured rather than defaulting
+                    // to the base character's hair and eyes.
+                    ...(grooming.hairColorParams ? { hairColor: grooming.hairColorParams } : {}),
+                    ...(grooming.irisVariant ? { eyeColor: { iris: grooming.irisVariant } } : {}),
+                  }
                 : null;
               if (wardrobe) setInstanceWardrobe(id, wardrobe);
               setSelectedInstanceId(id);
               setAddCustomOpen(false);
               setAddPickerOpen(false);
-              customizeOnReadyRef.current = 'm_generic';
-              switchUeToAgent('m_generic', 1, wardrobe);
+              customizeOnReadyRef.current = UNIFIED_AGENT.agentId;
+              switchUeToAgent(UNIFIED_AGENT.agentId, 1, wardrobe);
             }}
           />
         )}

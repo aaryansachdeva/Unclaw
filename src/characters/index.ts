@@ -68,3 +68,23 @@ export function voiceForProvider(
     default: return undefined; // qwen3 / unknown -> let global/default apply
   }
 }
+
+/** TTS voices for a roster INSTANCE, taking the photo-read gender into account.
+ *
+ *  A unified custom character has no profile of its own, so characterFor falls
+ *  through to Grace and every generated character spoke with Grace's voice
+ *  regardless of who the photo showed. Gender is only ever set on instances
+ *  built from a photo, so preset agents are untouched and keep their own voice.
+ *
+ *  Voice only. The persona still resolves through characterFor, so a masculine
+ *  character currently speaks Grace's lines in Mark's voice; giving it Mark's
+ *  persona too is a separate call. */
+export function voicesForInstance(
+  agentId: string | null | undefined,
+  gender: 'm' | 'f' | null | undefined,
+  customName?: string | null,
+): CharacterVoices {
+  if (gender === 'm') return mark.voices;
+  if (gender === 'f') return grace_custom.voices;
+  return characterFor(agentId, customName).voices;
+}
