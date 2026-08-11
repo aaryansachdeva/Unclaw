@@ -1,0 +1,147 @@
+// Direct IOSurface display: Unreal's frame straight onto a CALayer behind the
+// web content, with no encode, no transport and no decode.
+//
+// Opt-in via UNCLAW_DIRECT_SURFACE=1. Off, nothing here runs and the app is
+// byte-for-byte the WebRTC build it is today. That matters more than the
+// feature does: this path depends on Unreal being started as a launchd job
+// (see soul/mac_launchd.py), and on a native addon that has to be compiled for
+// the exact Electron ABI. Any of that missing must cost the acceleration and
+// nothing else.
+//
+// The window has to be created transparent for the layer to be visible, and
+// transparency is not something Electron can toggle later, so `isEnabled()` is
+// read at window-construction time as well as here.
+
+import type { BrowserWindow } from 'electron';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+
+export interface DirectSurfaceStats {
+  connected: boolean;
+  frames: number;
+  gaps: number;
+  fps: number;
+  surfaces: number;
+}
+
+interface Addon {
+  start(handle: Buffer, service: string): boolean;
+  stop(): boolean;
+  stats(): DirectSurfaceStats;
+}
+
+let addon: Addon | null = null;
+let attached = false;
+let poll: NodeJS.Timeout | null = null;
+
+export function isEnabled(): boolean {
+  return process.env.UNCLAW_DIRECT_SURFACE === '1' && process.platform === 'darwin';
+}
+
+/** Resolve the built addon. Absent in a normal checkout until someone runs the
+ *  node-gyp build, which is exactly why this returns null instead of throwing. */
+function load(): Addon | null {
+  if (addon) return addon;
+  const candidates = [
+    path.join(__dirname, '../../electron/native/surface_layer/build/Release/surface_layer.node'),
+    path.join(__dirname, '../native/surface_layer/build/Release/surface_layer.node'),
+    path.join(process.resourcesPath ?? '', 'surface_layer.node'),
+  ];
+  for (const p of candidates) {
+    try {
+      if (p && fs.existsSync(p)) {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        addon = require(p) as Addon;
+        console.log('[direct] addon loaded from', p);
+        return addon;
+      }
+    } catch (e) {
+      console.error('[direct] addon at', p, 'failed to load:', e);
+    }
+  }
+  console.log('[direct] no addon built — staying on the WebRTC path');
+  return null;
+}
+
+/**
+ * Attach the layer to this window and start consuming frames.
+ *
+ * Safe to call when Unreal is not up yet: the XPC connection simply reports no
+ * peer and `connected` stays false, so the renderer keeps showing the WebRTC
+ * video until real frames arrive.
+ */
+export function attach(win: BrowserWindow): boolean {
+  if (!isEnabled() || attached) return false;
+  const a = load();
+  if (!a) return false;
+
+  let handle: Buffer;
+  try {
+    handle = win.getNativeWindowHandle();
+  } catch (e) {
+    console.error('[direct] no native window handle:', e);
+    return false;
+  }
+
+  const service = process.env.UNCLAW_SURFACE_SERVICE || 'com.fotonlabs.unclaw.surface';
+  const ok = a.start(handle, service);
+  console.log('[direct] attach', ok ? 'ok' : 'FAILED', 'service:', service);
+  if (!ok) return false;
+  attached = true;
+
+  // The renderer needs to know when to get out of the way: it hides the video
+  // element and drops its background so the layer underneath shows through.
+  // Polled rather than pushed from native, because a callback into JS from the
+  // XPC queue would need a threadsafe function for no real benefit at 0.5Hz.
+  let lastConnected: boolean | null = null;
+  let missed = 0;
+  poll = setInterval(() => {
+    if (win.isDestroyed()) { detach(); return; }
+    const s = a.stats();
+
+    // Re-attach when the publisher goes away. Unreal restarting invalidates the
+    // XPC connection permanently: the listener it was bound to no longer
+    // exists, so nothing will arrive on it again however long we wait. Without
+    // this the app silently keeps showing the WebRTC video for the rest of the
+    // session after any Unreal restart, which is exactly what a crash-recovery
+    // or a character swap does.
+    if (!s.connected) {
+      missed += 1;
+      if (missed >= 2) {
+        missed = 0;
+        try {
+          a.stop();
+          a.start(win.getNativeWindowHandle(), service);
+        } catch (e) {
+          console.error('[direct] re-attach failed:', e);
+        }
+      }
+    } else {
+      missed = 0;
+    }
+
+    if (s.connected !== lastConnected) {
+      lastConnected = s.connected;
+      console.log('[direct]', s.connected
+        ? `live: ${s.fps.toFixed(1)}fps, ${s.surfaces} surfaces`
+        : 'no publisher — WebRTC still in use');
+    }
+    try {
+      win.webContents.send('direct-surface:status', s);
+    } catch { /* window going away */ }
+  }, 2000);
+
+  return true;
+}
+
+export function stats(): DirectSurfaceStats | null {
+  return addon ? addon.stats() : null;
+}
+
+export function detach(): void {
+  if (poll) { clearInterval(poll); poll = null; }
+  if (addon && attached) {
+    try { addon.stop(); } catch { /* shutting down */ }
+  }
+  attached = false;
+}

@@ -207,11 +207,16 @@ export function clampCustomIndex(cat: CustomCategory, value: number | undefined)
   return Math.max(0, Math.min(max - 1, Math.floor(value)));
 }
 
+/** The photo-identity hosts. Neither carries a `_custom` suffix, because
+ *  neither is a user's character: they are the shipped bodies that a generated
+ *  identity is applied ON TO.
+ *    m_generic - the legacy blob-path host
+ *    unified   - BP_Unified, the DNA-native host (BASE meshes + BodyBlend) */
+export const IDENTITY_HOSTS = new Set(['m_generic', 'unified']);
+
 /** True for the character ids that use this expanded wardrobe. */
 export function isCustomCharacter(agentId: string | null | undefined): boolean {
-  // m_generic is the photo-identity host: a custom-pipeline build whose id
-  // deliberately has no _custom suffix (it is the shipped generic, not a user).
-  return !!agentId && (agentId.endsWith('_custom') || agentId === 'm_generic');
+  return !!agentId && (agentId.endsWith('_custom') || IDENTITY_HOSTS.has(agentId));
 }
 
 // ======================================================================
@@ -345,6 +350,9 @@ const WARDROBE_DEFAULTS: Record<string, WardrobeDefaults> = {
   kevin_custom: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0 },
   // Same male grooming baseline as kevin until the generic gets authored looks.
   m_generic: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0 },
+  // BP_Unified, the DNA-native identity host. Same baseline: the vision
+  // grooming pick overrides these per character anyway.
+  unified: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0 },
 };
 export function wardrobeDefaultsFor(agentId?: string | null): WardrobeDefaults {
   return (agentId && WARDROBE_DEFAULTS[agentId]) || LEGACY_WARDROBE_DEFAULTS;

@@ -21,10 +21,12 @@ import { ClawsIcon } from './ClawsBalance';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
-/** Photo->custom-character capture flow. NOT ship-ready (local-inference dev
- *  path only): the tile renders as "Coming soon" and the flow is unreachable
- *  until this flips. */
-const CUSTOM_CAPTURE_ENABLED = false;
+/** Photo->custom-character capture flow. The inference chain is local-only and
+ *  Mac-dev-only (identityInference.ts spawns python venvs + a headless UE at
+ *  hardcoded absolute paths), so a packaged build cannot run it: the tile stays
+ *  "Coming soon" there. Live in `npm run dev` so the flow is reachable while it
+ *  is being finished. Flip to a literal `true` only once the work is hosted. */
+const CUSTOM_CAPTURE_ENABLED = import.meta.env.DEV;
 
 /** One character row in the store grid, with its ownership + install state. */
 export interface StoreEntry {

@@ -358,6 +358,14 @@ async function runStagePreflight(
 // Stage 2: runtime (Python venv + pip install)
 // ----------------------------------------------------------------------
 
+/** Drop uv's wheel/http cache after a successful install. It only speeds up
+ *  the install that just finished; left in place it permanently costs ~1.5GB
+ *  per user. The managed CPython is NOT here (UV_PYTHON_INSTALL_DIR), so this
+ *  only removes re-downloadable wheels. */
+function clearUvCache(paths: ReturnType<typeof runtimePaths>): void {
+  try { fs.rmSync(path.join(paths.cache, 'uv'), { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
 async function runStageRuntime(
   window: BrowserWindow,
   paths: ReturnType<typeof runtimePaths>,
@@ -452,6 +460,8 @@ async function runStageRuntime(
     ],
     { stream: true, extraEnv: uvEnv, timeoutMs: 2 * 60_000 },
   );
+
+  clearUvCache(paths);
 
   setStage(window, {
     id: 'runtime',
@@ -566,6 +576,7 @@ export async function syncSoulVenv(
   );
   pushLog(window, 'meta',
     `[venv-sync] pip install complete; new sha=${newSha.slice(0, 8)}`);
+  clearUvCache(paths);
   return { ran: true, sha: newSha };
 }
 
@@ -1099,6 +1110,20 @@ export async function quarantineStalePaks(
         console.warn(`[pak] quarantined stale/unverified pak for '${id}' (want ${want}) — will re-download`);
       }
     }
+    // Prune old quarantine. Parked paks exist for post-incident debugging and
+    // as a re-mount source; after 30 days they are dead weight (~150MB each)
+    // that no one returns to, and stale/ otherwise grows forever.
+    try {
+      if (fs.existsSync(staleDir)) {
+        const cutoff = Date.now() - 30 * 24 * 3600 * 1000;
+        for (const f of fs.readdirSync(staleDir)) {
+          const p = path.join(staleDir, f);
+          try {
+            if (fs.statSync(p).mtimeMs < cutoff) fs.rmSync(p, { recursive: true, force: true });
+          } catch { /* skip entry */ }
+        }
+      }
+    } catch { /* best effort */ }
   } catch (err) {
     console.warn(`[pak] quarantine pass failed: ${(err as Error).message}`);
   }
@@ -1177,7 +1202,13 @@ export async function downloadAndExtractCharacterPak(
     containerPak = null;
   }
 
-  return { extractDir: destDir, stagedPak, containerPak };
+  // The extract dir was only a staging area: the canonical pak now lives in
+  // character-paks/ (plus the container copy). Historically this dir was left
+  // behind forever, silently duplicating every installed character on disk
+  // (~150MB each). Nothing reads it after this point.
+  try { fs.rmSync(destDir, { recursive: true, force: true }); } catch { /* best effort */ }
+
+  return { extractDir: stageDir, stagedPak, containerPak };
 }
 
 // ----------------------------------------------------------------------

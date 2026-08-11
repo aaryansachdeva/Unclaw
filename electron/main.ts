@@ -24,7 +24,9 @@ import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPa
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { runLocalIdentityInference, runLocalPhotoInference, type GroomArgs } from './identityInference';
+import { listBasecolors, regenerateBasecolor, runH3DPhotoToCharacter } from './h3dPipeline';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
+import * as directSurface from './directSurface';
 
 // Cap Chromium's GPU memory budget. By default Chromium scales its tile /
 // cache / staging budget to system RAM (generous on a 64GB machine); measured
@@ -439,8 +441,12 @@ function createWindow() {
     // Nudge the lights down + right so they sit comfortably in our chrome
     // rather than hugging the top-left corner.
     trafficLightPosition: { x: 12, y: 12 },
-    transparent: false,
-    backgroundColor: '#050506',
+    // Direct-surface mode composites Unreal's CALayer BEHIND the web content,
+    // so the window has to be transparent or Chromium's background paints over
+    // it. Transparency cannot be toggled after construction, hence the flag is
+    // read here as well as in directSurface.ts. Default is unchanged.
+    transparent: directSurface.isEnabled(),
+    backgroundColor: directSurface.isEnabled() ? '#00000000' : '#050506',
     alwaysOnTop: true,
     resizable: true,
     minimizable: true,
@@ -514,7 +520,20 @@ function createWindow() {
     }
   });
 
+  // Direct-surface path. Attached after the window exists so the native handle
+  // is valid; no-op unless UNCLAW_DIRECT_SURFACE=1 and the addon was built.
+  // Safe before Unreal is up: `connected` simply stays false and the renderer
+  // keeps the WebRTC video until real frames arrive.
+  if (directSurface.isEnabled()) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        directSurface.attach(mainWindow);
+      }
+    });
+  }
+
   mainWindow.on('closed', () => {
+    directSurface.detach();
     mainWindow = null;
   });
 }
@@ -1326,6 +1345,50 @@ ipcMain.handle(
       return { ok: false, error: 'invalid_args' };
     }
     return runLocalPhotoInference(mainWindow, args.localId, args.photoBytes, args.ext, args.groom);
+  },
+);
+
+// H3D tier: photo -> Gemini hair removal -> Rodin bust -> local UE chain ->
+// .dna + .ujnt. Long-running (Rodin plus a headless UE boot), progress arrives
+// on the same identity:progress channel.
+ipcMain.handle(
+  'identity:run-h3d',
+  async (_event, args: {
+    localId: string; photoBytes: Uint8Array; ext: 'jpg' | 'png';
+    catalogs?: { hairs: { index: number; name: string }[]; brows: { index: number; name: string }[]; lashes: { index: number; name: string }[] };
+  }) => {
+    if (!args?.localId || !args?.photoBytes?.length || !['jpg', 'png'].includes(args?.ext)) {
+      return { ok: false, error: 'invalid_args' };
+    }
+    const workDir = path.join(app.getPath('userData'), 'identities', args.localId);
+    return runH3DPhotoToCharacter(mainWindow, {
+      localId: args.localId,
+      photoBytes: args.photoBytes,
+      ext: args.ext,
+      workDir,
+      catalogs: args.catalogs,
+    });
+  },
+);
+
+// Regenerate ONLY the skin texture for an existing character. Seconds and one
+// image call, against a full chain's Rodin credit + headless UE boot.
+ipcMain.handle(
+  'identity:regen-basecolor',
+  async (_event, args: { localId: string }) => {
+    if (!args?.localId) return { ok: false, error: 'invalid_args' };
+    const workDir = path.join(app.getPath('userData'), 'identities', args.localId);
+    return regenerateBasecolor(mainWindow, args.localId, workDir);
+  },
+);
+
+// Every skin generated for a character, so the UI can offer the earlier ones.
+ipcMain.handle(
+  'identity:list-basecolors',
+  async (_event, args: { localId: string }) => {
+    if (!args?.localId) return { ok: false, skins: [] };
+    const workDir = path.join(app.getPath('userData'), 'identities', args.localId);
+    return { ok: true, skins: listBasecolors(args.localId, workDir) };
   },
 );
 

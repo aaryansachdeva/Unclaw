@@ -340,10 +340,44 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ok: boolean; dnaPath?: string; blobPath?: string; baseColorPath?: string;
       grooming?: { gender: 'm' | 'f'; hairIndex: number; browIndex: number; lashIndex: number }; error?: string;
     }> => ipcRenderer.invoke('identity:run-inference-photo', args),
+    /** H3D tier: gen-3D bust -> conform -> rigged character. Minutes, not seconds. */
+    runH3D: (args: {
+      localId: string; photoBytes: Uint8Array; ext: 'jpg' | 'png';
+      catalogs?: { hairs: { index: number; name: string }[]; brows: { index: number; name: string }[]; lashes: { index: number; name: string }[] };
+    }): Promise<{
+      ok: boolean; dnaPath?: string; jointsPath?: string; bustPath?: string; cleanImagePath?: string;
+      baseColorPath?: string; normalPath?: string;
+      grooming?: { gender: 'm' | 'f'; build: 'skinny' | 'fit' | 'fat'; hairIndex: number; browIndex: number; lashIndex: number;
+        hairColor?: string; eyeColor?: string;
+        hairColorParams?: { melanin: number; redness: number }; irisVariant?: string };
+      error?: string;
+    }> => ipcRenderer.invoke('identity:run-h3d', args),
+    /** Re-roll ONLY the skin texture for a character that already exists.
+     *  Seconds, one image call, no Rodin credit and no headless UE boot. */
+    regenBasecolor: (args: { localId: string }): Promise<{
+      ok: boolean; baseColorPath?: string;
+      skins?: Array<{ path: string; label: string }>; error?: string;
+    }> => ipcRenderer.invoke('identity:regen-basecolor', args),
+    /** Every skin generated for this character, oldest first. */
+    listBasecolors: (args: { localId: string }): Promise<{
+      ok: boolean; skins: Array<{ path: string; label: string }>;
+    }> => ipcRenderer.invoke('identity:list-basecolors', args),
     onProgress: (cb: (data: { stage: string; line: string }) => void): (() => void) => {
       const handler = (_evt: IpcRendererEvent, data: { stage: string; line: string }) => cb(data);
       ipcRenderer.on('identity:progress', handler);
       return () => ipcRenderer.removeListener('identity:progress', handler);
+    },
+  },
+
+  /** Direct IOSurface display status. `connected` false means the WebRTC video
+   *  is still what the user is seeing, so the renderer must keep showing it. */
+  directSurface: {
+    onStatus: (cb: (s: { connected: boolean; frames: number; gaps: number;
+                         fps: number; surfaces: number }) => void): (() => void) => {
+      const handler = (_e: IpcRendererEvent, s: { connected: boolean; frames: number;
+        gaps: number; fps: number; surfaces: number }) => cb(s);
+      ipcRenderer.on('direct-surface:status', handler);
+      return () => ipcRenderer.removeListener('direct-surface:status', handler);
     },
   },
 

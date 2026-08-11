@@ -204,6 +204,15 @@ interface ElectronAPI {
       ok: boolean; dnaPath?: string; blobPath?: string; baseColorPath?: string;
       grooming?: { gender: 'm' | 'f'; hairIndex: number; browIndex: number; lashIndex: number }; error?: string;
     }>;
+    runH3D: (args: {
+      localId: string; photoBytes: Uint8Array; ext: 'jpg' | 'png';
+      catalogs?: { hairs: { index: number; name: string }[]; brows: { index: number; name: string }[]; lashes: { index: number; name: string }[] };
+    }) => Promise<{
+      ok: boolean; dnaPath?: string; jointsPath?: string; bustPath?: string; cleanImagePath?: string;
+      baseColorPath?: string; normalPath?: string;
+      grooming?: { gender: 'm' | 'f'; build: 'skinny' | 'fit' | 'fat'; hairIndex: number; browIndex: number; lashIndex: number };
+      error?: string;
+    }>;
     onProgress: (cb: (data: { stage: string; line: string }) => void) => () => void;
   };
   characterStore: {

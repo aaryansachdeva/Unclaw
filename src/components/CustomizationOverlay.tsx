@@ -79,6 +79,54 @@ export const CLOTHING_COLORS: Array<{ label: string; hex: string; r: number; g: 
   { label: 'Plum',     hex: '#593a5b', r: 0.349, g: 0.227, b: 0.357 },
 ];
 
+// Curated hair palette. Unlike the garment colors these are NOT an r/g/b sent
+// to a diffuse slot: hair renders through M_hair_v4, whose colour is physical
+// rather than painted. `melanin` is pigment density (0 platinum, ~0.6 brown,
+// ~0.95 black) and `redness` is the warm axis (0 ash, 0.25 natural, 0.6+
+// ginger). The naturals are reachable with those two alone; the fashion tones
+// at the end need `dyeHex`, a tint overlay, because no melanin/redness pair
+// produces pink or blue. `hex` is only the swatch shown in the UI.
+export const HAIR_COLORS: Array<{
+  label: string; hex: string; melanin: number; redness: number; dyeHex?: string;
+}> = [
+  { label: 'Jet',      hex: '#141110', melanin: 0.97, redness: 0.10 },
+  { label: 'Espresso', hex: '#2b1d15', melanin: 0.84, redness: 0.22 },
+  { label: 'Chestnut', hex: '#4a2c1c', melanin: 0.70, redness: 0.32 },
+  { label: 'Auburn',   hex: '#6d3520', melanin: 0.62, redness: 0.55 },
+  { label: 'Ginger',   hex: '#a4552a', melanin: 0.50, redness: 0.72 },
+  { label: 'Caramel',  hex: '#8a5c32', melanin: 0.56, redness: 0.40 },
+  { label: 'Honey',    hex: '#b98b4e', melanin: 0.44, redness: 0.34 },
+  { label: 'Wheat',    hex: '#d3b384', melanin: 0.36, redness: 0.26 },
+  { label: 'Platinum', hex: '#e8dfcd', melanin: 0.18, redness: 0.10 },
+  { label: 'Ash',      hex: '#9a958c', melanin: 0.36, redness: 0.02 },
+  { label: 'Silver',   hex: '#c3c3c6', melanin: 0.20, redness: 0.00 },
+  // Fashion tones: bleached base plus a dye overlay, which is the only way to
+  // reach hues that pigment cannot produce.
+  { label: 'Rose',     hex: '#c96f86', melanin: 0.20, redness: 0.12, dyeHex: '#c96f86' },
+  { label: 'Violet',   hex: '#8a6bb5', melanin: 0.20, redness: 0.04, dyeHex: '#8a6bb5' },
+  { label: 'Teal',     hex: '#4e9a94', melanin: 0.20, redness: 0.00, dyeHex: '#4e9a94' },
+];
+
+// Eye palette. The iris is a TEXTURE swap, not a tint: the hue parameters are
+// inert while the eye renders from its baked map, and the one live colour
+// parameter (Iris Color Multiply) can only darken. So each entry names a baked
+// iris basecolor, and `iris` IS the asset suffix (T_IrisBC_<iris>).
+//
+// The textures are the character's own baked iris desaturated to luminance and
+// re-tinted at reduced chroma and value, with a floor that keeps the pupil
+// black. Muted on purpose: real irises are far less saturated than a flat tint,
+// and the extremes are for the user to reach, not the default.
+export const EYE_COLORS: Array<{ label: string; hex: string; iris: string }> = [
+  { label: 'Black',      hex: '#2a211a', iris: 'black' },
+  { label: 'Dark brown', hex: '#3b2c1e', iris: 'darkBrown' },
+  { label: 'Brown',      hex: '#4d3823', iris: 'brown' },
+  { label: 'Amber',      hex: '#6b4f27', iris: 'amber' },
+  { label: 'Hazel',      hex: '#5c5433', iris: 'hazel' },
+  { label: 'Green',      hex: '#465440', iris: 'green' },
+  { label: 'Blue',       hex: '#465a6b', iris: 'blue' },
+  { label: 'Grey',       hex: '#555b5e', iris: 'grey' },
+];
+
 // Backdrop palette for SM_HalfSphereBackground. Deliberately NOT the accent
 // set: those are lamp hues meant to light a face, these are deep ambient tones
 // meant to sit behind one. Index 0 (Navy) matches DESIGN.md's "dark navy

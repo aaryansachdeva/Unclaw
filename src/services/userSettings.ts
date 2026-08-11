@@ -141,6 +141,40 @@ export interface WardrobeSettings {
   /** Per-category garment colors. Only the colorable categories
    *  (top/bottom/shoes) appear; absent = palette default. */
   clothingColors?: Partial<Record<'top' | 'bottom' | 'shoes', ClothingColor>>;
+  /** Hair colour. Index into HAIR_COLORS, or a freeform override that wins over
+   *  it (same additive shape as clothingColors, so existing saves still load). */
+  hairColor?: HairColor;
+  /** Eye colour: which iris variant from the MetaHuman library. */
+  eyeColor?: EyeColor;
+  /** The 16 unified blend axes, signed -1..1, sparse (absent = 0 = authored).
+   *  Unified characters only; preset characters have no blend rig. */
+  blendAxes?: Record<string, number>;
+}
+
+/** Hair colour, as the UE `changeHairColor` descriptor understands it.
+ *
+ *  Melanin and redness are the two natural axes (melanin 0 platinum to ~0.95
+ *  black, redness 0 ash to 0.6+ ginger); dye is a tint overlay for fashion
+ *  colours that the naturals cannot reach. A preset supplies all three, and the
+ *  freeform fields let the user push past the presets without a schema change. */
+export interface HairColor {
+  /** Index into HAIR_COLORS. Absent = the character's authored hair colour. */
+  preset?: number;
+  /** Freeform overrides. When present each wins over the preset's value. */
+  melanin?: number;
+  redness?: number;
+  /** '#rrggbb' dye tint. */
+  dyeHex?: string;
+}
+
+/** Eye colour. The iris is a texture swap rather than a tint, so this is a
+ *  choice from the shipped library ('A'..'I') rather than a colour value. */
+export interface EyeColor {
+  /** Iris variant letter. Absent = the character's authored iris. */
+  iris?: string;
+  /** Optional darkening tint over the chosen iris. Multiply only: it can
+   *  deepen a colour but never brighten or shift it. */
+  tintHex?: string;
 }
 
 // ---- Soul (local) ---------------------------------------------------

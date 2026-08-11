@@ -12,6 +12,7 @@
 // a sparse ember shimmer on ~4% of particles.
 
 import { useEffect, useRef } from 'react';
+import { sampleDepth, type DepthMap } from '../vision/faceLandmarks';
 import { Renderer, Program, Geometry, Mesh } from 'ogl';
 
 const VERT = /* glsl */ `
@@ -22,6 +23,7 @@ const VERT = /* glsl */ `
   attribute vec4 aSeed;    // x,y: unit scatter dir · z: 0..1 size/phase · w: 0..1 stagger
 
   uniform float uTime;
+  attribute float aDepth;
   uniform float uProgress; // 0 scattered -> 1 assembled
   uniform vec2  uMouse;    // same uv space as aHome
   uniform float uMouseForce;
@@ -38,6 +40,7 @@ const VERT = /* glsl */ `
   varying float vAlpha;
   varying float vEmber;
   varying float vLift;
+  varying float vRing;
 
   // 2D simplex noise (Ashima / Ian McEwan, MIT) — smooth spatial noise for
   // the orbit-state wander. Nearby particles sample nearby values, so the
@@ -67,14 +70,30 @@ const VERT = /* glsl */ `
   }
 
   void main() {
-    // Per-particle staggered assembly with an ease-out tail.
-    float t = clamp(uProgress * 1.45 - aSeed.w * 0.45, 0.0, 1.0);
+    // The portrait falls in from above, crown first, rather than condensing out
+    // of an even scatter. Arrival reads as something being placed; a scatter
+    // reads as noise settling, which is a weaker first impression of a face.
+    //
+    // aHome is image space with y increasing DOWNWARD, so staggering on aHome.y
+    // lands the top of the head before the chin, and the drop offset is negative
+    // y (above the final position). aSeed adds a little horizontal drift so the
+    // curtain is not a rigid line.
+    float delay = aHome.y * 0.55 + aSeed.w * 0.18;
+    float t = clamp(uProgress * 1.85 - delay, 0.0, 1.0);
     float ease = 1.0 - pow(1.0 - t, 3.0);
 
     // Image-space home mapped into canvas space, aspect preserved (contain).
     vec2 home = aHome * uFitScale + uFitOffset;
-    vec2 scatter = home + aSeed.xy * (0.55 + 0.45 * aSeed.z);
+    vec2 scatter = home + vec2(aSeed.x * 0.05, -(0.85 + 0.45 * aSeed.z));
     vec2 pos = mix(scatter, home, ease);
+
+    // Facial relief. A slow sway displaces particles by their own depth, so the
+    // nose and brow travel further than the cheeks and the portrait reads as a
+    // surface rather than a flat plane. Amplitude stays small on purpose: this
+    // is parallax, not a turntable, and anything larger tears the face apart.
+    float relief = aDepth;
+    vec2 sway = vec2(sin(uTime * 0.34), cos(uTime * 0.27) * 0.45);
+    pos += sway * relief * 0.045 * ease;
 
     // Idle breathing drift, tiny and slow so the portrait holds together.
     float ph = aSeed.z * 6.2831;
@@ -124,8 +143,14 @@ const VERT = /* glsl */ `
     // y is flipped at projection, so +angle spins CLOCKWISE on screen.
     // Radius scattered across a fat annulus + radial shimmer.
     float ang = 6.2831 * fract(r1 + uFlow * (0.8 + 0.5 * r3));
-    float R = 0.14 + 0.16 * r2
-            + 0.014 * sin(uTime * 1.15 + ph * 4.0);
+    // The ring is a TRUE circle in aspect-true space and must never be
+    // stretched. To stay inside a frame of any shape it is scaled by the
+    // NARROW axis: half-width is 0.5*uAspect, half-height 0.5, so the smaller
+    // of the two is the usable radius. A portrait frame simply gets a smaller
+    // circle rather than an squashed one.
+    float fit = min(0.5 * uAspect, 0.5);
+    float R = (0.30 + 0.34 * r2) * fit
+            + 0.014 * sin(uTime * 1.15 + ph * 4.0) * fit;
     vec2 tw = vec2(0.5 * uAspect, 0.5) + vec2(cos(ang), sin(ang)) * R;
     tw += aSeed.xy * 0.010;
     // Simplex wander while orbiting: two decorrelated noise fields sampled at
@@ -135,7 +160,7 @@ const VERT = /* glsl */ `
     vec2 nOff = vec2(snoise(np), snoise(np + vec2(31.4, 17.2)));
     tw += nOff * 0.036 * (0.6 + 0.4 * aSeed.z);
 
-    pos = mix(pos, tw / vec2(uAspect, 1.0), mp);
+    pos = mix(pos, tw / vec2(uAspect, 1.0), mp);  // back to canvas space
     pos.y -= sin(3.14159 * mp) * (0.035 + 0.05 * aSeed.z);
 
     // Mouse repulsion in aspect-true space, gaussian falloff, springy because
@@ -158,6 +183,7 @@ const VERT = /* glsl */ `
     gl_PointSize = size * uDpr;
 
     vColor = aColor;
+    vRing = mp;
     vEmber = emberF;
     vLift = lift;
     float twinkle = 0.82 + 0.18 * sin(uTime * (2.2 + aSeed.z * 2.0) + ph * 3.0);
@@ -176,6 +202,7 @@ const FRAG = /* glsl */ `
   varying float vAlpha;
   varying float vEmber;
   varying float vLift;
+  varying float vRing;
 
   void main() {
     float d = length(gl_PointCoord - 0.5);
@@ -187,6 +214,10 @@ const FRAG = /* glsl */ `
     float pulse = 0.5 + 0.5 * sin(uTime * 1.4);
     float heat = clamp(0.55 * pulse + 0.45 * vLift, 0.0, 1.0);
     vec3 color = mix(vColor, ember, vEmber * heat);
+    // In the ring state the swarm warms toward the Unclaw accent. A TINT, not
+    // a repaint: each particle keeps its own sampled colour and hue relation,
+    // it just leans red. Capped well below 1 so a blue shirt still reads blue.
+    color = mix(color, color * ember * 2.2, vRing * 0.55);
     gl_FragColor = vec4(color, disc * vAlpha);
   }
 `;
@@ -195,13 +226,15 @@ interface Sampled {
   homes: Float32Array;
   colors: Float32Array;
   seeds: Float32Array;
+  /** Per-particle facial relief, 0 flat. All zero when no depth was supplied. */
+  depths: Float32Array;
   count: number;
   aspect: number;
 }
 
 /** Downscale the preview, keep only matte-covered pixels, and pack particle
  *  attributes. Target ~18k particles regardless of source resolution. */
-function sampleParticles(img: HTMLImageElement, matte: HTMLImageElement | null): Sampled | null {
+function sampleParticles(img: HTMLImageElement, matte: HTMLImageElement | null, depth?: DepthMap | null): Sampled | null {
   const aspect = img.naturalWidth / Math.max(1, img.naturalHeight);
   const gridW = Math.round(Math.sqrt(19000 * aspect / 0.45)); // ~45% person coverage guess
   const w = Math.max(64, Math.min(240, gridW));
@@ -226,6 +259,7 @@ function sampleParticles(img: HTMLImageElement, matte: HTMLImageElement | null):
   const homes: number[] = [];
   const colors: number[] = [];
   const seeds: number[] = [];
+  const depths: number[] = [];
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
@@ -238,7 +272,10 @@ function sampleParticles(img: HTMLImageElement, matte: HTMLImageElement | null):
       }
       const jx = (Math.random() - 0.5) * 0.8;
       const jy = (Math.random() - 0.5) * 0.8;
-      homes.push((x + 0.5 + jx) / w, (y + 0.5 + jy) / h);
+      const hx = (x + 0.5 + jx) / w;
+      const hy = (y + 0.5 + jy) / h;
+      homes.push(hx, hy);
+      depths.push(depth ? sampleDepth(depth, hx, hy) : 0);
       // Slight lift so stream-dark photos still glow a little.
       colors.push(
         Math.min(1, (rgb[i] / 255) * 1.08 + 0.02),
@@ -255,6 +292,7 @@ function sampleParticles(img: HTMLImageElement, matte: HTMLImageElement | null):
     homes: new Float32Array(homes),
     colors: new Float32Array(colors),
     seeds: new Float32Array(seeds),
+    depths: new Float32Array(depths),
     count,
     aspect,
   };
@@ -272,14 +310,23 @@ function loadImage(url: string): Promise<HTMLImageElement> {
 export function PersonParticles({
   imageUrl,
   matteUrl,
+  depth,
   style,
 }: {
   imageUrl: string;
   matteUrl: string | null;
+  /** Optional facial relief, 0 flat to 1 nearest. Gives the portrait parallax
+   *  while it waits. Absent is fine: the field just stays flat. */
+  depth?: DepthMap | null;
   style?: React.CSSProperties;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const aspectRef = useRef(3 / 4);
+  // Held in a ref, not a dep: the depth map lands with the same photo it was
+  // read from, and re-running the whole WebGL init when it arrives would
+  // restart the assembly animation the user is already watching.
+  const depthRef = useRef<DepthMap | null>(depth ?? null);
+  depthRef.current = depth ?? null;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -314,7 +361,7 @@ export function PersonParticles({
         matteUrl ? loadImage(matteUrl).catch(() => null) : Promise.resolve(null),
       ]);
       if (dead) return;
-      const sampled = sampleParticles(img, matte);
+      const sampled = sampleParticles(img, matte, depthRef.current);
       if (!sampled) return;
       aspectRef.current = sampled.aspect;
 
@@ -330,6 +377,7 @@ export function PersonParticles({
         aHome: { size: 2, data: sampled.homes },
         aColor: { size: 3, data: sampled.colors },
         aSeed: { size: 4, data: sampled.seeds },
+        aDepth: { size: 1, data: sampled.depths },
       });
       const program = new Program(gl, {
         vertex: VERT,

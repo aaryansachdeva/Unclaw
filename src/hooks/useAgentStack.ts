@@ -30,7 +30,17 @@ export interface AgentInstance {
   /** Photo-identity files (custom characters on the generic host). Re-sent
    *  as an applyIdentity descriptor after every spawn/reconcile of this
    *  instance, exactly like wardrobe. Paths are local absolute paths. */
-  identity?: { dnaPath: string; blobPath: string; baseColorPath?: string; gender?: 'm' | 'f' };
+  identity?: {
+    dnaPath: string; blobPath: string; baseColorPath?: string; gender?: 'm' | 'f';
+    /** MetaHuman Creator's skin-detail normal. Optional: without it the face
+     *  keeps the shipped base normal, which is what every character had before. */
+    normalPath?: string;
+    /** UJNT sidecar (H3D tier). Without it the face applies but the eyes and
+     *  jaw stay at BASE placement, which is the historic misplacement bug. */
+    jointsPath?: string;
+    /** Vision-read body build, replayed as setBlendsUnified axes. */
+    build?: 'skinny' | 'fit' | 'fat';
+  };
 }
 
 function makeId(): string {

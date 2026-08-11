@@ -150,17 +150,48 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
     };
   }, [streamReady]);
 
-  const isConnected = streamReady && canShowStream;
+  // Direct IOSurface mode: Unreal's frames are composited by the window server
+  // on a native layer BEHIND this web content, so the video element and the
+  // opaque backdrop have to get out of the way. Only once real frames are
+  // arriving, though. If the publisher is not up, `connected` stays false and
+  // the ordinary WebRTC video keeps playing, which is what makes this safe to
+  // leave enabled.
+  const [directLive, setDirectLive] = useState(false);
+  useEffect(() => {
+    const api = window.electronAPI?.directSurface;
+    if (!api?.onStatus) return;
+    return api.onStatus((s) => setDirectLive(!!s.connected));
+  }, []);
+
+  // Toggle the page's opaque backgrounds off while the native layer is showing.
+  // Has to reach <html>, not just this component: html/body/#root all carry
+  // --bg-void, and any one of them left opaque hides the layer completely.
+  useEffect(() => {
+    document.documentElement.classList.toggle('direct-surface', directLive);
+    return () => document.documentElement.classList.remove('direct-surface');
+  }, [directLive]);
+
+  const isConnected = (streamReady && canShowStream) || directLive;
 
   return (
-    <div className="absolute inset-0 overflow-hidden" style={{ background: 'var(--bg-void)' }}>
+    <div
+      className="absolute inset-0 overflow-hidden"
+      style={{ background: directLive ? 'transparent' : 'var(--bg-void)' }}
+    >
       {/* Filter definition for the gamut match. Zero-size, never paints. */}
       <svg width="0" height="0" style={{ position: 'absolute' }} aria-hidden="true">
         <filter id="ue-gamut-match" colorInterpolationFilters="linearRGB">
           <feColorMatrix type="matrix" values={GAMUT_MATRIX} />
         </filter>
       </svg>
-      <div ref={videoParentRef} className={`absolute inset-0${gamutOn ? ' stream-gamut-match' : ''}`} />
+      {/* Kept mounted, never unmounted: the PixelStreaming SDK owns the video
+          element inside this node, and tearing it down would drop the peer
+          connection that still carries input and audio. Hidden only. */}
+      <div
+        ref={videoParentRef}
+        className={`absolute inset-0${gamutOn && !directLive ? ' stream-gamut-match' : ''}`}
+        style={directLive ? { visibility: 'hidden' } : undefined}
+      />
 
       {/* Bottom vignette */}
       <AnimatePresence>

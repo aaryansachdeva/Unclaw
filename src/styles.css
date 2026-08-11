@@ -448,3 +448,19 @@ textarea::placeholder {
    `unclaw-ui-hidden` class + the App.tsx/preload/main wiring to revert. */
 .unclaw-ui-hidden > *:not(:first-child) { display: none !important; }
 .unclaw-ui-hidden > *:first-child > *:not(:first-child) { display: none !important; }
+
+/* Direct IOSurface mode: Unreal's frames are composited by the window server on
+   a native layer BEHIND the web contents, so every opaque surface above it has
+   to become transparent or the user sees a black window with working frames
+   hidden underneath. html/body/#root carry --bg-void, and the <video> rule
+   below them paints its own background even while hidden. The class is set on
+   <html> only once real frames are arriving, so the ordinary WebRTC look is
+   untouched. */
+html.direct-surface,
+html.direct-surface body,
+html.direct-surface #root {
+  background: transparent !important;
+}
+html.direct-surface video {
+  background: transparent !important;
+}

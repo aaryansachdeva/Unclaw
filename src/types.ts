@@ -43,3 +43,11 @@ export const AGENTS: Agent[] = [
 // AGENTS: it never appears as a store card; instances are created by the
 // Add-custom capture flow and live only in the roster.
 export const GENERIC_MALE_AGENT: Agent = { id: 100, name: 'Custom', agentId: 'm_generic', custom: true, optimized: true };
+
+// The UNIFIED photo-identity host (BP_Unified / DA_Character_Unified, id
+// "unified"). This is the one the DNA-native path targets: its face is
+// SKM_BASE_FaceMesh, which is the mesh base_face.udvt is baked against, and it
+// carries the BodyBlendComponent that setBlendsUnified drives. m_generic has
+// neither, so an H3D identity sent there applies to the wrong mesh.
+// Same posture as GENERIC_MALE_AGENT: never a store card, roster-only.
+export const UNIFIED_AGENT: Agent = { id: 101, name: 'Custom', agentId: 'unified', custom: true, optimized: true };
