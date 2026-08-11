@@ -15,7 +15,8 @@
             "libraries": [
               "$(SDKROOT)/System/Library/Frameworks/Cocoa.framework",
               "$(SDKROOT)/System/Library/Frameworks/IOSurface.framework",
-              "$(SDKROOT)/System/Library/Frameworks/QuartzCore.framework"
+              "$(SDKROOT)/System/Library/Frameworks/QuartzCore.framework",
+              "$(SDKROOT)/System/Library/Frameworks/Metal.framework"
             ]
           }
         }]
