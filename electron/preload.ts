@@ -372,6 +372,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Direct IOSurface display status. `connected` false means the WebRTC video
    *  is still what the user is seeing, so the renderer must keep showing it. */
   directSurface: {
+    /** '1' native layer, '2' shared-texture canvas, null when off. The
+     *  renderer needs this to decide between hiding its backgrounds (mode 1)
+     *  and showing the stream canvas (mode 2). */
+    mode: process.platform === 'darwin'
+      && (process.env.UNCLAW_DIRECT_SURFACE === '1' || process.env.UNCLAW_DIRECT_SURFACE === '2')
+      ? process.env.UNCLAW_DIRECT_SURFACE
+      : null,
     onStatus: (cb: (s: { connected: boolean; frames: number; gaps: number;
                          fps: number; surfaces: number }) => void): (() => void) => {
       const handler = (_e: IpcRendererEvent, s: { connected: boolean; frames: number;
@@ -410,4 +417,120 @@ interface UpdateSnapshotShape {
   categories: UpdateCategoryProgressShape[];
   restartRequired: boolean;
   fatalError: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Direct surface, mode 2: draw Unreal's frames onto the in-page canvas.
+//
+// The main process imports each IOSurface into Chromium's GPU process and
+// transfers it here; getVideoFrame() yields a real web VideoFrame backed by
+// that GPU texture, and drawImage moves it onto the canvas without the pixels
+// ever visiting the CPU. Because the canvas is ordinary page content, every
+// CSS effect (backdrop-filter included) works over the character again.
+//
+// This lives in the preload rather than the React tree because the electron
+// `sharedTexture` module is only reachable here (the window runs with
+// sandbox: false for exactly this reason, context isolation still on). The
+// preload shares the page's DOM, so it can draw straight onto the canvas that
+// StreamView renders; the two sides rendezvous on the data attribute alone.
+if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { sharedTexture } = require('electron');
+  if (!sharedTexture?.setSharedTextureReceiver) {
+    console.error('[direct-canvas] electron.sharedTexture missing in preload; is the window sandboxed?');
+  } else {
+    let canvas: HTMLCanvasElement | null = null;
+    let ctx: CanvasRenderingContext2D | null = null;
+    let drawn = 0;
+    let dropped = 0;
+
+    // One transferred texture per ring surface, held for the connection's
+    // life; frames are just "surface N updated" pings after that. Mirrors how
+    // mode 1 wraps each surface as a Metal texture exactly once: re-importing
+    // per frame degraded Chromium's view of the surfaces to solid white after
+    // ~a minute even though the sources stayed perfect.
+    const heldTextures = new Map<number, { getVideoFrame(): VideoFrame; release(): void }>();
+
+    sharedTexture.setSharedTextureReceiver(async (data: {
+      importedSharedTexture: { getVideoFrame(): VideoFrame; release(): void };
+    }, meta?: { surfaceId?: number }) => {
+      const sid = meta?.surfaceId;
+      if (typeof sid !== 'number') {
+        // Unknown shape; release rather than leak.
+        data.importedSharedTexture.release();
+        return;
+      }
+      heldTextures.get(sid)?.release();
+      heldTextures.set(sid, data.importedSharedTexture);
+      console.log(`[direct-canvas] surface ${sid} received (${heldTextures.size} held)`);
+    });
+
+    const drawSurface = (sid: number) => {
+      const held = heldTextures.get(sid);
+      if (!held) { dropped++; return; }
+      try {
+        if (!canvas || !canvas.isConnected) {
+          canvas = document.querySelector<HTMLCanvasElement>('canvas[data-direct-canvas]');
+          ctx = canvas
+            ? canvas.getContext('2d', { alpha: false, willReadFrequently: true })
+            : null;
+          if (!canvas || !ctx) { dropped++; return; }
+          // Unreal's backbuffer carries alpha 0: it renders colour and never
+          // writes alpha (WebRTC discarded it at encode, so nothing upstream
+          // cares). Source-over with srcAlpha=0 degenerates to dst = src + dst,
+          // so every draw ADDS the frame to the canvas and the picture
+          // saturates to solid white within four frames. Mode 1 fixed the same
+          // bug with layer.opaque = YES; 'copy' is that fix for canvas:
+          // replace, never blend.
+          ctx.globalCompositeOperation = 'copy';
+        }
+        // EXPERIMENT: no vf.close(). Every lifecycle variant that closed the
+        // frame went solid white from the second draw of a surface onward,
+        // across per-frame and import-once flows and across three canvas
+        // types, while the sources stayed perfect. If frames stay good
+        // without close(), the close is what kills the shared image.
+        const vf = held.getVideoFrame();
+        try {
+          if (canvas.width !== vf.displayWidth || canvas.height !== vf.displayHeight) {
+            canvas.width = vf.displayWidth;
+            canvas.height = vf.displayHeight;
+            // Resizing resets canvas state, including the composite op.
+            ctx!.globalCompositeOperation = 'copy';
+          }
+          ctx!.drawImage(vf, 0, 0);
+        } finally {
+          // Never the culprit (the white was alpha accumulation), and closing
+          // per draw is the leak-free lifecycle.
+          vf.close();
+        }
+        drawn++;
+        if (drawn === 1 || drawn % 1800 === 0) {
+          let centre = 'n/a';
+          try {
+            const cells: string[] = [];
+            for (const fy of [0.2, 0.5, 0.8]) {
+              for (const fx of [0.2, 0.5, 0.8]) {
+                const px = ctx!.getImageData((canvas.width * fx) | 0, (canvas.height * fy) | 0, 1, 1).data;
+                cells.push(`${px[0].toString(16).padStart(2, '0')}${px[1].toString(16).padStart(2, '0')}${px[2].toString(16).padStart(2, '0')}`);
+              }
+            }
+            centre = cells.join(',');
+          } catch { /* diagnostic only */ }
+          console.log(`[direct-canvas] drawn=${drawn} dropped=${dropped} ${canvas.width}x${canvas.height} grid=${centre}`);
+        }
+      } catch (err) {
+        if (dropped++ < 3) console.error('[direct-canvas] draw failed:', err);
+      }
+    };
+
+    ipcRenderer.on('direct-surface:frame', (_e, f: { surfaceId: number }) => {
+      drawSurface(f.surfaceId);
+    });
+    ipcRenderer.on('direct-surface:reset', () => {
+      for (const t of heldTextures.values()) { try { t.release(); } catch { /* gone */ } }
+      heldTextures.clear();
+      console.log('[direct-canvas] reset: released all held textures');
+    });
+    console.log('[direct-canvas] shared texture receiver registered');
+  }
 }

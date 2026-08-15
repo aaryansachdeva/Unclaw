@@ -24,8 +24,19 @@ export interface DirectSurfaceStats {
   surfaces: number;
 }
 
+interface FrameInfo {
+  /** Raw IOSurfaceRef pointer bytes; exactly what Electron's
+   *  sharedTexture.importSharedTexture expects for handle.ioSurface. */
+  ioSurface: Buffer;
+  surfaceId: number;
+  serial: number;
+  width: number;
+  height: number;
+}
+
 interface Addon {
   start(handle: Buffer, service: string): boolean;
+  startFrames(service: string, onFrame: (f: FrameInfo) => void): boolean;
   stop(): boolean;
   stats(): DirectSurfaceStats;
 }
@@ -35,7 +46,20 @@ let attached = false;
 let poll: NodeJS.Timeout | null = null;
 
 export function isEnabled(): boolean {
-  return process.env.UNCLAW_DIRECT_SURFACE === '1' && process.platform === 'darwin';
+  return (process.env.UNCLAW_DIRECT_SURFACE === '1'
+    || process.env.UNCLAW_DIRECT_SURFACE === '2') && process.platform === 'darwin';
+}
+
+/**
+ * '1' — legacy: the addon composites frames itself on a CAMetalLayer beneath a
+ *       transparent window. Chromium never sees the pixels, so CSS
+ *       backdrop-filter cannot blur the character.
+ * '2' — shared texture: each frame's IOSurface is imported into Chromium via
+ *       Electron's sharedTexture API and drawn onto an in-page canvas. One
+ *       compositor, opaque window, every CSS effect works, still zero-copy.
+ */
+export function mode(): '1' | '2' {
+  return process.env.UNCLAW_DIRECT_SURFACE === '2' ? '2' : '1';
 }
 
 /** Resolve the built addon. Absent in a normal checkout until someone runs the
@@ -70,22 +94,107 @@ function load(): Addon | null {
  * peer and `connected` stays false, so the renderer keeps showing the WebRTC
  * video until real frames arrive.
  */
+/**
+ * Mode 2 frame pump. For every frame the addon delivers, import the IOSurface
+ * into Chromium (a GPU-process mailbox registration, no pixel copy) and
+ * transfer it to the renderer, which draws it onto the stream canvas.
+ *
+ * Backpressure: sendSharedTexture is async; while one transfer is in flight,
+ * newer frames are dropped rather than queued. At 24-27fps a queue could only
+ * ever hold stale frames, and the addon already drops at its own end too.
+ */
+function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean {
+  // Lazy require: `sharedTexture` only exists on Electron 37+, and pulling it
+  // unconditionally would crash older runtimes at import time.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { sharedTexture } = require('electron');
+  if (!sharedTexture?.importSharedTexture) {
+    console.error('[direct] mode 2 requested but electron.sharedTexture is unavailable');
+    return false;
+  }
+
+  // One import per ring surface for the life of the connection, exactly like
+  // mode 1 wraps each surface as a Metal texture once. The first cut imported
+  // and transferred EVERY frame (~1600 cycles/min against the same four
+  // IOSurfaces) and Chromium's view of them degraded to solid white after
+  // about a minute while the source surfaces stayed perfect (mode 1 sampler
+  // proved that). Steady state here is: zero imports, zero transfers, one
+  // tiny IPC ping per frame telling the renderer which surface just updated.
+  const importedIds = new Set<number>();
+  const held: { release: () => void }[] = [];
+
+  const ok = a.startFrames(service, (f) => {
+    if (win.isDestroyed()) return;
+    try {
+      if (!importedIds.has(f.surfaceId)) {
+        importedIds.add(f.surfaceId);
+        const imported = sharedTexture.importSharedTexture({
+          textureInfo: {
+            codedSize: { width: f.width, height: f.height },
+            visibleRect: { x: 0, y: 0, width: f.width, height: f.height },
+            pixelFormat: 'bgra',
+            handle: { ioSurface: f.ioSurface },
+          },
+        });
+        // Held for the connection's lifetime: the renderer keeps its
+        // reference too, and release happens for both on stop().
+        held.push(imported);
+        sharedTexture
+          .sendSharedTexture({
+            frame: win.webContents.mainFrame,
+            importedSharedTexture: imported,
+          }, { surfaceId: f.surfaceId, width: f.width, height: f.height })
+          .then(() => {
+            // Only tick AFTER the transfer landed, or the renderer would get
+            // pings for a surface it has not received yet.
+            win.webContents.send('direct-surface:frame', { surfaceId: f.surfaceId, serial: f.serial });
+          })
+          .catch((err: unknown) => {
+            console.error('[direct] sendSharedTexture failed:', err);
+            importedIds.delete(f.surfaceId);
+          });
+        return;
+      }
+      win.webContents.send('direct-surface:frame', { surfaceId: f.surfaceId, serial: f.serial });
+    } catch (err) {
+      console.error('[direct] frame pump error:', err);
+    }
+  });
+
+  if (ok) {
+    framePumpCleanup = () => {
+      win.webContents.send('direct-surface:reset');
+      for (const h of held) { try { h.release(); } catch { /* gone */ } }
+      held.length = 0;
+      importedIds.clear();
+    };
+  }
+  return ok;
+}
+
+let framePumpCleanup: (() => void) | null = null;
+
 export function attach(win: BrowserWindow): boolean {
   if (!isEnabled() || attached) return false;
   const a = load();
   if (!a) return false;
 
-  let handle: Buffer;
-  try {
-    handle = win.getNativeWindowHandle();
-  } catch (e) {
-    console.error('[direct] no native window handle:', e);
-    return false;
-  }
-
   const service = process.env.UNCLAW_SURFACE_SERVICE || 'com.fotonlabs.unclaw.surface';
-  const ok = a.start(handle, service);
-  console.log('[direct] attach', ok ? 'ok' : 'FAILED', 'service:', service);
+
+  let ok: boolean;
+  if (mode() === '2') {
+    ok = startFramePump(a, win, service);
+  } else {
+    let handle: Buffer;
+    try {
+      handle = win.getNativeWindowHandle();
+    } catch (e) {
+      console.error('[direct] no native window handle:', e);
+      return false;
+    }
+    ok = a.start(handle, service);
+  }
+  console.log('[direct] attach', ok ? 'ok' : 'FAILED', 'mode:', mode(), 'service:', service);
   if (!ok) return false;
   attached = true;
 
@@ -111,7 +220,12 @@ export function attach(win: BrowserWindow): boolean {
         missed = 0;
         try {
           a.stop();
-          a.start(win.getNativeWindowHandle(), service);
+          if (mode() === '2') {
+            if (framePumpCleanup) { framePumpCleanup(); framePumpCleanup = null; }
+            startFramePump(a, win, service);
+          } else {
+            a.start(win.getNativeWindowHandle(), service);
+          }
         } catch (e) {
           console.error('[direct] re-attach failed:', e);
         }
@@ -140,6 +254,7 @@ export function stats(): DirectSurfaceStats | null {
 
 export function detach(): void {
   if (poll) { clearInterval(poll); poll = null; }
+  if (framePumpCleanup) { framePumpCleanup(); framePumpCleanup = null; }
   if (addon && attached) {
     try { addon.stop(); } catch { /* shutting down */ }
   }

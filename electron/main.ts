@@ -441,12 +441,15 @@ function createWindow() {
     // Nudge the lights down + right so they sit comfortably in our chrome
     // rather than hugging the top-left corner.
     trafficLightPosition: { x: 12, y: 12 },
-    // Direct-surface mode composites Unreal's CALayer BEHIND the web content,
-    // so the window has to be transparent or Chromium's background paints over
-    // it. Transparency cannot be toggled after construction, hence the flag is
-    // read here as well as in directSurface.ts. Default is unchanged.
-    transparent: directSurface.isEnabled(),
-    backgroundColor: directSurface.isEnabled() ? '#00000000' : '#050506',
+    // Direct-surface mode 1 composites Unreal's CALayer BEHIND the web
+    // content, so the window has to be transparent or Chromium's background
+    // paints over it. Transparency cannot be toggled after construction, hence
+    // the flag is read here as well as in directSurface.ts. Mode 2 draws the
+    // frame INSIDE the page (shared texture -> canvas), so the window stays
+    // opaque and the window server stops alpha-blending the whole surface.
+    transparent: directSurface.isEnabled() && directSurface.mode() === '1',
+    backgroundColor:
+      directSurface.isEnabled() && directSurface.mode() === '1' ? '#00000000' : '#050506',
     alwaysOnTop: true,
     resizable: true,
     minimizable: true,
@@ -474,6 +477,13 @@ function createWindow() {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // Shared-texture mode: the PRELOAD needs `electron.sharedTexture` to
+      // register the frame receiver, and sandboxed preloads only get the
+      // small allowlisted module set (ipcRenderer, contextBridge, ...).
+      // Disabling the sandbox for this window is what exposes it. Context
+      // isolation stays on and nodeIntegration stays off, so page code still
+      // has no Node access; only our own preload gains it.
+      sandbox: !(directSurface.isEnabled() && directSurface.mode() === '2'),
     },
   });
 

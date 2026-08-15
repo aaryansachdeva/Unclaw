@@ -50,6 +50,22 @@ struct State {
   std::atomic<uint64_t> gaps{0};
   uint64_t            lastSerial = 0;
   CFAbsoluteTime      startedAt = 0;
+
+  // Frames mode (shared-texture path): instead of compositing ourselves, each
+  // frame is handed to JS, which imports the IOSurface into Chromium via
+  // Electron's sharedTexture API. No view, no layer, no Metal.
+  bool                framesMode = false;
+  napi_threadsafe_function tsfn = nullptr;
+};
+
+// One delivered frame. Heap-allocated per frame because the threadsafe
+// function hands it across threads; freed in CallJs after conversion.
+struct FrameMsg {
+  void    *surface;   // IOSurfaceRef, retained by g.surfaces for our lifetime
+  uint32_t sid;
+  uint64_t serial;
+  uint32_t width;
+  uint32_t height;
 };
 
 State g;
@@ -59,6 +75,11 @@ void Teardown() {
     xpc_connection_cancel(g.conn);
     g.conn = nullptr;
   }
+  if (g.tsfn) {
+    napi_release_threadsafe_function(g.tsfn, napi_tsfn_release);
+    g.tsfn = nullptr;
+  }
+  g.framesMode = false;
   g.connected.store(false);
   if (g.layer) {
     [g.layer removeFromSuperlayer];
@@ -99,6 +120,33 @@ void OnMessage(xpc_object_t msg) {
   }
 
   id surface = g.surfaces[@(sid)];
+
+  // Frames mode: hand the frame to JS and stop here. The stats bookkeeping
+  // lives on this path too, so directSurface.ts sees identical telemetry in
+  // both modes and its reconnect logic keeps working unchanged.
+  if (g.framesMode) {
+    if (!surface) return;
+    if (g.lastSerial && serial != g.lastSerial + 1) {
+      g.gaps.fetch_add(1);
+    }
+    g.lastSerial = serial;
+    g.frames.fetch_add(1);
+    g.connected.store(true);
+    if (g.tsfn) {
+      IOSurfaceRef surf = (__bridge IOSurfaceRef)surface;
+      FrameMsg *m = new FrameMsg{
+        (void *)surf, sid, serial,
+        (uint32_t)IOSurfaceGetWidth(surf), (uint32_t)IOSurfaceGetHeight(surf),
+      };
+      // Nonblocking: if JS is behind, dropping this frame is strictly better
+      // than queueing a backlog of stale ones.
+      if (napi_call_threadsafe_function(g.tsfn, m, napi_tsfn_nonblocking) != napi_ok) {
+        delete m;
+      }
+    }
+    return;
+  }
+
   if (!surface || !g.layer) {
     return;
   }
@@ -307,6 +355,117 @@ napi_value Start(napi_env env, napi_callback_info info) {
   return out;
 }
 
+// Converts a FrameMsg into the JS callback's argument on the JS thread:
+//   { ioSurface: Buffer(8) /* raw IOSurfaceRef pointer */,
+//     surfaceId, serial, width, height }
+// The Buffer layout matches what Electron's sharedTexture.importSharedTexture
+// expects for handle.ioSurface: the pointer VALUE as bytes, the same
+// convention BrowserWindow.getNativeWindowHandle uses. Chromium CFRetains the
+// surface on import, and we additionally hold it in g.surfaces for the life of
+// the connection, so the pointer can never dangle between here and the import.
+void CallJs(napi_env env, napi_value jsCb, void * /*ctx*/, void *data) {
+  FrameMsg *m = static_cast<FrameMsg *>(data);
+  if (env != nullptr && jsCb != nullptr) {
+    napi_value obj, v, undefined;
+    napi_get_undefined(env, &undefined);
+    napi_create_object(env, &obj);
+
+    void *bufData = nullptr;
+    napi_value buf;
+    if (napi_create_buffer(env, sizeof(void *), &bufData, &buf) == napi_ok) {
+      memcpy(bufData, &m->surface, sizeof(void *));
+      napi_set_named_property(env, obj, "ioSurface", buf);
+    }
+    napi_create_uint32(env, m->sid, &v);
+    napi_set_named_property(env, obj, "surfaceId", v);
+    napi_create_double(env, (double)m->serial, &v);
+    napi_set_named_property(env, obj, "serial", v);
+    napi_create_uint32(env, m->width, &v);
+    napi_set_named_property(env, obj, "width", v);
+    napi_create_uint32(env, m->height, &v);
+    napi_set_named_property(env, obj, "height", v);
+
+    napi_call_function(env, undefined, jsCb, 1, &obj, nullptr);
+  }
+  delete m;
+}
+
+// startFrames(service: string, onFrame: (frame) => void): boolean
+//
+// The shared-texture twin of Start(): same XPC client, same surface cache,
+// same stats, but no view, no layer and no Metal. Compositing belongs to
+// Chromium in this mode, so the addon's whole job is receiving frames and
+// handing IOSurface pointers to JS.
+napi_value StartFrames(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+
+  napi_value out;
+  napi_valuetype cbType = napi_undefined;
+  if (argc >= 2) napi_typeof(env, argv[1], &cbType);
+  if (argc < 2 || cbType != napi_function) {
+    napi_get_boolean(env, false, &out);
+    return out;
+  }
+
+  char serviceBuf[256] = "com.fotonlabs.unclaw.surface";
+  size_t n = 0;
+  napi_get_value_string_utf8(env, argv[0], serviceBuf, sizeof(serviceBuf), &n);
+  NSString *service = [NSString stringWithUTF8String:serviceBuf];
+
+  napi_value name;
+  napi_create_string_utf8(env, "surface_layer_frames", NAPI_AUTO_LENGTH, &name);
+  napi_threadsafe_function tsfn = nullptr;
+  // Queue depth 2: the consumer imports and forwards in well under a frame
+  // interval; anything deeper would only ever hold stale frames.
+  if (napi_create_threadsafe_function(env, argv[1], nullptr, name, 2, 1,
+                                      nullptr, nullptr, nullptr, CallJs,
+                                      &tsfn) != napi_ok) {
+    napi_get_boolean(env, false, &out);
+    return out;
+  }
+  // The tsfn must not keep Electron's event loop alive on quit.
+  napi_unref_threadsafe_function(env, tsfn);
+
+  __block bool ok = false;
+  RunOnMain(^{
+    Teardown();
+
+    g.surfaces = [NSMutableDictionary dictionary];
+    g.startedAt = CFAbsoluteTimeGetCurrent();
+    g.frames = 0;
+    g.gaps = 0;
+
+    g.conn = xpc_connection_create_mach_service([service UTF8String], dispatch_get_main_queue(), 0);
+    if (!g.conn) {
+      Teardown();
+      return;
+    }
+    xpc_connection_set_event_handler(g.conn, ^(xpc_object_t m) { OnMessage(m); });
+    xpc_connection_resume(g.conn);
+
+    xpc_object_t hello = xpc_dictionary_create(nullptr, nullptr, 0);
+    xpc_dictionary_set_string(hello, "op", "attach");
+    xpc_connection_send_message(g.conn, hello);
+
+    // Only adopt the tsfn once the connection is definitely up. The XPC
+    // handler shares the main queue with this block, so no frame can race in
+    // before these two lines run.
+    g.framesMode = true;
+    g.tsfn = tsfn;
+    ok = true;
+  });
+
+  if (!ok) {
+    // The tsfn never made it into g, so Teardown will never release it.
+    napi_release_threadsafe_function(tsfn, napi_tsfn_release);
+  }
+
+  napi_get_boolean(env, ok, &out);
+  return out;
+}
+
 napi_value Stop(napi_env env, napi_callback_info info) {
   RunOnMain(^{ Teardown(); });
   napi_value out;
@@ -337,6 +496,8 @@ napi_value Init(napi_env env, napi_value exports) {
   napi_value fn;
   napi_create_function(env, "start", NAPI_AUTO_LENGTH, Start, nullptr, &fn);
   napi_set_named_property(env, exports, "start", fn);
+  napi_create_function(env, "startFrames", NAPI_AUTO_LENGTH, StartFrames, nullptr, &fn);
+  napi_set_named_property(env, exports, "startFrames", fn);
   napi_create_function(env, "stop", NAPI_AUTO_LENGTH, Stop, nullptr, &fn);
   napi_set_named_property(env, exports, "stop", fn);
   napi_create_function(env, "stats", NAPI_AUTO_LENGTH, Stats, nullptr, &fn);
