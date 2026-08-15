@@ -19,7 +19,7 @@ import path from 'path';
 import fs from 'fs';
 import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
-import { startSoul, stopSoul, restartSoul, getSoulSnapshot, getSoulPorts, writeSoulKeysBridge, clearSoulKeysBridge } from './soulSupervisor';
+import { startSoul, stopSoul, restartSoul, shutdownEverything, getSoulSnapshot, getSoulPorts, writeSoulKeysBridge, clearSoulKeysBridge } from './soulSupervisor';
 import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent, installedPakVersions, quarantineStalePaks } from './setupCoordinator';
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
@@ -450,7 +450,10 @@ function createWindow() {
     transparent: directSurface.isEnabled() && directSurface.mode() === '1',
     backgroundColor:
       directSurface.isEnabled() && directSurface.mode() === '1' ? '#00000000' : '#050506',
-    alwaysOnTop: true,
+    // Opt-in, not default (2026-08-15): the window starts ordinary and the
+    // titlebar pin button raises it. Matches `pinned` initial state in
+    // src/components/Titlebar.tsx.
+    alwaysOnTop: false,
     resizable: true,
     minimizable: true,
     maximizable: false,
@@ -487,16 +490,12 @@ function createWindow() {
     },
   });
 
-  // Always-on-top level: 'floating' (NSFloatingWindowLevel = 3) instead
-  // of 'screen-saver' (level 1000). The screen-saver level promotes the
-  // window into macOS's "accessory" panel category, which auto-hides the
-  // dock icon for the owning app, users had no way to see Unclaw was
-  // running or quit it from the dock. 'floating' keeps the window above
-  // normal app windows (which is the 99% case) while letting the dock
-  // icon stay visible. Trade-off: full-screen video / Screen Sharing can
-  // cover Unclaw briefly; acceptable since the dock-icon affordance is
-  // more important to the daily UX than the rare full-screen scenario.
-  mainWindow.setAlwaysOnTop(true, 'floating');
+  // Always-on-top is user-opt-in via the titlebar pin (window:toggle-pin
+  // below); nothing to set here. When pinned, the level used is 'floating'
+  // (NSFloatingWindowLevel = 3), NOT 'screen-saver' (level 1000): the
+  // screen-saver level promotes the window into macOS's "accessory" panel
+  // category, which auto-hides the dock icon for the owning app, and users
+  // had no way to see Unclaw was running or quit it from the dock.
   // visibleOnAllWorkspaces is mac/linux; harmless on Windows.
   try {
     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
@@ -758,8 +757,9 @@ ipcMain.handle('setup:start', async () => {
 ipcMain.on('window:toggle-pin', (_event, pinned: boolean) => {
   // Same level as the createWindow setup, 'screen-saver' is the
   // highest standard level and survives full-screen apps stealing
-  // focus. When unpinned we drop back to a normal window.
-  mainWindow?.setAlwaysOnTop(pinned, 'screen-saver');
+  // focus. When unpinned we drop back to a normal window. 'floating', not
+  // 'screen-saver': the latter hides the dock icon (see createWindow).
+  mainWindow?.setAlwaysOnTop(pinned, 'floating');
 });
 
 // =====================================================================
@@ -1673,10 +1673,27 @@ app.on('will-quit', () => {
 app.on('window-all-closed', () => {
   // Unclaw is a single-window foreground experience, not a typical
   // Mac menubar/background app. Closing the window means the user is
-  // done, quit the whole app so `will-quit` fires and `stopSoul()`
-  // can SIGTERM the soul subprocess. Without this, on macOS the app
-  // stayed alive with no window and soul + UE leaked across sessions.
+  // done; quit (the before-quit hook below owns the full teardown).
   app.quit();
+});
+
+// Closing the window (or Cmd+Q) means the user is done — with EVERYTHING.
+// stopSoul() alone only reaches the soul child we spawned; an externally
+// attached soul (dev flow) and the launchd-managed UE job survived it, so
+// closing the app left the character engine burning GPU in the background
+// (observed repeatedly, fixed 2026-08-15). shutdownEverything() takes the
+// whole tree down — soul, launchd UE job, wilbur, coturn — bounded to
+// ~1.6s. before-quit rather than will-quit because the sweep is async and
+// will-quit cannot wait; the preventDefault/flag dance runs it exactly once
+// and then resumes the quit.
+let fullShutdownDone = false;
+app.on('before-quit', (event) => {
+  if (fullShutdownDone) return;
+  event.preventDefault();
+  fullShutdownDone = true;
+  void shutdownEverything()
+    .catch(() => { /* quitting regardless */ })
+    .finally(() => app.quit());
 });
 
 app.on('activate', () => {

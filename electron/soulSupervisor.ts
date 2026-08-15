@@ -1079,3 +1079,76 @@ export function stopSoul(): void {
   // doesn't reach it). 10s gives the whole chain room to drain.
   setTimeout(() => killGroup('SIGKILL'), 10000);
 }
+
+/**
+ * Closing the window means the user is DONE: soul, the launchd-managed UE
+ * job, coturn, wilbur — everything goes, including a soul that was attached
+ * externally (the dev flow), which stopSoul() deliberately leaves alone.
+ * Added 2026-08-15 after closing the app repeatedly left soul + a
+ * "self-respawning" UE running (soul's supervisor respawns UE, so killing
+ * UE alone looked haunted; soul dies first here).
+ *
+ * The one guard that stays: if ANOTHER Unclaw instance is alive (packaged
+ * app + dev checkout side by side), its processes share every name pattern
+ * with ours, so we only take down our own child tree and the shared launchd
+ * job is left for the sibling. Bounded to ~1.6s so the close feels instant.
+ */
+export async function shutdownEverything(): Promise<void> {
+  stopSoul(); // owned child tree + intentionalStop latch, all platforms
+  if (IS_WINDOWS) return; // launchd/coturn are darwin concepts; taskkill /T covered the tree
+
+  const psOutput = await new Promise<string>((resolve) => {
+    execFile('/bin/ps', ['-A', '-o', 'pid=,command='], (err, stdout) =>
+      resolve(err ? '' : stdout));
+  });
+  if (!psOutput) return;
+
+  const foreignInstanceLive = psOutput.split('\n').some((line) => {
+    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m) return false;
+    const pid = parseInt(m[1], 10);
+    const cmd = m[2];
+    return pid !== process.pid &&
+      !cmd.includes('--type=') &&
+      (/Electron\.app\/Contents\/MacOS\/Electron(?:\s|$)/.test(cmd) ||
+        /\.app\/Contents\/MacOS\/Unclaw(?:\s|$)/.test(cmd));
+  });
+  if (foreignInstanceLive) return; // sibling owns lookalike processes; only our tree dies
+
+  // The launchd job is the authoritative kill for UE: it terminates the
+  // process AND unloads the job so nothing can resurrect it.
+  execFile('/bin/launchctl',
+    ['bootout', `gui/${process.getuid()}/com.fotonlabs.unclaw.unreal`],
+    () => { /* "no such service" when UE is not up, fine */ });
+
+  // Everything positively identifiable as ours, regardless of who spawned
+  // it. Dev UE bundles (AudioTestProject02*.app binaries) are included; the
+  // editor is NOT matched (UnrealEditor.app binary, project passed as an
+  // argument has no ".app" suffix without a slash after the name).
+  const patterns = [
+    /run_soul\.sh\b/,
+    /\bsoul\.cli\b/,
+    /\bsoul\.server\b/,
+    /\bwilbur\b/,
+    /Unclaw Character\.app/,
+    /AudioTestProject02[^/]*\.app/,
+    /coturn.*unclaw|unclaw.*coturn/i,
+  ];
+  const victims: number[] = [];
+  for (const line of psOutput.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = parseInt(m[1], 10);
+    if (pid === process.pid) continue;
+    if (patterns.some((re) => re.test(m[2]))) victims.push(pid);
+  }
+  for (const pid of victims) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+  }
+  if (victims.length) {
+    await new Promise((r) => setTimeout(r, 1500));
+    for (const pid of victims) {
+      try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+    }
+  }
+}
