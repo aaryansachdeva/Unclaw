@@ -55,8 +55,10 @@ export function isEnabled(): boolean {
  *       transparent window. Chromium never sees the pixels, so CSS
  *       backdrop-filter cannot blur the character.
  * '2' — shared texture: each frame's IOSurface is imported into Chromium via
- *       Electron's sharedTexture API and drawn onto an in-page canvas. One
- *       compositor, opaque window, every CSS effect works, still zero-copy.
+ *       Electron's sharedTexture API and shown as in-page content (a <video>
+ *       fed by a MediaStreamTrackGenerator by default; WebGPU/canvas
+ *       fallbacks live in the preload). One compositor, opaque window, every
+ *       CSS effect works, still zero-copy.
  */
 export function mode(): '1' | '2' {
   return process.env.UNCLAW_DIRECT_SURFACE === '2' ? '2' : '1';

@@ -540,6 +540,12 @@ function createWindow() {
         directSurface.attach(mainWindow);
       }
     });
+    // The preload's draw loop logs its health grid to the renderer console,
+    // which no log file ever sees; mirror just those lines to stdout so a
+    // headless check can tell a live picture from a solid-white one.
+    mainWindow.webContents.on('console-message', (_e, _level, message) => {
+      if (message.includes('[direct-canvas]')) console.log(message);
+    });
   }
 
   mainWindow.on('closed', () => {

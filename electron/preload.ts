@@ -424,9 +424,17 @@ interface UpdateSnapshotShape {
 //
 // The main process imports each IOSurface into Chromium's GPU process and
 // transfers it here; getVideoFrame() yields a real web VideoFrame backed by
-// that GPU texture, and drawImage moves it onto the canvas without the pixels
-// ever visiting the CPU. Because the canvas is ordinary page content, every
-// CSS effect (backdrop-filter included) works over the character again.
+// that GPU texture. A WebGPU render pass samples it as an external texture
+// straight onto the canvas: no raster work, no copy, the pixels never visit
+// the CPU. Because the canvas is ordinary page content, every CSS effect
+// (backdrop-filter included) works over the character again.
+//
+// Canvas 2D drawImage was the first implementation and measured ~22.5% app
+// CPU against mode 1's 11.4%: Skia routes VideoFrame draws through its
+// general 2D raster pipeline. importExternalTexture is the WebCodecs-blessed
+// zero-copy path (webcodecsfundamentals.org benchmarks it fastest by a wide
+// margin), so 2D survives below only as the fallback when WebGPU is missing
+// or the device is lost.
 //
 // This lives in the preload rather than the React tree because the electron
 // `sharedTexture` module is only reachable here (the window runs with
@@ -443,6 +451,78 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
     let ctx: CanvasRenderingContext2D | null = null;
     let drawn = 0;
     let dropped = 0;
+
+    // Render-path selector. 'video' (default) pipes the frames into a
+    // MediaStreamTrackGenerator feeding a <video> element, which rides
+    // Chromium's dedicated video frame-submission path: no paint, video
+    // power optimisations. 'gpu' draws via a WebGPU external-texture pass
+    // instead. Both are zero-copy; measured 2026-08-15 at native res, same
+    // scene: video 19.0% app CPU, webgpu 21.9%, canvas-2d 22.5%. Failures
+    // cascade video -> gpu -> 2d, all landing on the same canvas element.
+    let renderVia: 'gpu' | 'video' = process.env.UNCLAW_DIRECT_RENDER === 'gpu' ? 'gpu' : 'video';
+    let videoStrikes = 0;
+
+    // WebGPU state. The device/pipeline need no canvas, so they initialise
+    // eagerly; the canvas context is configured on first draw. gpuFailed
+    // flips the whole path over to the 2D fallback permanently.
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    let gpuReady: { device: any; pipeline: any; sampler: any } | null = null;
+    let gpuFailed = false;
+    let gpuStrikes = 0;
+    let gpuCtx: any = null;
+    let readback: any = null;
+    let readbackBusy = false;
+
+    // Fullscreen triangle sampling the frame as an external texture. Alpha is
+    // forced to 1 in the shader AND the canvas is configured opaque: Unreal's
+    // backbuffer carries alpha 0 (see the 2D path's 'copy' saga) and nothing
+    // downstream may ever blend with it.
+    const WGSL = `
+      struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+      @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+        var p = array(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+        var o: VSOut;
+        o.pos = vec4f(p[i], 0.0, 1.0);
+        o.uv = vec2f(p[i].x * 0.5 + 0.5, 1.0 - (p[i].y * 0.5 + 0.5));
+        return o;
+      }
+      @group(0) @binding(0) var t: texture_external;
+      @group(0) @binding(1) var s: sampler;
+      @fragment fn fs(v: VSOut) -> @location(0) vec4f {
+        return vec4f(textureSampleBaseClampToEdge(t, s, v.uv).rgb, 1.0);
+      }
+    `;
+
+    (async () => {
+      // Initialised even when the video path is primary: an idle device costs
+      // nothing and it is the first fallback if the generator path dies.
+      try {
+        const g = (navigator as any).gpu;
+        if (!g) throw new Error('navigator.gpu unavailable');
+        const adapter = await g.requestAdapter();
+        if (!adapter) throw new Error('requestAdapter returned null');
+        const device = await adapter.requestDevice();
+        device.lost.then((info: any) => {
+          console.error('[direct-canvas] WebGPU device lost:', info?.message);
+          gpuReady = null;
+          gpuCtx = null;
+          gpuFailed = true;
+        });
+        const module = device.createShaderModule({ code: WGSL });
+        const pipeline = device.createRenderPipeline({
+          layout: 'auto',
+          vertex: { module, entryPoint: 'vs' },
+          fragment: { module, entryPoint: 'fs', targets: [{ format: g.getPreferredCanvasFormat() }] },
+          primitive: { topology: 'triangle-list' },
+        });
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+        gpuReady = { device, pipeline, sampler };
+        console.log('[direct-canvas] WebGPU pipeline ready');
+      } catch (e) {
+        gpuFailed = true;
+        console.error('[direct-canvas] WebGPU unavailable, using 2D fallback:', e);
+      }
+    })();
 
     // One transferred texture per ring surface, held for the connection's
     // life; frames are just "surface N updated" pings after that. Mirrors how
@@ -465,61 +545,253 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
       console.log(`[direct-canvas] surface ${sid} received (${heldTextures.size} held)`);
     });
 
-    const drawSurface = (sid: number) => {
-      const held = heldTextures.get(sid);
-      if (!held) { dropped++; return; }
-      try {
-        if (!canvas || !canvas.isConnected) {
-          canvas = document.querySelector<HTMLCanvasElement>('canvas[data-direct-canvas]');
-          ctx = canvas
-            ? canvas.getContext('2d', { alpha: false, willReadFrequently: true })
-            : null;
-          if (!canvas || !ctx) { dropped++; return; }
-          // Unreal's backbuffer carries alpha 0: it renders colour and never
-          // writes alpha (WebRTC discarded it at encode, so nothing upstream
-          // cares). Source-over with srcAlpha=0 degenerates to dst = src + dst,
-          // so every draw ADDS the frame to the canvas and the picture
-          // saturates to solid white within four frames. Mode 1 fixed the same
-          // bug with layer.opaque = YES; 'copy' is that fix for canvas:
-          // replace, never blend.
-          ctx.globalCompositeOperation = 'copy';
+    // Primary path. Bind group and external texture are per-frame by spec
+    // (external textures expire with their VideoFrame); both are trivially
+    // cheap. The once-a-minute health grid is a GPU readback via
+    // copyTextureToBuffer, since a webgpu canvas has no getImageData.
+    const drawWebGpu = (vf: VideoFrame): void => {
+      const g = gpuReady!;
+      if (!gpuCtx) {
+        gpuCtx = (canvas as any).getContext('webgpu');
+        if (!gpuCtx) throw new Error('webgpu context unavailable (canvas already 2d?)');
+        gpuCtx.configure({
+          device: g.device,
+          format: (navigator as any).gpu.getPreferredCanvasFormat(),
+          alphaMode: 'opaque',
+          usage: 0x10 | 0x01, // RENDER_ATTACHMENT | COPY_SRC (health grid)
+        });
+      }
+      if (canvas!.width !== vf.displayWidth || canvas!.height !== vf.displayHeight) {
+        canvas!.width = vf.displayWidth;
+        canvas!.height = vf.displayHeight;
+      }
+      const ext = g.device.importExternalTexture({ source: vf });
+      const bind = g.device.createBindGroup({
+        layout: g.pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: ext },
+          { binding: 1, resource: g.sampler },
+        ],
+      });
+      const enc = g.device.createCommandEncoder();
+      const tex = gpuCtx.getCurrentTexture();
+      const pass = enc.beginRenderPass({
+        colorAttachments: [{
+          view: tex.createView(),
+          loadOp: 'clear',
+          storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+      });
+      pass.setPipeline(g.pipeline);
+      pass.setBindGroup(0, bind);
+      pass.draw(3);
+      pass.end();
+
+      const sampling = (drawn === 0 || (drawn + 1) % 1800 === 0) && !readbackBusy;
+      if (sampling) {
+        if (!readback) {
+          readback = g.device.createBuffer({ size: 9 * 256, usage: 0x0001 | 0x0008 }); // MAP_READ | COPY_DST
         }
-        // EXPERIMENT: no vf.close(). Every lifecycle variant that closed the
-        // frame went solid white from the second draw of a surface onward,
-        // across per-frame and import-once flows and across three canvas
-        // types, while the sources stayed perfect. If frames stay good
-        // without close(), the close is what kills the shared image.
-        const vf = held.getVideoFrame();
-        try {
-          if (canvas.width !== vf.displayWidth || canvas.height !== vf.displayHeight) {
-            canvas.width = vf.displayWidth;
-            canvas.height = vf.displayHeight;
-            // Resizing resets canvas state, including the composite op.
-            ctx!.globalCompositeOperation = 'copy';
+        let i = 0;
+        for (const fy of [0.2, 0.5, 0.8]) {
+          for (const fx of [0.2, 0.5, 0.8]) {
+            enc.copyTextureToBuffer(
+              { texture: tex, origin: { x: (canvas!.width * fx) | 0, y: (canvas!.height * fy) | 0 } },
+              { buffer: readback, offset: i++ * 256 },
+              { width: 1, height: 1 },
+            );
           }
-          ctx!.drawImage(vf, 0, 0);
-        } finally {
-          // Never the culprit (the white was alpha accumulation), and closing
-          // per draw is the leak-free lifecycle.
-          vf.close();
         }
-        drawn++;
-        if (drawn === 1 || drawn % 1800 === 0) {
-          let centre = 'n/a';
+      }
+      g.device.queue.submit([enc.finish()]);
+      if (sampling) {
+        readbackBusy = true;
+        const atDraw = drawn + 1;
+        const w = canvas!.width; const h = canvas!.height;
+        readback.mapAsync(0x0001 /* READ */).then(() => {
+          // Canvas format on macOS is bgra8unorm.
+          const bytes = new Uint8Array(readback.getMappedRange());
+          const cells: string[] = [];
+          for (let j = 0; j < 9; j++) {
+            const o = j * 256;
+            cells.push(`${bytes[o + 2].toString(16).padStart(2, '0')}${bytes[o + 1].toString(16).padStart(2, '0')}${bytes[o].toString(16).padStart(2, '0')}`);
+          }
+          readback.unmap();
+          console.log(`[direct-canvas] drawn=${atDraw} dropped=${dropped} ${w}x${h} grid=${cells.join(',')} (webgpu)`);
+        }).catch(() => { /* diagnostic only */ }).finally(() => { readbackBusy = false; });
+      }
+    };
+
+    // Fallback path: canvas 2D with 'copy'. Unreal's backbuffer carries alpha
+    // 0 (WebRTC discarded it at encode, so nothing upstream cares); with
+    // source-over that degenerates to dst = src + dst and the picture
+    // saturates to solid white within four frames. 'copy' replaces, never
+    // blends: the same fix mode 1 makes with layer.opaque = YES.
+    const draw2d = (vf: VideoFrame): void => {
+      if (!ctx) {
+        ctx = canvas!.getContext('2d', { alpha: false });
+        if (!ctx) throw new Error('2d context unavailable');
+        ctx.globalCompositeOperation = 'copy';
+      }
+      if (canvas!.width !== vf.displayWidth || canvas!.height !== vf.displayHeight) {
+        canvas!.width = vf.displayWidth;
+        canvas!.height = vf.displayHeight;
+        // Resizing resets canvas state, including the composite op.
+        ctx.globalCompositeOperation = 'copy';
+      }
+      ctx.drawImage(vf, 0, 0);
+      if (drawn === 0 || (drawn + 1) % 1800 === 0) {
+        let grid = 'n/a';
+        try {
+          const cells: string[] = [];
+          for (const fy of [0.2, 0.5, 0.8]) {
+            for (const fx of [0.2, 0.5, 0.8]) {
+              const px = ctx.getImageData((canvas!.width * fx) | 0, (canvas!.height * fy) | 0, 1, 1).data;
+              cells.push(`${px[0].toString(16).padStart(2, '0')}${px[1].toString(16).padStart(2, '0')}${px[2].toString(16).padStart(2, '0')}`);
+            }
+          }
+          grid = cells.join(',');
+        } catch { /* diagnostic only */ }
+        console.log(`[direct-canvas] drawn=${drawn + 1} dropped=${dropped} ${canvas!.width}x${canvas!.height} grid=${grid} (2d)`);
+      }
+    };
+
+    // 'video' path: hand each frame to a MediaStreamTrackGenerator whose
+    // track feeds a <video> element injected beside the canvas. Ownership of
+    // the VideoFrame transfers to the sink on write, so the caller must NOT
+    // close a frame this function accepted. Visibility mirrors the canvas so
+    // StreamView's directLive toggle keeps working untouched.
+    let gen: any = null;
+    let genWriter: any = null;
+    let videoEl: HTMLVideoElement | null = null;
+    let diag: HTMLCanvasElement | null = null;
+
+    const drawVideo = (vf: VideoFrame): void => {
+      const MSTG = (window as any).MediaStreamTrackGenerator;
+      if (!MSTG) throw new Error('MediaStreamTrackGenerator unavailable');
+      if (!gen) {
+        gen = new MSTG({ kind: 'video' });
+        genWriter = gen.writable.getWriter();
+      }
+      if (!videoEl || !videoEl.isConnected) {
+        videoEl = document.createElement('video');
+        videoEl.muted = true;
+        videoEl.autoplay = true;
+        videoEl.setAttribute('playsinline', '');
+        videoEl.dataset.directVideo = '1';
+        videoEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;';
+        canvas!.style.display = 'none';
+        canvas!.parentElement!.insertBefore(videoEl, canvas!);
+        videoEl.srcObject = new MediaStream([gen]);
+        videoEl.play().catch(() => { /* muted autoplay is allowed */ });
+      }
+      videoEl.style.visibility = canvas!.style.visibility;
+      // Unreal's backbuffer carries alpha 0 and, unlike the canvas paths, the
+      // video pipeline honours it: raw frames display as pure black. The
+      // clone-with-discard marks the frame opaque (metadata, not pixels).
+      let out: VideoFrame = vf;
+      let wrapped = false;
+      try {
+        out = new VideoFrame(vf, { alpha: 'discard' } as VideoFrameInit);
+        wrapped = true;
+      } catch { /* older runtime: send the raw frame and hope */ }
+      genWriter.write(out).catch((e: unknown) => {
+        if (dropped++ < 3) console.error('[direct-canvas] generator write failed:', e);
+      });
+      if (wrapped) vf.close();
+      const n = drawn + 1;
+      if (n === 1 || n % 1800 === 0) {
+        // Health grid: the frame reaches the element asynchronously, so
+        // sample it a beat later by drawing the element into a scratch 2D
+        // canvas (a video element has no getImageData of its own).
+        setTimeout(() => {
           try {
+            if (!videoEl || !videoEl.videoWidth) {
+              console.log(`[direct-canvas] drawn=${n} dropped=${dropped} NO PICTURE: videoWidth=${videoEl?.videoWidth ?? -1} readyState=${videoEl?.readyState ?? -1} track=${gen?.readyState} (video)`);
+              return;
+            }
+            if (!diag) diag = document.createElement('canvas');
+            diag.width = videoEl.videoWidth;
+            diag.height = videoEl.videoHeight;
+            const dctx = diag.getContext('2d', { willReadFrequently: true })!;
+            dctx.drawImage(videoEl, 0, 0);
             const cells: string[] = [];
             for (const fy of [0.2, 0.5, 0.8]) {
               for (const fx of [0.2, 0.5, 0.8]) {
-                const px = ctx!.getImageData((canvas.width * fx) | 0, (canvas.height * fy) | 0, 1, 1).data;
+                const px = dctx.getImageData((diag.width * fx) | 0, (diag.height * fy) | 0, 1, 1).data;
                 cells.push(`${px[0].toString(16).padStart(2, '0')}${px[1].toString(16).padStart(2, '0')}${px[2].toString(16).padStart(2, '0')}`);
               }
             }
-            centre = cells.join(',');
+            console.log(`[direct-canvas] drawn=${n} dropped=${dropped} ${diag.width}x${diag.height} grid=${cells.join(',')} (video)`);
           } catch { /* diagnostic only */ }
-          console.log(`[direct-canvas] drawn=${drawn} dropped=${dropped} ${canvas.width}x${canvas.height} grid=${centre}`);
+        }, 500);
+      }
+    };
+
+    const drawSurface = (sid: number) => {
+      const held = heldTextures.get(sid);
+      if (!held) { dropped++; return; }
+      if (!canvas || !canvas.isConnected) {
+        canvas = document.querySelector<HTMLCanvasElement>('canvas[data-direct-canvas]');
+        // A canvas can only ever hold one context type, so a remount resets
+        // both context handles.
+        gpuCtx = null;
+        ctx = null;
+        if (!canvas) { dropped++; return; }
+      }
+      let vf: VideoFrame;
+      try {
+        vf = held.getVideoFrame();
+      } catch (err) {
+        if (dropped++ < 3) console.error('[direct-canvas] getVideoFrame failed:', err);
+        return;
+      }
+      if (renderVia === 'video') {
+        try {
+          drawVideo(vf); // ownership transferred; the sink closes the frame
+          videoStrikes = 0;
+          drawn++;
+        } catch (err) {
+          vf.close();
+          if (++videoStrikes >= 3) {
+            renderVia = 'gpu';
+            if (videoEl) { videoEl.remove(); videoEl = null; }
+            if (canvas) canvas.style.display = '';
+            console.error('[direct-canvas] video path failed 3x, falling back to canvas:', err);
+          } else if (dropped++ < 6) {
+            console.error('[direct-canvas] video path failed:', err);
+          }
         }
+        return;
+      }
+      try {
+        if (gpuReady && !gpuFailed) {
+          try {
+            drawWebGpu(vf);
+            gpuStrikes = 0;
+            drawn++;
+            return;
+          } catch (err) {
+            gpuCtx = null;
+            if (++gpuStrikes >= 3) {
+              gpuFailed = true;
+              console.error('[direct-canvas] WebGPU draw failed 3x, switching to 2D fallback:', err);
+            } else {
+              if (dropped++ < 6) console.error('[direct-canvas] WebGPU draw failed:', err);
+              return;
+            }
+          }
+        }
+        if (!gpuFailed) { dropped++; return; } // WebGPU still initialising (~first 100ms)
+        draw2d(vf);
+        drawn++;
       } catch (err) {
         if (dropped++ < 3) console.error('[direct-canvas] draw failed:', err);
+      } finally {
+        // Closing per draw is the leak-free lifecycle; WebGPU's submitted
+        // work holds its own reference until the GPU is done.
+        vf.close();
       }
     };
 
@@ -529,6 +801,11 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
     ipcRenderer.on('direct-surface:reset', () => {
       for (const t of heldTextures.values()) { try { t.release(); } catch { /* gone */ } }
       heldTextures.clear();
+      if (videoEl) {
+        videoEl.remove();
+        videoEl = null;
+        if (canvas) canvas.style.display = '';
+      }
       console.log('[direct-canvas] reset: released all held textures');
     });
     console.log('[direct-canvas] shared texture receiver registered');
