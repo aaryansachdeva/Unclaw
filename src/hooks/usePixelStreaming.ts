@@ -158,53 +158,100 @@ export function usePixelStreaming({
     // (720x1280) for the whole session and the browser upscaled ~1.6x — a soft
     // avatar with no error anywhere. Observed 2026-08-04.
     const lastSentRes = { w: -1, h: -1 };
+    // Is the direct IOSurface path carrying the picture? When it is, Unreal's
+    // frames go straight out as surfaces and the encoder sits idle, so the
+    // <video> element stops updating and freezes at whatever size it last
+    // decoded. That makes it useless as evidence of what UE is rendering,
+    // which the closed-loop check below relies on. Tracked here rather than
+    // threaded down as a prop so the hook stays self-contained.
+    let directLive = false;
+    const offDirectStatus = window.electronAPI?.directSurface?.onStatus?.((s) => {
+      // A fresh attach means a fresh Unreal (the XPC listener dies with the
+      // process), which is back at its launch resolution however much we sent
+      // the old one. Drop the dedupe so the next tick re-sends. This is the
+      // direct-path stand-in for the <video>-intrinsic-size check below, which
+      // cannot see anything while the encoder is idle.
+      if (s.connected && !directLive) { lastSentRes.w = -1; lastSentRes.h = -1; }
+      directLive = s.connected;
+    });
+    // CSS size in, resolution out, sent only when it actually changed. Both
+    // drivers below funnel through this so the cap, the quantize step and the
+    // dedupe can never drift apart between the WebRTC and direct paths.
+    const applyTargetResolution = (cssW: number, cssH: number) => {
+      const dpr = window.devicePixelRatio || 1;
+      let w = Math.round(cssW * dpr);
+      let h = Math.round(cssH * dpr);
+      const longest = Math.max(w, h);
+      // Cap, then quantize the longest side DOWN to a 128px step (above
+      // 1024). Every distinct resolution UE receives costs one realloc
+      // cycle of the backbuffer + capture + encoder chain, so snapping to
+      // steps makes most window resizes send nothing at all (the dedupe
+      // below eats the repeat). Worst-case cost is a <=127px downscale the
+      // video element upscales away, invisible at stream viewing sizes.
+      // Below 1024 the buffers are small enough that native size is fine.
+      let target = longest;
+      if (longest > MAX_RENDER_DIM) {
+        target = MAX_RENDER_DIM;
+      } else if (longest >= 1024) {
+        target = Math.floor(longest / 128) * 128;
+      }
+      if (target < longest) {
+        const s = target / longest;
+        w = Math.round(w * s);
+        h = Math.round(h * s);
+      }
+      w -= w % 2; // even dims: H264 4:2:0 chroma subsampling needs them
+      h -= h % 2;
+      // Not laid out yet. Bail WITHOUT recording, so a later fire still gets
+      // its chance — recording a bogus size here is what stranded UE at its
+      // launch resolution.
+      if (w < 64 || h < 64) return;
+      if (w === lastSentRes.w && h === lastSentRes.h) return;
+      lastSentRes.w = w;
+      lastSentRes.h = h;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (ps as any).emitCommand({ 'Resolution.Width': w, 'Resolution.Height': h });
+    };
     const installDprResolutionOverride = (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vp: any,
     ) => {
       if (!vp || vp.__unclawDprOverride) return;
-      vp.onMatchViewportResolutionCallback = (cssW: number, cssH: number) => {
-        const dpr = window.devicePixelRatio || 1;
-        let w = Math.round(cssW * dpr);
-        let h = Math.round(cssH * dpr);
-        const longest = Math.max(w, h);
-        // Cap, then quantize the longest side DOWN to a 128px step (above
-        // 1024). Every distinct resolution UE receives costs one realloc
-        // cycle of the backbuffer + capture + encoder chain, so snapping to
-        // steps makes most window resizes send nothing at all (the dedupe
-        // below eats the repeat). Worst-case cost is a <=127px downscale the
-        // video element upscales away, invisible at stream viewing sizes.
-        // Below 1024 the buffers are small enough that native size is fine.
-        let target = longest;
-        if (longest > MAX_RENDER_DIM) {
-          target = MAX_RENDER_DIM;
-        } else if (longest >= 1024) {
-          target = Math.floor(longest / 128) * 128;
-        }
-        if (target < longest) {
-          const s = target / longest;
-          w = Math.round(w * s);
-          h = Math.round(h * s);
-        }
-        w -= w % 2; // even dims: H264 4:2:0 chroma subsampling needs them
-        h -= h % 2;
-        // Not laid out yet. Bail WITHOUT recording, so a later fire still gets
-        // its chance — recording a bogus size here is what stranded UE at its
-        // launch resolution.
-        if (w < 64 || h < 64) return;
-        if (w === lastSentRes.w && h === lastSentRes.h) return;
-        lastSentRes.w = w;
-        lastSentRes.h = h;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (ps as any).emitCommand({ 'Resolution.Width': w, 'Resolution.Height': h });
-      };
+      vp.onMatchViewportResolutionCallback = (cssW: number, cssH: number) =>
+        applyTargetResolution(cssW, cssH);
       vp.__unclawDprOverride = true;
     };
     const forceViewportResolutionUpdate = () => {
       try {
+        // Install FIRST, in every mode. The SDK fires its own viewport-res sync
+        // off MatchViewportRes, and its stock callback sends the element's CSS
+        // size with no devicePixelRatio applied. Leaving that in place while we
+        // also drive our own value means UE receives two different resolutions
+        // in alternation (observed 2026-08-11: 1182x1536 from us, 600x780 from
+        // the SDK, flapping), rebuilding its render target on every flip and
+        // leaving the picture broken. The override makes every fire, whoever
+        // starts it, go through applyTargetResolution.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const controller = (ps as any)._webRtcController;
         installDprResolutionOverride(controller?.videoPlayer);
+
+        // Direct path: measure the element ourselves instead of asking the SDK.
+        // updateVideoStreamSize() sizes from the <video>, and with the direct
+        // path attached the encoder is idle so that video never receives a
+        // frame, never plays and reports nothing — leaving UE at its launch
+        // -ResX/-ResY for the entire session (observed 2026-08-11: 720x1280
+        // upscaled into a 1182x1536 window, a visibly soft avatar). The
+        // element's own layout box is the honest source in both modes and
+        // needs no WebRTC at all. `visibility: hidden` still lays out, so the
+        // rect is real while the video is hidden underneath the native layer.
+        if (directLive) {
+          const el = videoParentRef.current;
+          if (el) {
+            const r = el.getBoundingClientRect();
+            applyTargetResolution(r.width, r.height);
+          }
+          return;
+        }
         controller?.videoPlayer?.updateVideoStreamSize?.();
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -286,6 +333,30 @@ export function usePixelStreaming({
       (window as any).forceViewportUpdate = forceViewportResolutionUpdate;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (window as any).psDecoderCheck = logDecoderImplementation;
+      // Drive a UE console command from DevTools, e.g.
+      //   psConsole('rhi.dumpresourcememory summary')
+      //   psConsole('memreport -full')
+      //   psConsole('stat streaming')
+      // Output goes to UE's log, so a Development build is required (Shipping
+      // compiles UE_LOG out). UE-side this is gated on
+      // PixelStreaming2.Input.AllowConsoleCommands, which run_soul.sh turns on
+      // for profiling. The point of driving it from here rather than -ExecCmds
+      // is timing: -ExecCmds runs at startup with an empty scene, so its
+      // numbers describe nothing. This fires whenever you call it, with the
+      // character loaded and settled.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).psConsole = (cmd: string) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = ps as any;
+        if (typeof p.emitConsoleCommand === 'function') {
+          p.emitConsoleCommand(cmd);
+        } else {
+          p.emitCommand({ ConsoleCommand: cmd });
+        }
+        // eslint-disable-next-line no-console
+        console.log('[ps] console command sent:', cmd, '(read the result in game.launchd.log)');
+      };
+
     }
 
     ps.addEventListener('webRtcConnecting', () => setConnectionState('connecting'));
@@ -418,7 +489,15 @@ export function usePixelStreaming({
     const reconcile = window.setInterval(() => {
       const video = videoParentRef.current?.querySelector('video');
       if (
-        video && video.videoWidth > 0 && lastSentRes.w > 0
+        // Skipped while the direct path is live: the <video> is frozen at its
+        // last decoded size (the encoder is idle), so it disagrees with the
+        // target permanently. Left in, the mismatch below reads as "the send
+        // was lost", wipes the dedupe and re-sends r.SetRes on EVERY tick —
+        // a full backbuffer + capture + encoder realloc every 3 seconds for
+        // the life of the session. Measured 2026-08-11 as a steady resident
+        // climb with the direct path attached.
+        !directLive
+        && video && video.videoWidth > 0 && lastSentRes.w > 0
         && (video.videoWidth !== lastSentRes.w || video.videoHeight !== lastSentRes.h)
       ) {
         // eslint-disable-next-line no-console
@@ -444,6 +523,7 @@ export function usePixelStreaming({
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       if (resizeTimer) clearTimeout(resizeTimer);
       clearInterval(reconcile);
+      offDirectStatus?.();
       ro.disconnect();
       ps.removeResponseEventListener('unclaw-ack-router');
       // Reject any in-flight ack promises so callers don't hang forever

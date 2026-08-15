@@ -242,6 +242,18 @@ interface ElectronAPI {
     ) => () => void;
   };
 
+  /** Direct IOSurface display status, polled main-side every 2s. `connected`
+   *  false means the WebRTC video is still what the user sees. Absent when the
+   *  native addon was never built, hence the optional member. */
+  directSurface?: {
+    /** '1' native layer, '2' shared-texture canvas, null when off. */
+    mode: '1' | '2' | null;
+    onStatus: (cb: (s: {
+      connected: boolean; frames: number; gaps: number;
+      fps: number; surfaces: number;
+    }) => void) => () => void;
+  };
+
   /** unclaw:// deep link arriving while the app is running (the Polar
    *  checkout-complete page bounces through it). Returns unsubscribe. */
   onDeepLink: (cb: (url: string) => void) => () => void;
