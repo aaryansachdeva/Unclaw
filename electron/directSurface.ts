@@ -206,9 +206,17 @@ export function attach(win: BrowserWindow): boolean {
   // XPC queue would need a threadsafe function for no real benefit at 0.5Hz.
   let lastConnected: boolean | null = null;
   let missed = 0;
+  let ticks = 0;
   poll = setInterval(() => {
     if (win.isDestroyed()) { detach(); return; }
     const s = a.stats();
+
+    // Once-a-minute heartbeat: fps is the addon's own delivery-rate estimate,
+    // the ground truth for "is UE actually pacing at its cap". Transitions
+    // alone can't show a drift like the 24-cap/30-fixed-step mismatch did.
+    if (s.connected && ++ticks % 30 === 0) {
+      console.log(`[direct] heartbeat: ${s.fps.toFixed(1)}fps frames=${s.frames} gaps=${s.gaps}`);
+    }
 
     // Re-attach when the publisher goes away. Unreal restarting invalidates the
     // XPC connection permanently: the listener it was bound to no longer
