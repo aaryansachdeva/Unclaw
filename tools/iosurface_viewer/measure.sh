@@ -41,7 +41,8 @@ cpu_time_total() {  # seconds of CPU consumed, summed
 }
 
 ELE=$(pids_for "UnClaw/node_modules/electron/dist/Electron.app")
-UE=$(pids_for "AudioTestProject02.app/Contents/MacOS")
+UE=$(pids_for "Unclaw Character.app/Contents/MacOS")
+[ -z "$UE" ] && UE=$(pids_for "AudioTestProject02.app/Contents/MacOS")
 [ -z "$ELE" ] && ELE=$(pids_for "/Applications/Unclaw.app/Contents/MacOS")
 
 if [ -z "$ELE" ] || [ -z "$UE" ]; then
