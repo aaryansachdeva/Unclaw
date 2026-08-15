@@ -452,6 +452,21 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
     let drawn = 0;
     let dropped = 0;
 
+    // Ground-truth status mirror. The contextBridge onStatus callback used to
+    // be the ONLY route by which React learned the direct path was live, and
+    // on 2026-08-15 that route silently failed: frames flowed and drew at
+    // 23.8fps while React's directLive stayed false, so the character sat
+    // fully rendered but hidden behind the backdrop gradient. The DOM is
+    // shared between the preload world and the page, so every status tick is
+    // mirrored into a data attribute + DOM event; React reads the attribute,
+    // which cannot go stale or miss a subscription window.
+    ipcRenderer.on('direct-surface:status', (_e, s: { connected: boolean }) => {
+      try {
+        document.documentElement.dataset.unclawDirectLive = s.connected ? '1' : '0';
+        document.dispatchEvent(new Event('unclaw:direct-status'));
+      } catch { /* document not ready yet; next tick in 2s */ }
+    });
+
     // Render-path selector. 'video' (default) pipes the frames into a
     // MediaStreamTrackGenerator feeding a <video> element, which rides
     // Chromium's dedicated video frame-submission path: no paint, video
@@ -666,6 +681,35 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
     let genWriter: any = null;
     let videoEl: HTMLVideoElement | null = null;
     let diag: HTMLCanvasElement | null = null;
+    let writeFails = 0;
+    let lastFrameAt = 0;
+
+    // The preload OWNS the injected video element's visibility, because it is
+    // the one part of the system that provably knows whether frames are
+    // flowing (it is handing them to the sink). React's directLive is
+    // cosmetics (vignette, gamut class) and must never be able to hide the
+    // character. z-index 1 keeps the element above the (transparent, idle)
+    // WebRTC video regardless of what React shows or hides around it; the
+    // page UI lives in later stacking contexts and stays on top.
+    const teardownVideoPipeline = (why: string): void => {
+      console.error('[direct-canvas] rebuilding video pipeline:', why);
+      try { videoEl?.remove(); } catch { /* gone */ }
+      videoEl = null;
+      gen = null;
+      genWriter = null;
+      writeFails = 0;
+    };
+
+    // Frames-stalled watchdog: if nothing has been drawn for 2.5s the picture
+    // is stale; hide it so the WebRTC fallback (or the loading state) shows
+    // instead of a frozen frame.
+    setInterval(() => {
+      if (videoEl && lastFrameAt && Date.now() - lastFrameAt > 2500
+          && videoEl.style.visibility !== 'hidden') {
+        videoEl.style.visibility = 'hidden';
+        console.log('[direct-canvas] frames stalled >2.5s, hiding video');
+      }
+    }, 1000);
 
     const drawVideo = (vf: VideoFrame): void => {
       const MSTG = (window as any).MediaStreamTrackGenerator;
@@ -680,13 +724,14 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
         videoEl.autoplay = true;
         videoEl.setAttribute('playsinline', '');
         videoEl.dataset.directVideo = '1';
-        videoEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;';
+        videoEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;visibility:hidden;';
         canvas!.style.display = 'none';
         canvas!.parentElement!.insertBefore(videoEl, canvas!);
         videoEl.srcObject = new MediaStream([gen]);
         videoEl.play().catch(() => { /* muted autoplay is allowed */ });
       }
-      videoEl.style.visibility = canvas!.style.visibility;
+      lastFrameAt = Date.now();
+      if (videoEl.style.visibility !== 'visible') videoEl.style.visibility = 'visible';
       // Unreal's backbuffer carries alpha 0 and, unlike the canvas paths, the
       // video pipeline honours it: raw frames display as pure black. The
       // clone-with-discard marks the frame opaque (metadata, not pixels).
@@ -696,8 +741,14 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
         out = new VideoFrame(vf, { alpha: 'discard' } as VideoFrameInit);
         wrapped = true;
       } catch { /* older runtime: send the raw frame and hope */ }
-      genWriter.write(out).catch((e: unknown) => {
+      genWriter.write(out).then(() => { writeFails = 0; }).catch((e: unknown) => {
         if (dropped++ < 3) console.error('[direct-canvas] generator write failed:', e);
+        // A WritableStream that errors once rejects every write after it, so
+        // a poisoned writer would otherwise mean a permanently black stream
+        // while every counter looks healthy. Three consecutive failures =
+        // scrap the generator, element and writer; the next frame rebuilds
+        // the whole chain from scratch.
+        if (++writeFails >= 3) teardownVideoPipeline('generator writer poisoned');
       });
       if (wrapped) vf.close();
       const n = drawn + 1;
@@ -806,6 +857,7 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
         videoEl = null;
         if (canvas) canvas.style.display = '';
       }
+      lastFrameAt = 0;
       console.log('[direct-canvas] reset: released all held textures');
     });
     console.log('[direct-canvas] shared texture receiver registered');

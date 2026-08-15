@@ -165,15 +165,28 @@ export function usePixelStreaming({
     // which the closed-loop check below relies on. Tracked here rather than
     // threaded down as a prop so the hook stays self-contained.
     let directLive = false;
-    const offDirectStatus = window.electronAPI?.directSurface?.onStatus?.((s) => {
+    const applyDirectLive = (connected: boolean) => {
       // A fresh attach means a fresh Unreal (the XPC listener dies with the
       // process), which is back at its launch resolution however much we sent
       // the old one. Drop the dedupe so the next tick re-sends. This is the
       // direct-path stand-in for the <video>-intrinsic-size check below, which
       // cannot see anything while the encoder is idle.
-      if (s.connected && !directLive) { lastSentRes.w = -1; lastSentRes.h = -1; }
-      directLive = s.connected;
+      if (connected && !directLive) { lastSentRes.w = -1; lastSentRes.h = -1; }
+      directLive = connected;
+    };
+    const offDirectStatus = window.electronAPI?.directSurface?.onStatus?.((s) => {
+      applyDirectLive(s.connected);
     });
+    // Second route via the preload's DOM mirror (see StreamView for why the
+    // bridge callback alone is not trusted): a stuck-false directLive here
+    // re-enables the <video>-intrinsic-size check against a frozen video and
+    // brings back the r.SetRes-every-3s flood.
+    const onDirectStatusEvent = () => {
+      const v = document.documentElement.dataset.unclawDirectLive;
+      if (v !== undefined) applyDirectLive(v === '1');
+    };
+    onDirectStatusEvent();
+    document.addEventListener('unclaw:direct-status', onDirectStatusEvent);
     // CSS size in, resolution out, sent only when it actually changed. Both
     // drivers below funnel through this so the cap, the quantize step and the
     // dedupe can never drift apart between the WebRTC and direct paths.
@@ -524,6 +537,7 @@ export function usePixelStreaming({
       if (resizeTimer) clearTimeout(resizeTimer);
       clearInterval(reconcile);
       offDirectStatus?.();
+      document.removeEventListener('unclaw:direct-status', onDirectStatusEvent);
       ro.disconnect();
       ps.removeResponseEventListener('unclaw-ack-router');
       // Reject any in-flight ack promises so callers don't hang forever

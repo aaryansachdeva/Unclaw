@@ -159,9 +159,25 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
   const [directLive, setDirectLive] = useState(false);
   const directMode = window.electronAPI?.directSurface?.mode ?? null;
   useEffect(() => {
+    // Two routes to the same fact, because on 2026-08-15 the bridge callback
+    // alone silently stopped delivering and the app sat on the backdrop
+    // gradient with the character fully rendered but hidden. The preload
+    // mirrors every status tick into a data attribute on <html> and fires a
+    // DOM event; the attribute is shared DOM, so this cannot miss or go
+    // stale, and reading it on mount also covers statuses sent before this
+    // component subscribed. The bridge callback stays as the second route.
+    const readAttr = () => {
+      const v = document.documentElement.dataset.unclawDirectLive;
+      if (v !== undefined) setDirectLive(v === '1');
+    };
+    readAttr();
+    document.addEventListener('unclaw:direct-status', readAttr);
     const api = window.electronAPI?.directSurface;
-    if (!api?.onStatus) return;
-    return api.onStatus((s) => setDirectLive(!!s.connected));
+    const off = api?.onStatus?.((s) => setDirectLive(!!s.connected));
+    return () => {
+      document.removeEventListener('unclaw:direct-status', readAttr);
+      off?.();
+    };
   }, []);
 
   // Mode 1 only: the native layer sits BEHIND the page, so the page's opaque
