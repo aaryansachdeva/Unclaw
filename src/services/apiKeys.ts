@@ -538,7 +538,10 @@ export type TtsProviderId =
   | 'elevenlabs'
   | 'kokoro'
   | 'supertonic'
-  | 'qwen3';
+  | 'qwen3'
+  /** Kyutai Pocket-TTS: local 100M CPU-only clone engine; voices are
+   *  per-character reference wavs in soul's data/pocket/refs/. No key. */
+  | 'pocket';
 
 /** Sub-mode when `tts_provider === 'kokoro'`. `recommended` = soul
  *  downloads + runs Kokoro locally; `custom` = user has Kokoro

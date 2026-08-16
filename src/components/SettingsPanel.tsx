@@ -818,6 +818,7 @@ function VoiceFacet({ draft, update }: PaneContext) {
             onChange={(v) => update('tts_provider', v as TtsProviderId)}
             options={[
               { id: 'elevenlabs', label: 'ElevenLabs (cloud, realistic)' },
+              { id: 'pocket',     label: 'Pocket (local, cloned voices, fastest)' },
               { id: 'supertonic', label: 'Supertonic-3 (local, 31 languages, ~5× realtime)' },
               { id: 'kokoro',     label: 'Kokoro (local, open-weight)' },
             ]}

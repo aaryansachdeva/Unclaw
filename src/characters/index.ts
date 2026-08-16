@@ -65,6 +65,7 @@ export function voiceForProvider(
     case 'elevenlabs': return v.elevenlabs;
     case 'supertonic': return v.supertonic;
     case 'kokoro': return v.kokoro;
+    case 'pocket': return v.pocket;
     default: return undefined; // qwen3 / unknown -> let global/default apply
   }
 }
