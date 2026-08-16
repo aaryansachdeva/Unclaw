@@ -9,7 +9,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "outDir": "dist/electron",
-    "declaration": false,
     "composite": true
   },
   "include": ["electron/**/*"]

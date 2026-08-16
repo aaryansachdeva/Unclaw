@@ -405,6 +405,50 @@ export async function geminiGenerateBasecolor(
   return out;
 }
 
+// The photo-read colour vocabulary. These two tables were referenced but
+// never defined (found 2026-08-16 by the first-ever tsc pass over
+// electron/): at runtime the lookups threw ReferenceError inside the
+// grooming try/catch, which silently discarded the ENTIRE groom pick —
+// gender, build and hair index included — so every custom character built
+// with default grooming while the pipeline reported success.
+//
+// Values are grounded in the app's own curated presets
+// (src/components/CustomizationOverlay.tsx HAIR_COLORS): melanin 0=white
+// to ~0.97 jet, redness = pheomelanin ratio (0 ash to ~0.72 ginger).
+type HairColorName =
+  | 'black' | 'darkBrown' | 'brown' | 'lightBrown' | 'dirtyBlonde'
+  | 'blonde' | 'platinum' | 'auburn' | 'ginger' | 'grey' | 'white';
+const HAIR_COLOR_PARAMS: Record<HairColorName, { melanin: number; redness: number }> = {
+  black:       { melanin: 0.97, redness: 0.10 },  // preset: Jet
+  darkBrown:   { melanin: 0.84, redness: 0.22 },  // Espresso
+  brown:       { melanin: 0.70, redness: 0.32 },  // Chestnut
+  lightBrown:  { melanin: 0.56, redness: 0.40 },  // Caramel
+  dirtyBlonde: { melanin: 0.44, redness: 0.34 },  // Honey
+  blonde:      { melanin: 0.36, redness: 0.26 },  // Wheat
+  platinum:    { melanin: 0.18, redness: 0.10 },  // Platinum
+  auburn:      { melanin: 0.62, redness: 0.55 },  // Auburn
+  ginger:      { melanin: 0.50, redness: 0.72 },  // Ginger
+  grey:        { melanin: 0.28, redness: 0.02 },  // between Ash and Silver
+  white:       { melanin: 0.10, redness: 0.00 },  // lighter than Silver
+};
+
+// The iris is a texture swap (T_IrisBC_<suffix>, see EYE_COLORS in
+// CustomizationOverlay.tsx) and the photo-read enum was designed to match
+// the shipped suffixes 1:1, so this mapping is the identity — kept as an
+// explicit table so a rename on either side fails loudly here instead of
+// silently skipping the eye colour.
+type EyeColorName =
+  | 'darkBrown' | 'brown' | 'amber' | 'hazel' | 'green' | 'blue' | 'grey';
+const EYE_COLOR_IRIS: Record<EyeColorName, string> = {
+  darkBrown: 'darkBrown',
+  brown: 'brown',
+  amber: 'amber',
+  hazel: 'hazel',
+  green: 'green',
+  blue: 'blue',
+  grey: 'grey',
+};
+
 export interface GroomPick {
   gender: 'm' | 'f';
   /** Read from the photo; mapped to material values by HAIR_COLOR_PARAMS. */

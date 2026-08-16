@@ -213,6 +213,15 @@ interface ElectronAPI {
       grooming?: { gender: 'm' | 'f'; build: 'skinny' | 'fit' | 'fat'; hairIndex: number; browIndex: number; lashIndex: number };
       error?: string;
     }>;
+    /** Re-roll ONLY the skin texture for an existing character. */
+    regenBasecolor: (args: { localId: string }) => Promise<{
+      ok: boolean; baseColorPath?: string;
+      skins?: Array<{ path: string; label: string }>; error?: string;
+    }>;
+    /** Every skin generated for this character, oldest first. */
+    listBasecolors: (args: { localId: string }) => Promise<{
+      ok: boolean; skins: Array<{ path: string; label: string }>;
+    }>;
     onProgress: (cb: (data: { stage: string; line: string }) => void) => () => void;
   };
   characterStore: {

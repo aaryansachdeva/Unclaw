@@ -38,7 +38,14 @@ const QR_PX = 228;
 /** Vision-grooming args for the inference IPC: the user's photo + our groom
  *  catalogs. The credential is the PIPELINE's own OpenAI key (read by main
  *  from p1/secrets), never the user's BYOK chat key. */
-async function buildGroomArgs(photoBytes: Uint8Array): Promise<Record<string, unknown> | undefined> {
+interface GroomArgs {
+  photoBytes: Uint8Array;
+  hairs: { index: number; name: string }[];
+  brows: { index: number; name: string }[];
+  lashes: { index: number; name: string }[];
+}
+
+async function buildGroomArgs(photoBytes: Uint8Array): Promise<GroomArgs | undefined> {
   try {
     return {
       photoBytes,

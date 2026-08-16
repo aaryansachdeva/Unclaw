@@ -10,7 +10,7 @@
 // graphics restart prompt, BYOK key flow, Esc/click-outside, save bar
 // only-when-dirty. Public props unchanged.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type JSX } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Check, AlertCircle, Loader2, Eye, EyeOff, ExternalLink, X,
@@ -961,6 +961,7 @@ function PassthroughVoiceControls() {
 function ttsHeadline(p: TtsProviderId): string {
   switch (p) {
     case 'elevenlabs': return 'ElevenLabs.';
+    case 'pocket':     return 'Pocket, local cloned voices.';
     case 'supertonic': return 'Supertonic-3, local.';
     case 'kokoro':     return 'Kokoro, local.';
     case 'qwen3':      return 'Qwen3-TTS (disabled).';

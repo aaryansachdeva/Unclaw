@@ -1548,12 +1548,14 @@ app.whenReady().then(() => {
     return ['media', 'audioCapture', 'mediaKeySystem', 'geolocation']
       .includes(permission);
   });
-  session.defaultSession.setDevicePermissionHandler((details) => {
-    if (details.deviceType === 'audioInput' || details.deviceType === 'audioOutput') {
-      return true;
-    }
-    return false;
-  });
+  // Device permissions (WebHID / WebSerial / WebUSB): nothing in the app
+  // uses these; deny all. NOTE: audio does NOT flow through this handler —
+  // deviceType is only ever 'hid' | 'serial' | 'usb', and microphone access
+  // is granted above via setPermissionRequestHandler ('media' /
+  // 'audioCapture'). An earlier version checked for 'audioInput' here, a
+  // branch the types prove can never fire (caught by the 2026-08-16 tsc
+  // pass); behavior is unchanged by removing it.
+  session.defaultSession.setDevicePermissionHandler(() => false);
 
   // Pre-warm the overlay window now so the first Ctrl+Shift+G is fast
   // and visually clean.

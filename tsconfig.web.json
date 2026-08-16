@@ -8,8 +8,8 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "jsx": "react-jsx",
+    "types": ["vite/client"],
     "outDir": "dist/renderer",
-    "declaration": false,
     "composite": true
   },
   "include": ["src/**/*"]

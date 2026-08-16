@@ -178,7 +178,7 @@ export class StreamingTranscriber {
     // Float32Array.buffer is the right thing to send, typed-array
     // copy isn't necessary because send() schedules from the buffer
     // pointer and the renderer's worklet just allocated this frame.
-    ws.send(samples.buffer);
+    ws.send(samples.buffer as ArrayBuffer);
   }
 
   /** Compute RMS of a frame, smooth with an EMA, and emit a 'level'
@@ -264,7 +264,7 @@ export class StreamingTranscriber {
             // subarray shares the backing buffer; slice to send just our span.
             ws.send(rs.slice().buffer);
           } else {
-            ws.send(data.samples.buffer);
+            ws.send(data.samples.buffer as ArrayBuffer);
           }
         }
       };

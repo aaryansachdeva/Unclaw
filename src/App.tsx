@@ -4230,23 +4230,28 @@ function AppMain() {
             skins={skins}
             activeSkin={currentInstance?.identity?.baseColorPath ?? null}
             onPickSkin={(pathStr) => {
-              if (!currentInstance) return;
+              // Skins only exist for custom characters, which always carry an
+              // identity; without one there is nothing to re-assert (spreading
+              // an empty object here used to type-launder a dnaPath-less
+              // identity into the store).
+              if (!currentInstance?.identity) return;
               setInstanceIdentity(currentInstance.id, {
-                ...(currentInstance.identity ?? {}),
+                ...currentInstance.identity,
                 baseColorPath: pathStr,
               });
               emitApplyIdentityRef.current?.({
                 ...currentInstance,
-                identity: { ...(currentInstance.identity ?? {}), baseColorPath: pathStr },
+                identity: { ...currentInstance.identity, baseColorPath: pathStr },
               } as typeof currentInstance);
             }}
             onRegenSkin={async () => {
               // The identity's own folder name is its localId, so the new
               // texture lands beside the .dna it belongs to.
-              const id = currentInstance?.identity?.sessionId
-                ?? currentInstance?.identity?.dnaPath?.split('/Identity/')[1]?.split('/')[0];
+              const identity = currentInstance?.identity;
+              const id = identity?.sessionId
+                ?? identity?.dnaPath?.split('/Identity/')[1]?.split('/')[0];
               const api = window.electronAPI?.identity;
-              if (!id || !api?.regenBasecolor) return false;
+              if (!identity || !id || !api?.regenBasecolor) return false;
               const res = await api.regenBasecolor({ localId: id });
               if (res.skins) setSkins(res.skins);
               if (!res.ok || !res.baseColorPath) return false;
@@ -4254,12 +4259,12 @@ function AppMain() {
               // superset, so this re-asserts the whole face rather than needing
               // a basecolor-only path in UE.
               setInstanceIdentity(currentInstance!.id, {
-                ...(currentInstance!.identity ?? {}),
+                ...identity,
                 baseColorPath: res.baseColorPath,
               });
               emitApplyIdentityRef.current?.({
                 ...currentInstance!,
-                identity: { ...(currentInstance!.identity ?? {}), baseColorPath: res.baseColorPath },
+                identity: { ...identity, baseColorPath: res.baseColorPath },
               } as typeof currentInstance);
               return true;
             }}

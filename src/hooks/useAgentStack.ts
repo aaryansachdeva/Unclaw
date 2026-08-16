@@ -31,6 +31,10 @@ export interface AgentInstance {
    *  as an applyIdentity descriptor after every spawn/reconcile of this
    *  instance, exactly like wardrobe. Paths are local absolute paths. */
   identity?: {
+    /** The capture/build session id — also the identity folder name under
+     *  /Identity/. Older saves lack it; readers fall back to parsing
+     *  dnaPath, so keep both paths working. */
+    sessionId?: string;
     dnaPath: string; blobPath: string; baseColorPath?: string; gender?: 'm' | 'f';
     /** MetaHuman Creator's skin-detail normal. Optional: without it the face
      *  keeps the shipped base normal, which is what every character had before. */

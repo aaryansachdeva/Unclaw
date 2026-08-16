@@ -1117,9 +1117,14 @@ export async function shutdownEverything(): Promise<void> {
 
   // The launchd job is the authoritative kill for UE: it terminates the
   // process AND unloads the job so nothing can resurrect it.
-  execFile('/bin/launchctl',
-    ['bootout', `gui/${process.getuid()}/com.fotonlabs.unclaw.unreal`],
-    () => { /* "no such service" when UE is not up, fine */ });
+  // getuid exists on every POSIX Node; the IS_WINDOWS return above is the
+  // runtime guard, the optional call is for the type-checker only.
+  const uid = process.getuid?.();
+  if (uid !== undefined) {
+    execFile('/bin/launchctl',
+      ['bootout', `gui/${uid}/com.fotonlabs.unclaw.unreal`],
+      () => { /* "no such service" when UE is not up, fine */ });
+  }
 
   // Everything positively identifiable as ours, regardless of who spawned
   // it. Dev UE bundles (AudioTestProject02*.app binaries) are included; the
