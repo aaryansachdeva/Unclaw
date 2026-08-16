@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "typecheck": "tsc -b tsconfig.node.json tsconfig.web.json --force",
     "preview": "electron-vite preview",
     "start": "electron .",
     "dist:win": "electron-vite build && electron-builder --win nsis",
