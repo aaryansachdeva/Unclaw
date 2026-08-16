@@ -18,8 +18,17 @@ LABEL="${2:-$(sw_vers -productVersion)}"
 
 # Matches the raw editor output (AudioTestProject02*.app) AND the carved,
 # re-branded bundle ("Unclaw Character.app"), which is what actually ships.
-UE=$(pgrep -f "Unclaw Character.app/Contents/MacOS" | head -1)
-[ -z "$UE" ] && UE=$(pgrep -f "AudioTestProject02[^ ]*.app/Contents/MacOS" | head -1)
+# comm-filtered: pgrep -f also matches any shell/agent whose ARGV merely
+# quotes these paths (the 2026-08-15/16 self-match trap; see measure.sh).
+ue_pid() {
+  for p in $(pgrep -f "$1" 2>/dev/null); do
+    case "$(ps -o comm= -p "$p" 2>/dev/null)" in
+      */Contents/MacOS/*) echo "$p"; return ;;
+    esac
+  done
+}
+UE=$(ue_pid "Unclaw Character.app/Contents/MacOS")
+[ -z "$UE" ] && UE=$(ue_pid "AudioTestProject02[^ ]*.app/Contents/MacOS")
 if [ -z "$UE" ]; then
   echo "no Unreal process found — start the app with the stream visible first"
   exit 1

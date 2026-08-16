@@ -15,7 +15,19 @@ SECS="${1:-20}"
 LABEL="${2:-baseline}"
 OUT="${TMPDIR:-/tmp}/unclaw_measure_${LABEL}.txt"
 
-pids_for() { pgrep -f "$1" 2>/dev/null | tr '\n' ' '; }
+# pgrep -f matches the FULL argv of every process — including this script's
+# own shell and any agent/monitor whose command line merely QUOTES the
+# pattern. That self-match bit twice on 2026-08-15/16 (a monitoring shell
+# "measured" itself at 0.0% CPU). Every pattern this script uses is a binary
+# path fragment, so require it in the process's comm (executable path),
+# which no wrapper shell shares.
+pids_for() {
+  for p in $(pgrep -f "$1" 2>/dev/null); do
+    case "$(ps -o comm= -p "$p" 2>/dev/null)" in
+      *"$1"*) printf '%s ' "$p" ;;
+    esac
+  done
+}
 
 sum_rss() {  # MB
   local t=0
