@@ -515,6 +515,17 @@ function spawnSoul(window: BrowserWindow): boolean {
     // memory, found via MemReport + vmmap "owned unmapped (graphics)").
     // Boot small; the floor becomes the frontend's real streamed size.
     UNCLAW_UE_RES_AUTO: process.env.UNCLAW_UE_RES_AUTO ?? '0',
+    // Spawn UE via launchd (Mach service ownership) whenever the app runs
+    // in direct-surface mode. The direct IOSurface path REQUIRES the UE
+    // process to be launchd-spawned to claim the bootstrap name; without
+    // this, an app-owned soul spawned UE as a plain child, the XPC
+    // listener died with "Connection invalid", and every app-owned session
+    // silently lost the direct path (found 2026-08-17 when the character
+    // stopped appearing after soul respawns — manual dev launches had
+    // always exported this by hand, masking the gap).
+    ...(process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE
+      ? { UNCLAW_UE_LAUNCHD: process.env.UNCLAW_UE_LAUNCHD ?? '1' }
+      : {}),
     // Flat dir of owned character paks. run_soul.sh stages any *.pak here into
     // the UE sandbox container's Saved/Paks at launch so purchased characters
     // boot-mount before BeginPlay. run_soul guards on the dir existing, so this
