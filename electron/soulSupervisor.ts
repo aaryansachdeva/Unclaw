@@ -1127,14 +1127,18 @@ export async function shutdownEverything(): Promise<void> {
   if (foreignInstanceLive) return; // sibling owns lookalike processes; only our tree dies
 
   // The launchd job is the authoritative kill for UE: it terminates the
-  // process AND unloads the job so nothing can resurrect it.
+  // process AND unloads the job so nothing can resurrect it. AWAITED:
+  // fire-and-forget here raced app exit and left a loaded-but-dead job
+  // entry behind (harmless but untidy, seen 2026-08-17).
   // getuid exists on every POSIX Node; the IS_WINDOWS return above is the
   // runtime guard, the optional call is for the type-checker only.
   const uid = process.getuid?.();
   if (uid !== undefined) {
-    execFile('/bin/launchctl',
-      ['bootout', `gui/${uid}/com.fotonlabs.unclaw.unreal`],
-      () => { /* "no such service" when UE is not up, fine */ });
+    await new Promise<void>((resolve) => {
+      execFile('/bin/launchctl',
+        ['bootout', `gui/${uid}/com.fotonlabs.unclaw.unreal`],
+        () => resolve() /* "no such service" when UE is not up, fine */);
+    });
   }
 
   // Everything positively identifiable as ours, regardless of who spawned
