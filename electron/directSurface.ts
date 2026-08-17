@@ -148,8 +148,11 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
           }, { surfaceId: f.surfaceId, width: f.width, height: f.height })
           .then(() => {
             // Only tick AFTER the transfer landed, or the renderer would get
-            // pings for a surface it has not received yet.
-            win.webContents.send('direct-surface:frame', { surfaceId: f.surfaceId, serial: f.serial });
+            // pings for a surface it has not received yet. Destruction check
+            // repeated here: the promise can resolve mid-window-teardown.
+            if (!win.isDestroyed()) {
+              win.webContents.send('direct-surface:frame', { surfaceId: f.surfaceId, serial: f.serial });
+            }
           })
           .catch((err: unknown) => {
             console.error('[direct] sendSharedTexture failed:', err);
@@ -165,7 +168,14 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
 
   if (ok) {
     framePumpCleanup = () => {
-      win.webContents.send('direct-surface:reset');
+      // Runs from the window's own 'closed' handler during quit, at which
+      // point the BrowserWindow is already destroyed and webContents.send
+      // THROWS ("Object has been destroyed") — uncaught in main, that put
+      // an error dialog over the quit and blocked shutdown (2026-08-17).
+      // The renderer is gone anyway; only the GPU-side releases matter.
+      try {
+        if (!win.isDestroyed()) win.webContents.send('direct-surface:reset');
+      } catch { /* window mid-teardown */ }
       for (const h of held) { try { h.release(); } catch { /* gone */ } }
       held.length = 0;
       importedIds.clear();
