@@ -135,6 +135,18 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
             codedSize: { width: f.width, height: f.height },
             visibleRect: { x: 0, y: 0, width: f.width, height: f.height },
             pixelFormat: 'bgra',
+            // UE presents sRGB-encoded bytes to an UNMANAGED window, which a
+            // P3 display shows as P3 — the vibrant look the editor has and
+            // the scene was lit against. Chromium color-manages page
+            // content, so untagged frames were treated as sRGB and rendered
+            // colorimetrically "correct" but visibly flatter than authored
+            // (Aryan's 2026-08-18 side-by-side). Declaring P3 primaries
+            // reproduces the unmanaged interpretation at zero per-frame
+            // cost; the WebRTC path achieves the same with the
+            // stream-gamut-match feColorMatrix.
+            colorSpace: {
+              primaries: 'p3', transfer: 'srgb', matrix: 'rgb', range: 'full',
+            },
             handle: { ioSurface: f.ioSurface },
           },
         });
