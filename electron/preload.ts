@@ -725,6 +725,19 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
         videoEl.setAttribute('playsinline', '');
         videoEl.dataset.directVideo = '1';
         videoEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;visibility:hidden;';
+        // Gamut match (2026-08-18): UE lights its scenes against an
+        // UNMANAGED window, which a P3 display shows punchy; Chromium
+        // color-manages our frames as sRGB and renders them flatter than
+        // authored. Reuse the WebRTC path's P3-to-sRGB feColorMatrix
+        // (defined by StreamView, same toggle key). Tagging the imported
+        // texture as P3 instead renders black through the generator path —
+        // see directSurface.ts.
+        try {
+          if (localStorage.getItem('unclaw-stream-gamut-off') == null
+              && document.getElementById('ue-gamut-match')) {
+            videoEl.style.filter = 'url(#ue-gamut-match)';
+          }
+        } catch { /* filter is cosmetic */ }
         canvas!.style.display = 'none';
         canvas!.parentElement!.insertBefore(videoEl, canvas!);
         videoEl.srcObject = new MediaStream([gen]);
