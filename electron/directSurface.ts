@@ -216,6 +216,19 @@ export function attach(win: BrowserWindow): boolean {
   if (!ok) return false;
   attached = true;
 
+  // Renderer refresh (Cmd+R) destroys the page's imported textures while
+  // the pump still believes them delivered (importedIds), so a reloaded
+  // page received only pings for surfaces it never got: dark stream until
+  // the next UE restart (2026-08-18). Re-arm on every subsequent page
+  // load: dropping the held imports makes the pump re-import and
+  // re-transfer the ring to the fresh page on its next frames.
+  win.webContents.on('did-finish-load', () => {
+    if (attached && framePumpCleanup) {
+      console.log('[direct] renderer reloaded — re-transferring surfaces');
+      framePumpCleanup();
+    }
+  });
+
   // The renderer needs to know when to get out of the way: it hides the video
   // element and drops its background so the layer underneath shows through.
   // Polled rather than pushed from native, because a callback into JS from the
