@@ -808,7 +808,7 @@ function VoiceFacet({ draft, update }: PaneContext) {
     <Composition
       eyebrow="the voice that speaks replies"
       title={ttsHeadline(draft.tts_provider)}
-      tagline="ElevenLabs renders in the cloud with high realism. Supertonic and Kokoro run on your machine, no key required. Each agent speaks in its own voice unless you override it below."
+      tagline="ElevenLabs renders in the cloud with high realism. Pocket, Supertonic, and Kokoro run on your machine, no key required. Each agent speaks in its own voice unless you override it below."
       sigil={<Voiceprint />}
     >
       <Stack>

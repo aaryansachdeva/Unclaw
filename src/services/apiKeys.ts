@@ -816,6 +816,11 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
   } else if (profile.tts_provider === 'qwen3') {
     // Local, keyless. Installedness is validated by /validate_keys
     // (soul checks the MLX weights on disk), not by a field here.
+  } else if (profile.tts_provider === 'pocket') {
+    // Local, keyless. The model auto-downloads from HF on first synth
+    // and the per-character voice states ship as cached safetensors.
+    // (Missing from this chain when the engine landed 2026-08-16, so
+    // selecting Pocket demanded an ElevenLabs key and blocked Save.)
   } else {
     if (!profile.elevenlabs_api_key) missing.push('ElevenLabs API key');
   }
