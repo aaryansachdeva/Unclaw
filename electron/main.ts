@@ -550,6 +550,21 @@ function createWindow() {
   mainWindow.on('closed', () => {
     directSurface.detach();
     mainWindow = null;
+    // Closing the main window quits the app, and it has to be said HERE
+    // rather than left to window-all-closed, for two reasons that stack:
+    //
+    //   1. `titleBarStyle: 'hidden'` gives us the real macOS traffic lights,
+    //      so the red button closes this NSWindow directly. It never reaches
+    //      the renderer's `window:close` IPC, which is the only other place
+    //      that calls app.quit().
+    //   2. window-all-closed never fires anyway: createOverlayWindow() warms
+    //      the screenshot overlay at startup and that hidden BrowserWindow
+    //      stays open for the app's whole life, so "all closed" is never true.
+    //
+    // Net effect before this line existed: red button closed the window and
+    // nothing else happened. No before-quit, no teardown, app idle in the
+    // Dock with soul, coturn and UE (at ~80% CPU) still running.
+    app.quit();
   });
 }
 
@@ -1685,6 +1700,11 @@ app.on('window-all-closed', () => {
   // Unclaw is a single-window foreground experience, not a typical
   // Mac menubar/background app. Closing the window means the user is
   // done; quit (the before-quit hook below owns the full teardown).
+  //
+  // NOTE: this is a backstop, not the live path. The screenshot overlay is
+  // warmed at startup and stays open for the app's life, so "all windows
+  // closed" is never actually true. mainWindow's own `closed` handler is
+  // what quits us. Do not add a third quit trigger that depends on this one.
   app.quit();
 });
 
