@@ -1108,9 +1108,14 @@ export async function shutdownEverything(): Promise<void> {
   stopSoul(); // owned child tree + intentionalStop latch, all platforms
   if (IS_WINDOWS) return; // launchd/coturn are darwin concepts; taskkill /T covered the tree
 
+  // Every shell-out on the quit path is time-bounded. This function runs
+  // inside before-quit's preventDefault window, so anything that blocks here
+  // blocks the whole quit: the window is gone but the app sits in the Dock
+  // until Force Quit. `timeout` makes execFile SIGTERM the child and call
+  // back, so the promise always settles.
   const psOutput = await new Promise<string>((resolve) => {
-    execFile('/bin/ps', ['-A', '-o', 'pid=,command='], (err, stdout) =>
-      resolve(err ? '' : stdout));
+    execFile('/bin/ps', ['-A', '-o', 'pid=,command='], { timeout: 2500 },
+      (err, stdout) => resolve(err ? '' : stdout));
   });
   if (!psOutput) return;
 
@@ -1132,11 +1137,17 @@ export async function shutdownEverything(): Promise<void> {
   // entry behind (harmless but untidy, seen 2026-08-17).
   // getuid exists on every POSIX Node; the IS_WINDOWS return above is the
   // runtime guard, the optional call is for the type-checker only.
+  // BOUNDED, and that bound is load-bearing: `launchctl bootout` does not
+  // return until the job is actually gone, and UE can take seconds to release
+  // Metal (or wedge outright). Unbounded, this await was the quit hang —
+  // window closed, app stuck in the Dock forever. On timeout we fall through
+  // to the SIGTERM/SIGKILL sweep below, which kills the same process by pid.
   const uid = process.getuid?.();
   if (uid !== undefined) {
     await new Promise<void>((resolve) => {
       execFile('/bin/launchctl',
         ['bootout', `gui/${uid}/com.fotonlabs.unclaw.unreal`],
+        { timeout: 3000 },
         () => resolve() /* "no such service" when UE is not up, fine */);
     });
   }
@@ -1166,9 +1177,18 @@ export async function shutdownEverything(): Promise<void> {
     try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
   }
   if (victims.length) {
-    await new Promise((r) => setTimeout(r, 1500));
-    for (const pid of victims) {
-      try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+    // Poll instead of sleeping the full grace period: in the normal case
+    // everything is gone in a couple of hundred ms, and the quit path should
+    // not spend 1.5s waiting to discover that. Only a straggler pays the cap.
+    const deadline = Date.now() + 1500;
+    const alive = () => victims.filter((pid) => {
+      try { process.kill(pid, 0); return true; } catch { return false; }
+    });
+    while (Date.now() < deadline && alive().length) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    for (const pid of alive()) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
     }
   }
 }

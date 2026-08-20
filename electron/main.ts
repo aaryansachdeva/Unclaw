@@ -1614,7 +1614,14 @@ app.whenReady().then(() => {
   }
 });
 
-app.on('will-quit', () => {
+// The synchronous last-mile teardown. Extracted from will-quit so the
+// hard-exit watchdog below can run it too: app.exit() skips will-quit
+// entirely, and skipping this would leak plaintext BYOK keys and orphan UE.
+// Idempotent, so running it twice is harmless.
+let finalTeardownDone = false;
+function finalTeardown() {
+  if (finalTeardownDone) return;
+  finalTeardownDone = true;
   globalShortcut.unregisterAll();
   // A second instance that lost the single-instance lock is quitting
   // immediately (line ~1156) and never owned the soul/UE stack. It MUST NOT
@@ -1670,7 +1677,9 @@ app.on('will-quit', () => {
       }
     }
   }
-});
+}
+
+app.on('will-quit', finalTeardown);
 
 app.on('window-all-closed', () => {
   // Unclaw is a single-window foreground experience, not a typical
@@ -1688,16 +1697,48 @@ app.on('window-all-closed', () => {
 // ~1.6s. before-quit rather than will-quit because the sweep is async and
 // will-quit cannot wait; the preventDefault/flag dance runs it exactly once
 // and then resumes the quit.
+//
+// Two hard rules on this path, both learned the hard way:
+//   1. NOTHING may block it without a bound. shutdownEverything() shells out
+//      to ps and to `launchctl bootout`, and bootout does not return until the
+//      UE job is really gone. A wedged UE meant that promise never settled, so
+//      the .finally() never ran, app.quit() was never re-issued, and the app
+//      sat in the Dock with no window until Force Quit. That is the bug this
+//      race exists to make impossible.
+//   2. The process MUST end. app.quit() is a request, not a guarantee, so a
+//      watchdog force-exits after it, running the same teardown first.
+const SHUTDOWN_DEADLINE_MS = 6000;
+const HARD_EXIT_MS = 1500;
 let fullShutdownDone = false;
+let quitting = false;
 app.on('before-quit', (event) => {
+  quitting = true;
   if (fullShutdownDone) return;
   event.preventDefault();
   fullShutdownDone = true;
-  void shutdownEverything()
-    .catch(() => { /* quitting regardless */ })
-    .finally(() => app.quit());
+  // Instant feedback: the teardown takes a beat, and a window that sits there
+  // unresponsive after the user pressed X reads as a hang. Hide first, die
+  // second. Safe because the watchdog guarantees the process follows.
+  try { mainWindow?.hide(); } catch { /* already destroyed */ }
+  const deadline = new Promise<void>((resolve) => {
+    setTimeout(resolve, SHUTDOWN_DEADLINE_MS).unref?.();
+  });
+  void Promise.race([shutdownEverything().catch(() => { /* quitting regardless */ }), deadline])
+    .finally(() => {
+      app.quit();
+      setTimeout(() => {
+        // Still here: something re-prevented the quit or a stuck handle is
+        // holding the process open. will-quit may never have fired, so run
+        // its teardown (idempotent) before exiting for real.
+        finalTeardown();
+        app.exit(0);
+      }, HARD_EXIT_MS).unref?.();
+    });
 });
 
 app.on('activate', () => {
+  // Never resurrect the window mid-quit: clicking the Dock icon during the
+  // teardown window used to build a fresh window on a stack being torn down.
+  if (quitting) return;
   if (mainWindow === null) createWindow();
 });
