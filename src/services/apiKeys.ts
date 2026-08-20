@@ -727,6 +727,15 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
  *  user instead of trying to dispatch to a backend soul doesn't support. */
 function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
   const merged: ApiKeysProfile = { ...DEFAULT_API_KEYS, ...parsed };
+  // A gated-off engine must be migrated OFF, not just hidden from the
+  // dropdown. 1.1.8 shipped Pocket selectable; 1.1.9 gates it again because
+  // the generated audio is bad. Anyone who picked it still has it saved and
+  // would keep hearing the bad voice with no way to see why, since the option
+  // that explains their setting is no longer in the list. Supertonic is the
+  // like-for-like replacement: local, no key, real cloned per-character voices.
+  if (!POCKET_TTS_ENABLED && merged.tts_provider === 'pocket') {
+    merged.tts_provider = 'supertonic';
+  }
   if (merged.llm_provider && !VALID_PROVIDER_IDS.has(merged.llm_provider)) {
     // Stale provider — drop the {provider, model, key} triple together
     // so the user gets prompted to pick from the new catalog.
@@ -891,6 +900,7 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
 // error during onboarding instead of as a 502 on first chat.
 
 import { getSoulBaseUrl } from './soulBase';
+import { POCKET_TTS_ENABLED } from '../features';
 
 export interface KeyValidationOutcome {
   ok: boolean;

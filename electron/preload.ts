@@ -682,6 +682,32 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
     let videoEl: HTMLVideoElement | null = null;
     let diag: HTMLCanvasElement | null = null;
     let writeFails = 0;
+    let gamutApplied = false;
+    let lastPublishedW = 0;
+    let lastPublishedH = 0;
+
+    // Gamut match (2026-08-18): UE lights its scenes against an UNMANAGED
+    // window, which a P3 display shows punchy; Chromium colour-manages our
+    // frames as sRGB and renders them flatter than authored. Reuse the WebRTC
+    // path's P3-to-sRGB feColorMatrix (defined by StreamView, same toggle
+    // key). Tagging the imported texture as P3 instead renders black through
+    // the generator path — see directSurface.ts.
+    //
+    // Idempotent and retryable: the filter def belongs to React, which may not
+    // have mounted when the first frame arrives.
+    const applyGamutFilter = (): void => {
+      if (gamutApplied || !videoEl) return;
+      try {
+        if (localStorage.getItem('unclaw-stream-gamut-off') != null) {
+          gamutApplied = true; // deliberately off; stop retrying
+          return;
+        }
+        if (!document.getElementById('ue-gamut-match')) return; // def not up yet
+        videoEl.style.filter = 'url(#ue-gamut-match)';
+        gamutApplied = true;
+        console.log('[direct-canvas] gamut match applied');
+      } catch { /* filter is cosmetic */ }
+    };
     let lastFrameAt = 0;
 
     // The preload OWNS the injected video element's visibility, because it is
@@ -698,6 +724,9 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
       gen = null;
       genWriter = null;
       writeFails = 0;
+      // The rebuilt element is a fresh DOM node with no inline filter, so the
+      // gamut match has to be re-applied to it rather than assumed.
+      gamutApplied = false;
     };
 
     // Frames-stalled watchdog: if nothing has been drawn for 2.5s the picture
@@ -732,12 +761,7 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
         // (defined by StreamView, same toggle key). Tagging the imported
         // texture as P3 instead renders black through the generator path —
         // see directSurface.ts.
-        try {
-          if (localStorage.getItem('unclaw-stream-gamut-off') == null
-              && document.getElementById('ue-gamut-match')) {
-            videoEl.style.filter = 'url(#ue-gamut-match)';
-          }
-        } catch { /* filter is cosmetic */ }
+        applyGamutFilter();
         canvas!.style.display = 'none';
         canvas!.parentElement!.insertBefore(videoEl, canvas!);
         videoEl.srcObject = new MediaStream([gen]);
@@ -763,7 +787,34 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
         // the whole chain from scratch.
         if (++writeFails >= 3) teardownVideoPipeline('generator writer poisoned');
       });
+      const vfW = out.displayWidth || vf.displayWidth;
+      const vfH = out.displayHeight || vf.displayHeight;
       if (wrapped) vf.close();
+      // The filter is applied at element creation, but on a cold first launch
+      // the direct path can attach BEFORE React has mounted StreamView, so the
+      // <filter id="ue-gamut-match"> def does not exist yet and the lookup
+      // silently no-ops — leaving the stream flat until a refresh happens to
+      // reorder the two. Retry each frame until it sticks; it is a no-op once
+      // applied and the flag makes it one comparison per frame after that.
+      if (!gamutApplied) applyGamutFilter();
+      // Ground truth for the resolution reconciler, mirrored into the DOM the
+      // same way directLive is. This is what Unreal is ACTUALLY rendering.
+      //
+      // Needed because the reconciler's dedupe records the resolution it sent
+      // before knowing the send landed, and on a cold first launch Unreal is
+      // still starting when the early sends go out, so they are dropped and
+      // every later tick is deduped away — Unreal stays at its launch
+      // 720x1280 and the character looks zoomed in until a manual refresh.
+      // The WebRTC path self-heals from the <video> intrinsic size; in direct
+      // mode the SDK's video is idle, but OUR injected element is fed by the
+      // generator and carries the real frame size, so publish it.
+      if (vfW && vfH && (vfW !== lastPublishedW || vfH !== lastPublishedH)) {
+        lastPublishedW = vfW; lastPublishedH = vfH;
+        try {
+          document.documentElement.dataset.unclawDirectSize = `${vfW}x${vfH}`;
+          document.dispatchEvent(new Event('unclaw:direct-status'));
+        } catch { /* document not ready; next frame republishes */ }
+      }
       const n = drawn + 1;
       if (n === 1 || n % 1800 === 0) {
         // Health grid: the frame reaches the element asynchronously, so

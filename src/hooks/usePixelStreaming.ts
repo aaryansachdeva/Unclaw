@@ -508,6 +508,33 @@ export function usePixelStreaming({
     // value), so a transient mismatch while UE is mid-apply costs nothing, and
     // a genuinely lost send now recovers within one 3s tick instead of never.
     const reconcile = window.setInterval(() => {
+      // DIRECT PATH closed loop (2026-08-20). The dedupe below records what we
+      // SENT before knowing it landed, and emitCommand is fire-and-forget. On
+      // a COLD FIRST LAUNCH Unreal is still starting when the early sends go
+      // out, so they are dropped, the dedupe is already primed, and every
+      // later tick returns early — Unreal renders at its launch 720x1280 for
+      // the whole session and the character looks zoomed in. A manual refresh
+      // "fixed" it only because it reset this state.
+      //
+      // The WebRTC branch below self-heals from the <video> intrinsic size.
+      // Direct mode has no such evidence in the SDK's element (idle encoder),
+      // so the preload publishes the size of the frames it is actually drawing
+      // as `data-unclaw-direct-size`. Disagreement means the send was lost:
+      // drop the dedupe so this same tick re-sends.
+      if (directLive) {
+        const published = document.documentElement.dataset.unclawDirectSize;
+        const [aw, ah] = (published ?? '').split('x').map((n) => parseInt(n, 10));
+        if (aw > 0 && ah > 0 && lastSentRes.w > 0
+            && (aw !== lastSentRes.w || ah !== lastSentRes.h)) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[ps] direct frames are ${aw}x${ah} but target is `
+            + `${lastSentRes.w}x${lastSentRes.h} — resolution send was lost, re-sending`,
+          );
+          lastSentRes.w = -1;
+          lastSentRes.h = -1;
+        }
+      }
       const video = videoParentRef.current?.querySelector('video');
       if (
         // Skipped while the direct path is live: the <video> is frozen at its

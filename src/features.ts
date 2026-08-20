@@ -18,14 +18,18 @@ export const CUSTOM_CHARACTERS_ENABLED = false
 
 /** Kyutai Pocket-TTS as a selectable voice engine.
  *
- *  ON as of 1.1.8. It was off in 1.1.7 because the only implementation then
- *  was the official pip package, which needs torch — 533 MB that was
- *  deliberately removed from requirements-mac on 2026-07-17.
+ *  OFF again as of 1.1.9. It shipped ON in 1.1.8 running on MLX, and the
+ *  plumbing all worked — weights and per-character cloned embeddings loaded
+ *  offline, speed measured at 17.6-20.1x realtime — but the AUDIO ITSELF is
+ *  bad. Aryan's verdict on the shipped build: "it doesn't work well, the
+ *  audio is busted that it generates."
  *
- *  soul now runs Pocket on **MLX** instead (`mlx_audio`, already a dependency
- *  because Kokoro uses it), so it costs zero extra install bytes and measures
- *  FASTER than the torch path: 17.6x realtime warm vs ~13x. Weights and the
- *  free characters' voice embeddings ship in runtimeAssets 2026.0820.01;
- *  paid characters' embeddings are entitlement-gated alongside their paks.
- *  Verified loading and speaking with HF_HUB_OFFLINE=1 on an empty data dir. */
-export const POCKET_TTS_ENABLED = true
+ *  So this is a QUALITY gate, not a plumbing gate. Everything behind it stays
+ *  in place and working: the MLX runtime, the shipped weights in
+ *  runtimeAssets, the entitlement-gated per-character embeddings, the store
+ *  Worker route. Flipping this back to `true` re-exposes all of it.
+ *
+ *  Before flipping it: listen to the output next to Supertonic. The suspects
+ *  are the MLX conversion itself (try the bf16 vs quantized variants) and our
+ *  per-sentence state copy, which resets the flow cache each sentence. */
+export const POCKET_TTS_ENABLED = false
