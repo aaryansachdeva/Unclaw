@@ -17,6 +17,7 @@ import { WeatherPanel } from './components/Weather';
 import { ACCENT_COLORS, BG_COLORS, BG_GLOW_DEFAULT, LIGHT_INTENSITY_DEFAULT, CLOTHING_COLORS } from './components/CustomizationOverlay';
 import { CustomWardrobe } from './components/CustomWardrobe';
 import { IDENTITY_HOSTS } from './wardrobe/catalog';
+import { CUSTOM_CHARACTERS_ENABLED } from './features';
 import { CameraModeToggle } from './components/CameraModeToggle';
 import { StreamEffects } from './components/StreamEffects';
 import { dressCharacter, type DressScope } from './wardrobe/dressCharacter';
@@ -1052,14 +1053,19 @@ function AppMain() {
   // Roster for the InputBar's dropdown switcher: each instance with its
   // on-screen name (same derivation as `characterName`). The Add slot is NOT
   // in this list — it's the separate + button.
+  // While photo-identity is gated off, identity-host instances a previous
+  // build (or a synced roster) left behind stay in the stack but drop out of
+  // the switcher, so the feature is unreachable from every surface.
   const personaAgents = useMemo(
-    () => agentStack.map((i) => ({
-      id: i.id,
-      name: i.name?.trim()
-        || (i.id === BASE_INSTANCE_ID
-          ? (profile?.agent_name ?? AGENTS[0].name)
-          : (agentById[i.agentId]?.name ?? 'Grace')),
-    })),
+    () => agentStack
+      .filter((i) => CUSTOM_CHARACTERS_ENABLED || !IDENTITY_HOSTS.has(i.agentId))
+      .map((i) => ({
+        id: i.id,
+        name: i.name?.trim()
+          || (i.id === BASE_INSTANCE_ID
+            ? (profile?.agent_name ?? AGENTS[0].name)
+            : (agentById[i.agentId]?.name ?? 'Grace')),
+      })),
     [agentStack, profile?.agent_name, agentById],
   );
 
@@ -1244,6 +1250,17 @@ function AppMain() {
       if (inst) switchUeToAgent(inst.agentId, dir, inst.wardrobe);
     }
   }, [onAddSlot, agentStack, selectedInstanceId, emitAgentSwitch, switchUeToAgent]);
+
+  // Gate rescue: a roster synced from a build where photo-identity was ON can
+  // land us on an identity-host instance that the switcher now hides. Without
+  // this the user is parked on a character they cannot switch away from.
+  useEffect(() => {
+    if (CUSTOM_CHARACTERS_ENABLED) return;
+    if (onAddSlot || !currentInstance) return;
+    if (!IDENTITY_HOSTS.has(currentInstance.agentId)) return;
+    const fallback = agentStack.find((i) => !IDENTITY_HOSTS.has(i.agentId));
+    if (fallback) selectInstance(fallback.id, 1);
+  }, [onAddSlot, currentInstance, agentStack, selectInstance]);
 
   const handlePickAgent = useCallback((agentId: string) => {
     const id = addInstance(agentId);
@@ -4308,6 +4325,7 @@ function AppMain() {
             onRemove={handleRemoveInstance}
             onCancel={handleCancelAdd}
             onAddCustom={() => setAddCustomOpen(true)}
+            allowCustom={CUSTOM_CHARACTERS_ENABLED}
             customInstances={agentStack
               .filter((i) => IDENTITY_HOSTS.has(i.agentId))
               .map((i) => ({ instanceId: i.id, name: i.name?.trim() || 'Custom' }))}
@@ -4316,9 +4334,11 @@ function AppMain() {
         )}
       </AnimatePresence>
 
-      {/* Photo-capture flow for a custom agent, layered over the picker. */}
+      {/* Photo-capture flow for a custom agent, layered over the picker.
+          Gated: with CUSTOM_CHARACTERS_ENABLED off nothing can open it, and
+          the mount is guarded too so no future entry point can either. */}
       <AnimatePresence>
-        {addCustomOpen && (
+        {CUSTOM_CHARACTERS_ENABLED && addCustomOpen && (
           <AddCustomOverlay
             key="add-custom"
             authToken={authToken ?? null}

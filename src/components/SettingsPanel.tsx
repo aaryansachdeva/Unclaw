@@ -41,6 +41,7 @@ import {
   type TtsProviderId,
 } from '../services/apiKeys';
 import { Dropdown } from './Onboarding/Dropdown';
+import { POCKET_TTS_ENABLED } from '../features';
 import { usePassthroughPrefs } from '../hooks/usePassthroughPrefs';
 import { Slider } from './Onboarding/Slider';
 import { TZ_CATALOG } from './Onboarding/IdentityStep';
@@ -818,7 +819,12 @@ function VoiceFacet({ draft, update }: PaneContext) {
             onChange={(v) => update('tts_provider', v as TtsProviderId)}
             options={[
               { id: 'elevenlabs', label: 'ElevenLabs (cloud, realistic)' },
-              { id: 'pocket',     label: 'Pocket (local, cloned voices, fastest)' },
+              // Pocket is hidden unless POCKET_TTS_ENABLED: a packaged install
+              // has neither torch nor pocket_tts, so offering it would be a
+              // dead option. Same treatment qwen3 already gets.
+              ...(POCKET_TTS_ENABLED
+                ? [{ id: 'pocket', label: 'Pocket (local, cloned voices, fastest)' }]
+                : []),
               { id: 'supertonic', label: 'Supertonic-3 (local, 31 languages, ~5× realtime)' },
               { id: 'kokoro',     label: 'Kokoro (local, open-weight)' },
             ]}

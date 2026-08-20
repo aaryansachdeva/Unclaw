@@ -60,12 +60,15 @@ interface AddCharacterPickerProps {
   customInstances?: { instanceId: string; name: string }[];
   /** Switch to an EXISTING custom instance (vs onPick which adds a new one). */
   onPickInstance?: (instanceId: string) => void;
+  /** False hides the whole photo-identity surface: the "Add custom" tile and
+   *  any saved custom instances. Driven by CUSTOM_CHARACTERS_ENABLED. */
+  allowCustom?: boolean;
 }
 
 export function AddCharacterPicker({
   entries, bundle, roster, agentById, baseInstanceId,
   onPick, onBuy, onDownload, onRename, onRemove, onCancel, onAddCustom,
-  customInstances, onPickInstance,
+  customInstances, onPickInstance, allowCustom = true,
 }: AddCharacterPickerProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -183,7 +186,7 @@ export function AddCharacterPicker({
             onDownload={() => onDownload(e.agent.agentId)}
           />
         ))}
-        {(customInstances ?? []).map((c, i) => (
+        {allowCustom && (customInstances ?? []).map((c, i) => (
           <CustomInstanceCard
             key={c.instanceId}
             name={c.name}
@@ -191,7 +194,9 @@ export function AddCharacterPicker({
             onClick={() => onPickInstance?.(c.instanceId)}
           />
         ))}
-        <AddCustomCard delay={0.12 + (entries.length + (customInstances?.length ?? 0)) * 0.05} onClick={onAddCustom} />
+        {allowCustom && (
+          <AddCustomCard delay={0.12 + (entries.length + (customInstances?.length ?? 0)) * 0.05} onClick={onAddCustom} />
+        )}
       </div>
 
       {/* unlock-all bundle */}
