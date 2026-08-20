@@ -1223,7 +1223,9 @@ export async function downloadAndExtractCharacterPak(
 //   supertonic -> <SOUL_DATA>/supertonic/voices/<id>.json
 //   kokoro     -> <SOUL_DATA>/kokoro/voices/<id>_kokoro.safetensors
 // ----------------------------------------------------------------------
-function soulVoicesDir(engine: 'supertonic' | 'kokoro'): string {
+type VoiceEngine = 'supertonic' | 'kokoro' | 'pocket';
+
+function soulVoicesDir(engine: VoiceEngine): string {
   // getSoulDataDir() resolves SOUL_DATA_DIR exactly like run_soul, so this lands
   // where soul reads in BOTH packaged (<runtime>/data) and dev. On Windows dev,
   // getSoulDataDir() -> resolveSoulScript().cwd/data, and resolveSoulScript
@@ -1235,16 +1237,27 @@ function soulVoicesDir(engine: 'supertonic' | 'kokoro'): string {
 /** Expected on-disk voice filenames for a character, by engine. Kept in lockstep
  *  with src/characters/<id>.ts (supertonic stem `<id>`, kokoro stem `<id>_kokoro`)
  *  and the store Worker's /voice key layout. */
-function voiceFileNames(characterId: string): { supertonic: string; kokoro: string } {
+function voiceFileNames(characterId: string): Record<VoiceEngine, string> {
   assertSafeCharacterId(characterId);
-  return { supertonic: `${characterId}.json`, kokoro: `${characterId}_kokoro.safetensors` };
+  return {
+    supertonic: `${characterId}.json`,
+    kokoro: `${characterId}_kokoro.safetensors`,
+    // Pocket's per-character file is the MLX conditioning embedding
+    // (`{audio_prompt: tensor}`), ~1.1 MB, which pocket_runtime loads as its
+    // tier-1 voice. The R2 object is `<id>_pocket.safetensors` so it cannot
+    // collide with kokoro's key; on disk it is `<id>.safetensors` because
+    // pocket_runtime looks it up by bare voice name.
+    pocket: `${characterId}.safetensors`,
+  };
 }
 
 /** Which of a character's voice files are already present on disk (non-empty).
  *  Lets the renderer skip a gated fetch when nothing is missing. */
-export function characterVoicesPresent(characterId: string): { supertonic: boolean; kokoro: boolean } {
+export function characterVoicesPresent(
+  characterId: string,
+): Record<VoiceEngine, boolean> {
   const names = voiceFileNames(characterId);
-  const ok = (engine: 'supertonic' | 'kokoro', name: string): boolean => {
+  const ok = (engine: VoiceEngine, name: string): boolean => {
     try {
       const st = fs.statSync(path.join(soulVoicesDir(engine), name));
       return st.isFile() && st.size > 0;
@@ -1253,11 +1266,12 @@ export function characterVoicesPresent(characterId: string): { supertonic: boole
   return {
     supertonic: ok('supertonic', names.supertonic),
     kokoro: ok('kokoro', names.kokoro),
+    pocket: ok('pocket', names.pocket),
   };
 }
 
 export interface VoiceDownloadFile {
-  kind: 'supertonic' | 'kokoro';
+  kind: VoiceEngine;
   filename: string;
   url: string;
 }
@@ -1275,10 +1289,10 @@ export async function downloadCharacterVoices(
   const names = voiceFileNames(characterId);
   let written = 0;
   for (const f of files) {
-    if (f.kind !== 'supertonic' && f.kind !== 'kokoro') continue;
+    if (f.kind !== 'supertonic' && f.kind !== 'kokoro' && f.kind !== 'pocket') continue;
     // Force the destination name from the trusted id, never the server-supplied
     // filename, so a rogue presign response can't write outside the voices dir.
-    const destName = f.kind === 'supertonic' ? names.supertonic : names.kokoro;
+    const destName = names[f.kind];
     const dir = soulVoicesDir(f.kind);
     fs.mkdirSync(dir, { recursive: true });
     const dest = path.join(dir, destName);

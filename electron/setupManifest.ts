@@ -108,15 +108,19 @@ export function storePlatformParam(): 'windows' | 'mac' {
 }
 
 export const MANIFEST: SetupManifest = {
-  releaseTag: '2026.0720.01-mac',
+  releaseTag: '2026.0819.01-mac',
   pythonVersion: '3.11',
   minFreeDiskBytes: 15 * 1024 * 1024 * 1024, // 15 GB
 
   unreal: {
-    // 2026.0720.09 Mac build (UE 5.8). Multi-character customization: Grace
-    // collapsed to grace_custom + kevin_custom (custom builds), legacy
-    // mark/ava/goblin/chris/joi; heavier grain, effect cleanup, per-region
-    // customization camera, wardrobe default indices. Ships the base chunks
+    // 2026.0816.01 Mac build (UE 5.8), Shipping config. Carries the IOSurface
+    // publisher (the direct zero-copy display path), fixed-step 24 fps via the
+    // bundle UserEngine.ini, and the URO revert (animation update-rate
+    // optimization was visibly laggy and was turned back off).
+    //
+    // Lineage: multi-character customization, Grace collapsed to grace_custom
+    // + kevin_custom (custom builds), legacy mark/ava/goblin/chris/joi;
+    // per-region customization camera, wardrobe default indices. Ships the base chunks
     // chunk0 (base + grace_custom/kevin_custom + shared wardrobe) + chunk5
     // (Mark, MALE base body) + chunk6 (Syd, FEMALE base body) so both custom
     // characters spawn with a body. Paid chunks (ava/goblin/chris/joi =
@@ -130,12 +134,12 @@ export const MANIFEST: SetupManifest = {
     // entry), custom AppIcon.icns, Assets.car deleted, ad-hoc re-signed
     // WITHOUT --options runtime (libtbb team-ID mismatch crash-loops if
     // hardened runtime is on, see Mac - Known Issues and Gotchas).
-    url: 'https://files.fotonlabs.com/mac/unreal/unreal-2026.0805.02-mac.zip',
-    sha256: 'f7fb707b501256246c7984ab7ccda1895a63e5fb1411bfc7fcc05a8d5ca22509',
-    sizeBytes: 3_254_326_056,
+    url: 'https://files.fotonlabs.com/mac/unreal/unreal-2026.0816.01-mac.zip',
+    sha256: 'd210e1d035ba367a443c16277952e4215f64561b14503ea66d84be7d3b1265c4',
+    sizeBytes: 3_536_962_590,
     // Seeds the updater ledger so a fresh install doesn't re-download this
-    // ~3 GB bundle. MUST equal the `unreal` version in remote latest.json.
-    version: '2026.0805.02',
+    // ~3.5 GB bundle. MUST equal the `unreal` version in remote latest.json.
+    version: '2026.0816.01',
   },
 
   runtimeAssets: {
@@ -150,35 +154,58 @@ export const MANIFEST: SetupManifest = {
     // expression generator and soul's run_text2face wrapper serves it for
     // every caller including /express. Pairs with the soul commit
     // "expression: retire the t2f neural model".
-    url: 'https://files.fotonlabs.com/mac/assets/runtime-2026.0805.02-mac.zip',
-    sha256: 'ab058f38206ce6bbe843e97a5de9fb46cb9d35b47ce8e39bdbe438b08a499683',
-    sizeBytes: 800_421_228,
+    // 2026.0820.01: adds soul-models/pocket/ — the MLX Pocket-TTS weights
+    // (~229 MB, converted from the UNGATED kyutai checkpoint) plus the FREE
+    // characters' voice embeddings (grace/kevin/mark, ~1.1 MB each). Paid
+    // characters' embeddings are NOT here; they are entitlement-gated next to
+    // their paks and installed post-purchase. Verified: with HF_HUB_OFFLINE=1
+    // and an empty data dir, soul loads these weights and speaks in Grace's
+    // cloned voice, so a packaged install never needs the network to talk.
+    url: 'https://files.fotonlabs.com/mac/assets/runtime-2026.0820.01-mac.zip',
+    sha256: '5cec1cf3989019a9bec140a00dfe483dd3514d4bd3a118a3a6e60e6ee318b6b2',
+    sizeBytes: 997_529_686,
     // Seeds the updater ledger (see unreal above). MUST equal the `assets`
     // version in remote latest.json.
-    version: '2026.0805.02',
+    version: '2026.0820.01',
   },
 
-  // Paid character paks. Cooked from AudioTestProject02 build 2026.0607.03 as
-  // per-character chunks (chunk1=ava .. chunk4=joi), each zipped (<id>.pak
-  // inside) and uploaded to the PRIVATE R2 bucket unclaw-paks-private at
-  // characters/<id>/current.zip. `url` is documentation only, the real,
+  // Paid character paks. Cooked as per-character chunks (chunk1=ava ..
+  // chunk4=joi), each zipped (<id>.pak inside) and uploaded to the PRIVATE R2
+  // bucket unclaw-paks-private. `url` is documentation only, the real,
   // short-lived presigned download URL is handed back by the store Worker after
   // it verifies the account's entitlement; sha256 + sizeBytes here verify the
   // exact bytes (same discipline as the base bundles). grace + mark are free and
   // ship in the base app (chunk0/chunk5), so they have no entry here.
-  // mac hashes: Mac build 2026.0720.09 (chunk1=ava..chunk4=joi, from the
-  // manual UnrealPak split of the monolithic Mac cook — see Mac - UE 5.8
-  // Chunked Pak Bug and Manual Split). MUST match the base app's UE build.
-  // windows hashes: Windows build 2026.0611.01 (pakchunk1-4-Windows.pak), each
-  // re-zipped store-0 as <id>.pak → uploaded to characters/<id>/windows/current.zip.
+  //
+  // BOTH key forms are uploaded for every character: the Worker maps
+  // `?v=<version>` -> characters/<id>/<id>-<version>.zip and no-v ->
+  // characters/<id>/current.zip. NOTE: the live client (services/store.ts
+  // fetchDownloadUrl) sends only ?platform=, so `current.zip` is what actually
+  // gets served today; `version` below is the SIDECAR drift stamp, not the
+  // download key. The versioned key is still uploaded so a pinned client or a
+  // rollback has something to point at.
+  //
+  // CROSS-PLATFORM: `version` is shared by the mac + windows entries. Bumping
+  // it for a Mac-only ship makes Windows installs see one spurious "stale"
+  // re-download when this branch merges; it self-heals because the bytes it
+  // re-fetches (windows current.zip) still match the windows sha256 below.
+  //
+  // mac hashes: Mac build 2026.0805.02 (from the manual UnrealPak split of the
+  // monolithic Mac cook — see Mac - UE 5.8 Chunked Pak Bug and Manual Split).
+  // MUST match the base app's UE build, which is why these move in lockstep
+  // with manifest.unreal above.
+  // windows hashes: Windows build 2026.0805.03, each re-zipped store-0 as
+  // <id>.pak -> characters/<id>/windows/{current,<id>-<version>}.zip.
+  // (Verified against the live bucket 2026-08-19: all four Mac paks present in
+  // both key forms, sizes byte-exact against the entries below.)
   characterPaks: {
     ava: {
       characterId: 'ava',
-      version: '2026.0805.02',
+      version: '2026.0816.01',
       url: 'https://store.unclaw.io/store/characters/ava/download',
       mac: {
-        sha256: '3382019186d7d8fa052ac873f670b07faa6833e7e13414ef350addc5236efe88',
-        sizeBytes: 154_861_995,
+        sha256: '921db2da03527cc42a7605e183678482e72d4139b8bdd15c48a95234bfd65ac3',
+        sizeBytes: 167_550_166,
       },
       windows: {
         sha256: '77fbfdb846dff62dd9a1be8c6de44f5a1740fe1941e6a640bfcd6da78f638e33',
@@ -187,11 +214,11 @@ export const MANIFEST: SetupManifest = {
     },
     goblin: {
       characterId: 'goblin',
-      version: '2026.0805.02',
+      version: '2026.0816.01',
       url: 'https://store.unclaw.io/store/characters/goblin/download',
       mac: {
-        sha256: '4bd6d43c1137c873a05c998d45f5a76dcc7b141de2d44a7f2977bd2a8aa2bd67',
-        sizeBytes: 114_134_314,
+        sha256: 'bf89f3aabd1130df16277b5f46d75fe80135201d39f244edd17e4b8981faeebd',
+        sizeBytes: 126_853_511,
       },
       windows: {
         sha256: '1676aa23eb3408a74032c892ac86926c67de92c90d8e49989a4a051ea3b0d868',
@@ -200,11 +227,11 @@ export const MANIFEST: SetupManifest = {
     },
     chris: {
       characterId: 'chris',
-      version: '2026.0805.02',
+      version: '2026.0816.01',
       url: 'https://store.unclaw.io/store/characters/chris/download',
       mac: {
-        sha256: '0099eb521e2eb8bc2499b8f8632eac469a4dd61e2dfdbd733b5c15b619b3cafa',
-        sizeBytes: 151_990_613,
+        sha256: 'b063b479e3ce63773aa2e4d1b7ce072102852f1fff29c7b1786cc6987f4e82be',
+        sizeBytes: 164_941_577,
       },
       windows: {
         sha256: '011078b17d5a345e6ddc4eb220b0a3da7524702b2c3d01563507c02f1ee8e0df',
@@ -213,11 +240,11 @@ export const MANIFEST: SetupManifest = {
     },
     joi: {
       characterId: 'joi',
-      version: '2026.0805.02',
+      version: '2026.0816.01',
       url: 'https://store.unclaw.io/store/characters/joi/download',
       mac: {
-        sha256: '550e1d2ff21db6b492eaf9b8eed2a1490d8722e6570307f1777cd23eec0c39c9',
-        sizeBytes: 162_577_343,
+        sha256: '7390936757660b786b4df5e861412ad092f7fc5f46c0d9079e6c726306c310f9',
+        sizeBytes: 175_285_983,
       },
       windows: {
         sha256: '10af1338b4543205dad983384d7e007a26020ede0925d0dd610d003b2d90fb50',

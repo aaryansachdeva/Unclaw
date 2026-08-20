@@ -1,6 +1,6 @@
 {
   "name": "unclaw",
-  "version": "1.1.6",
+  "version": "1.1.8",
   "description": "Unclaw",
   "main": "dist/electron/main.js",
   "scripts": {
@@ -63,6 +63,10 @@
           "uv",
           "uvx"
         ]
+      },
+      {
+        "from": "electron/native/surface_layer/build/Release/surface_layer.node",
+        "to": "surface_layer.node"
       }
     ],
     "win": {

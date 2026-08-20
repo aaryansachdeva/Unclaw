@@ -18,13 +18,14 @@ export const CUSTOM_CHARACTERS_ENABLED = false
 
 /** Kyutai Pocket-TTS as a selectable voice engine.
  *
- *  OFF for the Mac 1.1.7 ship, and this one is not close: requirements-mac.txt
- *  deliberately carries NO torch (the installer uninstalls it after the
- *  resolve) and pocket_tts is not a dependency at all, so a packaged install
- *  physically cannot run it. The cloned voice states in data/pocket/voices/
- *  are also not in runtimeAssets. A dev machine that pip-installed both by
- *  hand still works with the flag flipped on.
+ *  ON as of 1.1.8. It was off in 1.1.7 because the only implementation then
+ *  was the official pip package, which needs torch — 533 MB that was
+ *  deliberately removed from requirements-mac on 2026-07-17.
  *
- *  To ship it: add pocket_tts + torch to requirements-mac.txt, bump the wizard
- *  releaseTag, and put the voice states in the runtimeAssets bundle. */
-export const POCKET_TTS_ENABLED = false
+ *  soul now runs Pocket on **MLX** instead (`mlx_audio`, already a dependency
+ *  because Kokoro uses it), so it costs zero extra install bytes and measures
+ *  FASTER than the torch path: 17.6x realtime warm vs ~13x. Weights and the
+ *  free characters' voice embeddings ship in runtimeAssets 2026.0820.01;
+ *  paid characters' embeddings are entitlement-gated alongside their paks.
+ *  Verified loading and speaking with HF_HUB_OFFLINE=1 on an empty data dir. */
+export const POCKET_TTS_ENABLED = true

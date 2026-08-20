@@ -248,21 +248,29 @@ export function usePixelStreaming({
         const controller = (ps as any)._webRtcController;
         installDprResolutionOverride(controller?.videoPlayer);
 
-        // Direct path: measure the element ourselves instead of asking the SDK.
-        // updateVideoStreamSize() sizes from the <video>, and with the direct
-        // path attached the encoder is idle so that video never receives a
-        // frame, never plays and reports nothing — leaving UE at its launch
-        // -ResX/-ResY for the entire session (observed 2026-08-11: 720x1280
-        // upscaled into a 1182x1536 window, a visibly soft avatar). The
-        // element's own layout box is the honest source in both modes and
-        // needs no WebRTC at all. `visibility: hidden` still lays out, so the
-        // rect is real while the video is hidden underneath the native layer.
-        if (directLive) {
-          const el = videoParentRef.current;
-          if (el) {
-            const r = el.getBoundingClientRect();
-            applyTargetResolution(r.width, r.height);
-          }
+        // Measure the element ourselves. updateVideoStreamSize() sizes from the
+        // <video>, and with the direct path attached the encoder is idle so
+        // that video never receives a frame, never plays and reports nothing —
+        // leaving UE at its launch -ResX/-ResY for the entire session
+        // (observed 2026-08-11: 720x1280 upscaled into a 1182x1536 window, a
+        // visibly soft avatar). The element's own layout box is the honest
+        // source in BOTH modes and needs no WebRTC at all; `visibility: hidden`
+        // still lays out, so the rect is real while the video is hidden
+        // underneath the native layer.
+        //
+        // Deliberately NOT gated on `directLive` any more (2026-08-19). It was,
+        // and the exact 720x1280 strand came back: direct mode went default-on,
+        // and any path where the directLive signal fails to reach this hook —
+        // the bridge callback missing, the DOM mirror not yet stamped, a status
+        // event landing before the listener attaches — silently fell through to
+        // the SDK branch and measured the dead <video>, which reports 0 and
+        // bails without ever sending. The layout box does not care which
+        // transport is carrying pixels, so ask it first and keep the SDK call
+        // only as the fallback for a not-yet-laid-out element.
+        const el = videoParentRef.current;
+        const r = el?.getBoundingClientRect();
+        if (r && r.width >= 64 && r.height >= 64) {
+          applyTargetResolution(r.width, r.height);
           return;
         }
         controller?.videoPlayer?.updateVideoStreamSize?.();

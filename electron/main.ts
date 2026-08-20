@@ -38,6 +38,25 @@ import * as directSurface from './directSurface';
 // Must run before app ready, so module top level.
 app.commandLine.appendSwitch('force-gpu-mem-available-mb', '512');
 
+// Direct IOSurface display path: ON by default on macOS as of 1.1.8.
+//
+// Resolved HERE, at module top level, and written back into process.env rather
+// than being computed per-reader. Three separate places consume this — this
+// process, the preload (which decides whether to install the shared-texture
+// receiver), and soulSupervisor (which must set UNCLAW_UE_LAUNCHD so UE is
+// spawned by launchd and can own the Mach service) — and if any of them
+// disagreed about the default we would get a half-armed pipeline. Renderer
+// processes inherit the environment at spawn, which happens well after this
+// line, so one assignment covers all three.
+//
+// `UNCLAW_DIRECT_SURFACE=0` opts out and falls back to WebRTC. The path also
+// degrades on its own if the engine has no publisher (older UE bundle) or the
+// native addon is missing: directSurface logs "no publisher — WebRTC still in
+// use" and the stream continues over WebRTC.
+if (process.platform === 'darwin' && !process.env.UNCLAW_DIRECT_SURFACE) {
+  process.env.UNCLAW_DIRECT_SURFACE = '2';
+}
+
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -1470,7 +1489,13 @@ ipcMain.handle('character-store:has-voices', async (_event, args: { characterId:
   if (!args?.characterId) return { ok: false, error: 'invalid_args' };
   try {
     const present = characterVoicesPresent(args.characterId);
-    return { ok: true, present, complete: present.supertonic && present.kokoro };
+    // `complete` must count EVERY engine we ship, or adding one strands every
+    // existing owner: they already have supertonic + kokoro on disk, so the
+    // renderer short-circuits before the gated fetch and the new engine's file
+    // never arrives. Adding pocket to this AND to characterVoicesPresent is
+    // what makes 1.1.8 backfill it for characters bought before 1.1.8.
+    const complete = present.supertonic && present.kokoro && present.pocket;
+    return { ok: true, present, complete };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
