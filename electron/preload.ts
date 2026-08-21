@@ -9,6 +9,83 @@ interface SoulPortsPayload {
   signallingPlayer: number;
 }
 
+// Freeze the picture when another surface takes the stream.
+//
+// Two earlier attempts failed, so this asserts a still image rather than
+// trying to stop motion:
+//   1. Detaching the direct path stops NEW frames, but the <video> is fed
+//      by a MediaStreamTrackGenerator and kept advancing through frames it
+//      had already buffered.
+//   2. pause() on that element still left the backdrop-filter blur
+//      sampling a moving picture.
+// So: copy the current frame into the canvas that already sits in the same
+// place, show the canvas, and hide the video outright. A canvas holding a
+// drawn bitmap cannot animate, whatever the media stack does.
+const freezeForLease = (holder: 'local' | 'remote'): void => {
+  const v = document.querySelector<HTMLVideoElement>('video[data-direct-video]');
+  if (!v || !v.parentElement) {
+    console.warn(`[direct-canvas] freeze(${holder}): no direct video element — cannot snapshot`);
+    return;
+  }
+
+  // Dedicated element, created and owned HERE. Deliberately NOT the
+  // <canvas data-direct-canvas> that StreamView renders: React owns that
+  // node's `visibility` (it binds it to directLive), so every re-render
+  // stomped the snapshot back to hidden. Three attempts at freezing the
+  // picture failed on variations of that fight.
+  let frozen = v.parentElement.querySelector<HTMLCanvasElement>('canvas[data-frozen-frame]');
+  if (!frozen) {
+    frozen = document.createElement('canvas');
+    frozen.dataset.frozenFrame = '1';
+    frozen.style.cssText =
+      'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:2;display:none;';
+    v.parentElement.insertBefore(frozen, v.nextSibling);
+  }
+
+  if (holder === 'remote') {
+    let ok = false;
+    try {
+      if (v.videoWidth > 0) {
+        frozen.width = v.videoWidth;
+        frozen.height = v.videoHeight;
+        const ctx = frozen.getContext('2d');
+        if (ctx) {
+          // Unreal writes alpha 0; source-over would ADD rather than replace
+          // and saturate to white within a few draws (the original canvas-path
+          // trap). 'copy' replaces.
+          ctx.globalCompositeOperation = 'copy';
+          ctx.drawImage(v, 0, 0);
+          ok = true;
+        }
+      }
+    } catch { /* fall through: the overlay still covers the area */ }
+    // Carry the gamut match over so the picture does not shift colour at the
+    // instant it freezes.
+    frozen.style.filter = v.style.filter;
+    frozen.style.display = ok ? '' : 'none';
+    v.pause();
+    v.style.visibility = 'hidden';
+    console.log(`[direct-canvas] frozen for remote lease: ${ok ? `${frozen.width}x${frozen.height}` : 'NO SNAPSHOT'}`);
+  } else {
+    frozen.style.display = 'none';
+    v.style.visibility = 'visible';
+    void v.play().catch(() => { /* muted autoplay is allowed */ });
+    console.log('[direct-canvas] lease reclaimed, live video restored');
+  }
+};
+
+// Freeze/thaw the picture on lease changes, registered ONCE. Deliberately not
+// inside onLease's per-subscriber handler: every React component that
+// subscribes would run it again, snapshotting twice from possibly different
+// frames. The DOM mirror lives here too so it is stamped even with no
+// subscribers at all.
+ipcRenderer.on('stream-lease:changed', (_e, s: { holder: 'local' | 'remote' }) => {
+  try {
+    document.documentElement.dataset.unclawLease = s.holder;
+    freezeForLease(s.holder);
+  } catch { /* document not ready; the next change re-stamps */ }
+});
+
 contextBridge.exposeInMainWorld('electronAPI', {
   /** Host OS, surfaced from the main process so the renderer never has to
    *  sniff navigator.userAgent/platform. 'darwin' | 'win32' | 'linux'. */
@@ -395,23 +472,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
      *  this file has to know a stall is intentional and must NOT hide the
      *  frozen frame. */
     onLease: (cb: (s: { holder: 'local' | 'remote'; players: string[] }) => void): (() => void) => {
-      const handler = (_e: IpcRendererEvent, s: { holder: 'local' | 'remote'; players: string[] }) => {
-        try {
-          document.documentElement.dataset.unclawLease = s.holder;
-          // Freeze the picture by ASSERTION, not by assuming frames stopped.
-          // Detaching the direct path does stop new frames, but a <video> fed
-          // by a MediaStreamTrackGenerator can still advance through whatever
-          // it has already buffered, so the "frozen" frame visibly keeps
-          // moving under the overlay. pause() cannot advance. play() on the
-          // way back resumes from the live track.
-          const v = document.querySelector<HTMLVideoElement>('video[data-direct-video]');
-          if (v) {
-            if (s.holder === 'remote') v.pause();
-            else void v.play().catch(() => { /* muted autoplay is allowed */ });
-          }
-        } catch { /* document not ready; the next change re-stamps */ }
-        cb(s);
-      };
+      const handler = (_e: IpcRendererEvent, s: { holder: 'local' | 'remote'; players: string[] }) => cb(s);
       ipcRenderer.on('stream-lease:changed', handler);
       return () => ipcRenderer.removeListener('stream-lease:changed', handler);
     },
@@ -959,7 +1020,12 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
     ipcRenderer.on('direct-surface:reset', () => {
       for (const t of heldTextures.values()) { try { t.release(); } catch { /* gone */ } }
       heldTextures.clear();
-      if (videoEl) {
+      // Keep the element when a remote viewer holds the lease: it is carrying
+      // the frozen last frame the user is looking at. Removing it here is what
+      // made the "frozen" picture show live motion instead — the snapshot had
+      // nothing left to read from, and whatever sat behind showed through.
+      const leaseIsRemote = document.documentElement.dataset.unclawLease === 'remote';
+      if (videoEl && !leaseIsRemote) {
         videoEl.remove();
         videoEl = null;
         if (canvas) canvas.style.display = '';

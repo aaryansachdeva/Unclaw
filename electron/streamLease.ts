@@ -62,10 +62,23 @@ async function pollOnce(): Promise<void> {
 
   holder = want;
   if (want === 'remote') {
-    // Release the surface so the encoder starts receiving frames.
-    console.log(`[lease] remote viewer (${players.join(', ')}) — releasing the direct path`);
+    // ORDER MATTERS. Tell the renderer FIRST so it can snapshot the picture
+    // while frames are still live, and only then release the surface.
+    //
+    // detach() sends `direct-surface:reset`, whose handler does
+    // videoEl.remove() — it deletes the element the snapshot is taken FROM.
+    // Detaching first meant freezeForLease() found no video, returned early,
+    // and the desktop showed live motion under the overlay instead of a
+    // frozen frame. Cost three failed attempts to find.
+    console.log(`[lease] remote viewer (${players.join(', ')}) — freezing, then releasing`);
+    onChange?.(holder, players);
+    // Give the freeze a beat to land before the element is torn down. The
+    // snapshot itself is one drawImage; this is IPC latency, not work.
+    await new Promise((r) => setTimeout(r, 150));
     directSurface.detach();
-  } else {
+    return;
+  }
+  if (want === 'local') {
     console.log('[lease] remote viewer gone — reclaiming the direct path');
     const win = getWindow?.();
     // No window means the app is shutting down or mid-recreate; the next tick
@@ -103,7 +116,11 @@ export function current(): LeaseHolder {
 /** Pin the lease for testing, or pass null to follow soul again. Applied on
  *  the next poll tick so it goes through exactly the same transition path a
  *  real viewer would. */
-export function force(next: LeaseHolder | null): void {
+export async function force(next: LeaseHolder | null): Promise<LeaseHolder> {
   forced = next;
-  void pollOnce();
+  // Awaited: force() used to return the PREVIOUS holder because pollOnce is
+  // async, so asking for 'remote' printed "stream lease: local" and looked
+  // like the call had failed.
+  await pollOnce();
+  return holder;
 }

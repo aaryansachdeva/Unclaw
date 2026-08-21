@@ -615,9 +615,8 @@ function createTray() {
 // IPC handlers for window controls from renderer
 // Force the stream lease for testing the handoff without a second device.
 // Renderer surface: __unclawStream.lease('remote' | 'local' | null)
-ipcMain.handle('stream-lease:force', (_e, holder: 'local' | 'remote' | null) => {
-  streamLease.force(holder);
-  return streamLease.current();
+ipcMain.handle('stream-lease:force', async (_e, holder: 'local' | 'remote' | null) => {
+  return streamLease.force(holder);
 });
 ipcMain.handle('stream-lease:get', () => streamLease.current());
 
