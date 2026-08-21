@@ -727,6 +727,7 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
  *  user instead of trying to dispatch to a backend soul doesn't support. */
 function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
   const merged: ApiKeysProfile = { ...DEFAULT_API_KEYS, ...parsed };
+  const before = JSON.stringify(merged);
   // A gated-off engine must be migrated OFF, not just hidden from the
   // dropdown. 1.1.8 shipped Pocket selectable; 1.1.9 gates it again because
   // the generated audio is bad. Anyone who picked it still has it saved and
@@ -743,8 +744,12 @@ function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
     merged.llm_model = null;
     merged.llm_api_key = null;
   }
+  migrationChangedProfile = JSON.stringify(merged) !== before;
   return merged;
 }
+
+/** Set by the most recent migrateApiKeys call. Read immediately after. */
+let migrationChangedProfile = false;
 
 
 /** Read the persisted blob via the Electron preload. Returns the
@@ -756,7 +761,17 @@ export async function fetchApiKeys(): Promise<ApiKeysProfile> {
     const raw = await api.apiKeysGet();
     if (!raw) return { ...DEFAULT_API_KEYS };
     const parsed = JSON.parse(raw) as Partial<ApiKeysProfile>;
-    return migrateApiKeys(parsed);
+    const migrated = migrateApiKeys(parsed);
+    if (migrationChangedProfile) {
+      // Write the migration back. Correcting it only in memory fixes the
+      // renderer, which sends its own copy with every request, and leaves
+      // apiKeys.bin stale for everything that reads the FILE — which is how
+      // soul serves the phone. That is how a gated-off TTS engine kept
+      // speaking on mobile long after it was removed from the desktop.
+      // Fire-and-forget: a failed write just means we migrate again next boot.
+      void saveApiKeys(migrated);
+    }
+    return migrated;
   } catch (err) {
     console.warn('[apiKeys] fetch failed, using defaults', err);
     return { ...DEFAULT_API_KEYS };
