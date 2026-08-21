@@ -882,18 +882,40 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
         out = new VideoFrame(vf, { alpha: 'discard' } as VideoFrameInit);
         wrapped = true;
       } catch { /* older runtime: send the raw frame and hope */ }
-      genWriter.write(out).then(() => { writeFails = 0; }).catch((e: unknown) => {
-        if (dropped++ < 3) console.error('[direct-canvas] generator write failed:', e);
-        // A WritableStream that errors once rejects every write after it, so
-        // a poisoned writer would otherwise mean a permanently black stream
-        // while every counter looks healthy. Three consecutive failures =
-        // scrap the generator, element and writer; the next frame rebuilds
-        // the whole chain from scratch.
-        if (++writeFails >= 3) teardownVideoPipeline('generator writer poisoned');
-      });
+      // Read the dimensions BEFORE anything can close the frame.
       const vfW = out.displayWidth || vf.displayWidth;
       const vfH = out.displayHeight || vf.displayHeight;
-      if (wrapped) vf.close();
+
+      // BACKPRESSURE. A WritableStream QUEUES when its consumer falls behind,
+      // and a queued video frame is not a buffered frame, it is latency: the
+      // element shows an older and older picture while every counter here
+      // stays perfect (drawn climbs, dropped stays 0, the addon reports
+      // gaps=0). That is what "smooth but laggy" looks like from the logs.
+      //
+      // The frame pump in directSurface.ts already states the rule for its own
+      // half — "newer frames are dropped rather than queued" — and at 24fps a
+      // queue can only ever hold stale frames. Apply the same rule here, which
+      // is where it was missing.
+      const writer = genWriter as WritableStreamDefaultWriter<VideoFrame>;
+      if (writer.desiredSize !== null && writer.desiredSize <= 0) {
+        if (dropped++ < 3) {
+          console.warn('[direct-canvas] video sink behind — dropping a frame '
+            + 'rather than queueing it (latency protection)');
+        }
+        out.close();
+        if (wrapped) vf.close();
+      } else {
+        writer.write(out).then(() => { writeFails = 0; }).catch((e: unknown) => {
+          if (dropped++ < 3) console.error('[direct-canvas] generator write failed:', e);
+          // A WritableStream that errors once rejects every write after it, so
+          // a poisoned writer would otherwise mean a permanently black stream
+          // while every counter looks healthy. Three consecutive failures =
+          // scrap the generator, element and writer; the next frame rebuilds
+          // the whole chain from scratch.
+          if (++writeFails >= 3) teardownVideoPipeline('generator writer poisoned');
+        });
+        if (wrapped) vf.close();
+      }
       // The filter is applied at element creation, but on a cold first launch
       // the direct path can attach BEFORE React has mounted StreamView, so the
       // <filter id="ue-gamut-match"> def does not exist yet and the lookup
