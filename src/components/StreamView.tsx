@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ConnectionState } from '../hooks/usePixelStreaming';
 import logoUrl from '../assets/logo.png';
@@ -94,6 +94,21 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
   // Dev/live-tuning console surface:
   //   __unclawStream.gamut(false)  toggle the P3 match without a reload
   //   __unclawStream.sample()      decoded center-patch RGB (see helper above)
+  // Stream lease. Unclaw renders to exactly ONE place at a time; when a phone
+  // (later a VS Code panel) takes the lease the desktop releases the surface
+  // so Unreal's frames reach the H.264 encoder instead. Our last frame stays
+  // frozen underneath the overlay below — that is deliberate, not a stall.
+  const [lease, setLease] = useState<'local' | 'remote'>('local');
+  useEffect(() => {
+    const ds = window.electronAPI?.directSurface;
+    if (!ds) return;
+    void ds.getLease?.().then((h) => setLease(h)).catch(() => { /* pre-1.1.9 main */ });
+    return ds.onLease?.((s) => {
+      setLease(s.holder);
+    });
+  }, []);
+
+
   useEffect(() => {
     const api = {
       gamut: (on: boolean) => {
@@ -103,6 +118,13 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
         return `stream gamut match: ${on ? 'ON (UE-window look)' : 'OFF (honest sRGB)'}`;
       },
       sample: sampleStreamRGB,
+      /** Exercise the handoff with no second device:
+       *    __unclawStream.lease('remote')  release the surface to the encoder
+       *    __unclawStream.lease(null)      follow soul again */
+      lease: async (holder: 'local' | 'remote' | null) => {
+        const h = await window.electronAPI?.directSurface?.forceLease?.(holder);
+        return `stream lease: ${h ?? 'unavailable'}`;
+      },
     };
     (window as unknown as Record<string, unknown>).__unclawStream = api;
     return () => {
@@ -220,7 +242,7 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
       <div
         ref={videoParentRef}
         className={`absolute inset-0${gamutOn && !directLive ? ' stream-gamut-match' : ''}`}
-        style={directLive ? { visibility: 'hidden' } : undefined}
+        style={directLive || lease === 'remote' ? { visibility: 'hidden' } : undefined}
       />
 
       {/* Bottom vignette */}

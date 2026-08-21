@@ -379,6 +379,42 @@ contextBridge.exposeInMainWorld('electronAPI', {
       && (process.env.UNCLAW_DIRECT_SURFACE === '1' || process.env.UNCLAW_DIRECT_SURFACE === '2')
       ? process.env.UNCLAW_DIRECT_SURFACE
       : null,
+    /** Pin the lease for testing (null = follow soul again). */
+    forceLease: (holder: 'local' | 'remote' | null): Promise<'local' | 'remote'> =>
+      ipcRenderer.invoke('stream-lease:force', holder),
+    /** Current lease holder, for hydrating on mount. */
+    getLease: (): Promise<'local' | 'remote'> => ipcRenderer.invoke('stream-lease:get'),
+    /** Hang up on remote viewers so the desktop takes the stream back. */
+    disconnectRemote: (): Promise<{ ok: boolean; disconnected?: number }> =>
+      ipcRenderer.invoke('stream-lease:disconnect'),
+    /** Stream lease: which surface currently owns Unreal's frames.
+     *  'local' = the direct IOSurface path is drawing here.
+     *  'remote' = a phone (or later a VS Code panel) took it; our last frame
+     *  is frozen on screen deliberately and the encoder is feeding them.
+     *  Mirrored into the DOM as well, because the frames-stalled watchdog in
+     *  this file has to know a stall is intentional and must NOT hide the
+     *  frozen frame. */
+    onLease: (cb: (s: { holder: 'local' | 'remote'; players: string[] }) => void): (() => void) => {
+      const handler = (_e: IpcRendererEvent, s: { holder: 'local' | 'remote'; players: string[] }) => {
+        try {
+          document.documentElement.dataset.unclawLease = s.holder;
+          // Freeze the picture by ASSERTION, not by assuming frames stopped.
+          // Detaching the direct path does stop new frames, but a <video> fed
+          // by a MediaStreamTrackGenerator can still advance through whatever
+          // it has already buffered, so the "frozen" frame visibly keeps
+          // moving under the overlay. pause() cannot advance. play() on the
+          // way back resumes from the live track.
+          const v = document.querySelector<HTMLVideoElement>('video[data-direct-video]');
+          if (v) {
+            if (s.holder === 'remote') v.pause();
+            else void v.play().catch(() => { /* muted autoplay is allowed */ });
+          }
+        } catch { /* document not ready; the next change re-stamps */ }
+        cb(s);
+      };
+      ipcRenderer.on('stream-lease:changed', handler);
+      return () => ipcRenderer.removeListener('stream-lease:changed', handler);
+    },
     onStatus: (cb: (s: { connected: boolean; frames: number; gaps: number;
                          fps: number; surfaces: number }) => void): (() => void) => {
       const handler = (_e: IpcRendererEvent, s: { connected: boolean; frames: number;
@@ -733,6 +769,13 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
     // is stale; hide it so the WebRTC fallback (or the loading state) shows
     // instead of a frozen frame.
     setInterval(() => {
+      // A remote viewer holding the stream lease stops our frames ON PURPOSE:
+      // the desktop released the surface so Unreal's frames could reach the
+      // encoder instead. That is a deliberate stall, and the last frame is
+      // exactly what we want to keep on screen (frozen + blurred, under the
+      // "Unclaw Mobile is connected" overlay). Hiding it here would replace
+      // that with the empty backdrop and make a working handoff look broken.
+      if (document.documentElement.dataset.unclawLease === 'remote') return;
       if (videoEl && lastFrameAt && Date.now() - lastFrameAt > 2500
           && videoEl.style.visibility !== 'hidden') {
         videoEl.style.visibility = 'hidden';

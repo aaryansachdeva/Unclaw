@@ -27,6 +27,7 @@ import { runLocalIdentityInference, runLocalPhotoInference, type GroomArgs } fro
 import { listBasecolors, regenerateBasecolor, runH3DPhotoToCharacter } from './h3dPipeline';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
 import * as directSurface from './directSurface';
+import * as streamLease from './streamLease';
 
 // Cap Chromium's GPU memory budget. By default Chromium scales its tile /
 // cache / staging budget to system RAM (generous on a 64GB machine); measured
@@ -612,6 +613,35 @@ function createTray() {
 }
 
 // IPC handlers for window controls from renderer
+// Force the stream lease for testing the handoff without a second device.
+// Renderer surface: __unclawStream.lease('remote' | 'local' | null)
+ipcMain.handle('stream-lease:force', (_e, holder: 'local' | 'remote' | null) => {
+  streamLease.force(holder);
+  return streamLease.current();
+});
+ipcMain.handle('stream-lease:get', () => streamLease.current());
+
+// Desktop "Disconnect" button: hang up on every remote viewer. soul closes
+// the bridges and tells the Worker, active_players empties, and the lease
+// poller reclaims the direct path on its next tick.
+ipcMain.handle('stream-lease:disconnect', async () => {
+  const port = getSoulPorts()?.http;
+  if (!port) return { ok: false, error: 'soul_not_ready' };
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/pair/disconnect`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(5000),
+    });
+    const body = await res.json().catch(() => ({}));
+    // Clear any dev pin too, or a forced 'remote' would immediately re-take
+    // the lease and the button would look broken.
+    streamLease.force(null);
+    return { ok: res.ok, ...(body as object) };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
 ipcMain.on('window:minimize', () => mainWindow?.minimize());
 ipcMain.on('window:close', () => app.quit());
 
@@ -1780,6 +1810,21 @@ app.on('before-quit', (event) => {
       }, HARD_EXIT_MS).unref?.();
     });
 });
+
+// Stream lease: exactly one renderer owns Unreal's frames. Started here so it
+// outlives any single window; it reads the soul port per tick, so a soul
+// restart on a fresh dynamic port needs no re-arming.
+if (process.platform === 'darwin') {
+  streamLease.start(
+    () => getSoulPorts()?.http ?? null,
+    () => mainWindow,
+    (holder, players) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('stream-lease:changed', { holder, players });
+      }
+    },
+  );
+}
 
 app.on('activate', () => {
   // Never resurrect the window mid-quit: clicking the Dock icon during the

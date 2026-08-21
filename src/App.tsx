@@ -76,6 +76,7 @@ import { AGENTS, GENERIC_MALE_AGENT, UNIFIED_AGENT, type Agent } from './types';
 import { useAgentStack, BASE_AGENT, BASE_INSTANCE_ID, type AgentInstance } from './hooks/useAgentStack';
 import { AddCharacterPicker, type StoreEntry } from './components/AddCharacterPicker';
 import { AddCustomOverlay } from './components/AddCustomOverlay';
+import { StreamLeaseOverlay } from './components/StreamLeaseOverlay';
 import { ClawsBalance } from './components/ClawsBalance';
 import { fetchClaws, earnClaws, spendOnCharacter, CHARACTER_CLAW_COST } from './services/claws';
 import {
@@ -4198,6 +4199,11 @@ function AppMain() {
 
   return (
     <div className={`relative flex-1 min-h-0 overflow-hidden${uiHidden ? ' unclaw-ui-hidden' : ''}`}>
+      {/* Another surface holds the stream. Covers the entire app (the native
+          traffic lights sit above web content regardless, so they stay
+          usable). Rendered first at the top level so no later sibling's
+          stacking context can trap it behind the chrome. */}
+      <StreamLeaseOverlay />
       {/* Workspace, everything that should physically shrink when the
           chat pane opens. The `right` value animates from 0 →
           chatPaneWidth so StreamView, the input bar, and every

@@ -165,6 +165,15 @@ export function usePixelStreaming({
     // which the closed-loop check below relies on. Tracked here rather than
     // threaded down as a prop so the hook stays self-contained.
     let directLive = false;
+    // Who owns Unreal's render resolution right now.
+    //
+    // When a phone holds the stream lease, IT is the viewport that matters —
+    // and it already drives resolution through the very same path we do: its
+    // WebRTC data channel carries `Resolution.Width/Height` to UE's input
+    // handler. So the desktop's job here is simply to stop sending, or the two
+    // fight and UE rebuilds its render target on every flip (the exact
+    // symptom seen 2026-08-11 when the SDK and our own driver disagreed).
+    let leaseRemote = document.documentElement.dataset.unclawLease === 'remote';
     const applyDirectLive = (connected: boolean) => {
       // A fresh attach means a fresh Unreal (the XPC listener dies with the
       // process), which is back at its launch resolution however much we sent
@@ -184,6 +193,12 @@ export function usePixelStreaming({
     const onDirectStatusEvent = () => {
       const v = document.documentElement.dataset.unclawDirectLive;
       if (v !== undefined) applyDirectLive(v === '1');
+      const wasRemote = leaseRemote;
+      leaseRemote = document.documentElement.dataset.unclawLease === 'remote';
+      // Reclaiming: the phone left UE at ITS resolution, so our dedupe is
+      // stale by definition. Drop it so the next tick re-asserts the
+      // desktop's size instead of deciding it already sent this.
+      if (wasRemote && !leaseRemote) { lastSentRes.w = -1; lastSentRes.h = -1; }
     };
     onDirectStatusEvent();
     document.addEventListener('unclaw:direct-status', onDirectStatusEvent);
@@ -235,6 +250,8 @@ export function usePixelStreaming({
       vp.__unclawDprOverride = true;
     };
     const forceViewportResolutionUpdate = () => {
+      // A remote viewer owns the viewport; stay out of its way.
+      if (leaseRemote) return;
       try {
         // Install FIRST, in every mode. The SDK fires its own viewport-res sync
         // off MatchViewportRes, and its stock callback sends the element's CSS
@@ -521,7 +538,7 @@ export function usePixelStreaming({
       // so the preload publishes the size of the frames it is actually drawing
       // as `data-unclaw-direct-size`. Disagreement means the send was lost:
       // drop the dedupe so this same tick re-sends.
-      if (directLive) {
+      if (directLive && !leaseRemote) {
         const published = document.documentElement.dataset.unclawDirectSize;
         const [aw, ah] = (published ?? '').split('x').map((n) => parseInt(n, 10));
         if (aw > 0 && ah > 0 && lastSentRes.w > 0

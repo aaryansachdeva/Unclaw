@@ -261,6 +261,15 @@ interface ElectronAPI {
       connected: boolean; frames: number; gaps: number;
       fps: number; surfaces: number;
     }) => void) => () => void;
+    /** Stream lease: which surface owns Unreal's frames right now.
+     *  'remote' means a phone (later a VS Code panel) took it and our last
+     *  frame is frozen on screen deliberately. */
+    onLease: (cb: (s: { holder: 'local' | 'remote'; players: string[] }) => void) => () => void;
+    getLease: () => Promise<'local' | 'remote'>;
+    /** Pin the lease for testing; null follows soul again. */
+    forceLease: (holder: 'local' | 'remote' | null) => Promise<'local' | 'remote'>;
+    /** Hang up on remote viewers and take the stream back. */
+    disconnectRemote: () => Promise<{ ok: boolean; disconnected?: number; error?: string }>;
   };
 
   /** unclaw:// deep link arriving while the app is running (the Polar
