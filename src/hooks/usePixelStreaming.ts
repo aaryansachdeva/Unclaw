@@ -228,8 +228,23 @@ export function usePixelStreaming({
         w = Math.round(w * s);
         h = Math.round(h * s);
       }
-      w -= w % 2; // even dims: H264 4:2:0 chroma subsampling needs them
-      h -= h % 2;
+      // Align DOWN to a multiple of 16, not 2.
+      //
+      // 4:2:0 chroma only needs even dimensions, but Unreal aligns the render
+      // target to the encoder's 16px macroblock grid. Asking for 492 gets you
+      // 480 back, and the closed-loop check below reads that 12px difference
+      // as "the send was lost": it drops the dedupe, re-sends 492, gets 480,
+      // and loops every 3 seconds forever. Each of those re-sends rebuilds the
+      // backbuffer + capture + encoder chain (measured at ~1 GB of realloc
+      // churn per resize), so this was quietly burning memory bandwidth for
+      // the life of the session. Observed 2026-08-21 as a repeating
+      // "stream is 480x1536 but target is 492x1536" warning.
+      //
+      // Quantising here means we only ever ask for sizes Unreal will honour
+      // exactly, so the loop cannot start. Worst case is 15px of width the
+      // video element scales away, invisible at stream viewing sizes.
+      w -= w % 16;
+      h -= h % 16;
       // Not laid out yet. Bail WITHOUT recording, so a later fire still gets
       // its chance — recording a bogus size here is what stranded UE at its
       // launch resolution.
@@ -542,7 +557,7 @@ export function usePixelStreaming({
         const published = document.documentElement.dataset.unclawDirectSize;
         const [aw, ah] = (published ?? '').split('x').map((n) => parseInt(n, 10));
         if (aw > 0 && ah > 0 && lastSentRes.w > 0
-            && (aw !== lastSentRes.w || ah !== lastSentRes.h)) {
+            && (Math.abs(aw - lastSentRes.w) > 16 || Math.abs(ah - lastSentRes.h) > 16)) {
           // eslint-disable-next-line no-console
           console.warn(
             `[ps] direct frames are ${aw}x${ah} but target is `
@@ -563,7 +578,8 @@ export function usePixelStreaming({
         // climb with the direct path attached.
         !directLive
         && video && video.videoWidth > 0 && lastSentRes.w > 0
-        && (video.videoWidth !== lastSentRes.w || video.videoHeight !== lastSentRes.h)
+        && (Math.abs(video.videoWidth - lastSentRes.w) > 16
+            || Math.abs(video.videoHeight - lastSentRes.h) > 16)
       ) {
         // eslint-disable-next-line no-console
         console.warn(
