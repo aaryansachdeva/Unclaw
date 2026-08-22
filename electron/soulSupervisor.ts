@@ -675,7 +675,27 @@ function spawnSoul(window: BrowserWindow): boolean {
   soulProc.stdout?.on('data', onChunk('stdout'));
   soulProc.stderr?.on('data', onChunk('stderr'));
 
+  // Identity capture for the exit handler. restartSoul() SIGTERMs the old
+  // group and spawns a fresh soul after a short grace, but the OLD process
+  // can take seconds to die (its shutdown waits for UE). When its exit
+  // finally fired, this handler used to clobber module state that now
+  // belongs to the NEW child: nulling soulProc (orphaning the new soul from
+  // stopSoul), killing the new boot's health poll, resetting readiness, and
+  // — with intentionalStop already reset — spawning a SECOND soul via the
+  // respawn branch. A late exit from a superseded child must only close its
+  // own log stream and leave the world alone.
+  const thisChild = soulProc;
   soulProc.on('exit', (code, signal) => {
+    if (soulProc !== null && soulProc !== thisChild) {
+      log(window, 'meta',
+        `[unclaw] superseded soul (pid=${thisChild.pid}) exited late `
+        + `(code=${code} signal=${signal}); current soul is unaffected`);
+      if (logFileStream) {
+        try { logFileStream.end(); } catch { /* ok */ }
+        logFileStream = null;
+      }
+      return;
+    }
     log(window, 'meta', `[unclaw] soul exited (code=${code} signal=${signal})`);
     if (logFileStream) {
       try {

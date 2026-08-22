@@ -80,7 +80,7 @@ export async function fetchDownloadUrl(token: string, characterId: string): Prom
  *  bucket alongside the pak. `kind` tells the main process which soul voices
  *  dir it belongs in (supertonic -> .json, kokoro -> .safetensors). */
 export interface VoiceFile {
-  kind: 'supertonic' | 'kokoro';
+  kind: 'supertonic' | 'kokoro' | 'pocket';
   filename: string;
   url: string;
 }

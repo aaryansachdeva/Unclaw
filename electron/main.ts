@@ -641,7 +641,9 @@ function createTray() {
 ipcMain.handle('stream-lease:force', async (_e, holder: 'local' | 'remote' | null) => {
   return streamLease.force(holder);
 });
-ipcMain.handle('stream-lease:get', () => streamLease.current());
+ipcMain.handle('stream-lease:get', () => (
+  { holder: streamLease.current(), players: streamLease.players() }
+));
 
 // Desktop "Disconnect" button: hang up on every remote viewer. soul closes
 // the bridges and tells the Worker, active_players empties, and the lease

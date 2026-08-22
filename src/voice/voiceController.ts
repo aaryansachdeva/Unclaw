@@ -24,7 +24,7 @@ import { Endpointer, type EndpointerState } from './endpointer';
 import { ProsodyEngine, type ProsodySnapshot } from './prosodyEngine';
 import { SileroVAD, preloadVAD } from './vadEngine';
 // Whisper-batch ASR was removed; Moonshine streaming is the only path.
-// `whisperClient.ts` lingers for historical reference but is unused.
+// (whisperClient.ts deleted 2026-08-22; see git history.)
 
 // --- public event surface ---------------------------------------------
 //
@@ -59,8 +59,6 @@ export interface StreamingFeed {
 export interface VoiceControllerOptions {
   /** Hook that returns whether AI is currently producing audio. */
   isAISpeaking: () => boolean;
-  /** Optional persona / vocabulary hint to seed Whisper. */
-  whisperPrompt?: () => string;
   /** When provided, VoiceController routes every audio frame to this
    *  streaming transcriber while the user is speaking, and reads the
    *  final transcription from `finalize()` instead of calling Whisper.
@@ -107,9 +105,6 @@ export class VoiceController {
 
   /** Last endpointer state we saw — used to detect transitions. */
   private prevState: EndpointerState = 'idle';
-
-  /** AbortController for the in-flight Whisper request. */
-  private finalAbort: AbortController | null = null;
 
   private inFlightTranscriptionId = 0;
   /** Per-utterance counter for log correlation. */
@@ -291,8 +286,6 @@ export class VoiceController {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
-    this.finalAbort?.abort();
-    this.finalAbort = null;
     // Tear down any open streaming session — the user toggled voice
     // off mid-utterance.
     if (this.streamingOpen && this.opts.streaming) {
@@ -643,8 +636,7 @@ export class VoiceController {
     // Moonshine is the only ASR path. Audio frames were pushed to the
     // WS as they arrived; here we just ask the server for the final
     // transcription and close the streaming session. There is no
-    // Whisper fallback — the controller refuses to run without a
-    // streaming feed wired (see start()).
+    // Whisper fallback; the guard right below is the only check.
     if (!this.opts.streaming) {
       this.emit({ kind: 'error', message: 'no streaming transcriber wired' });
       this.emit({ kind: 'transcribing', pending: false });

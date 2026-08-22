@@ -44,6 +44,8 @@ interface Addon {
 let addon: Addon | null = null;
 let attached = false;
 let poll: NodeJS.Timeout | null = null;
+let reloadHandler: (() => void) | null = null;
+let reloadTarget: Electron.WebContents | null = null;
 
 export function isEnabled(): boolean {
   return (process.env.UNCLAW_DIRECT_SURFACE === '1'
@@ -163,6 +165,12 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
           .catch((err: unknown) => {
             console.error('[direct] sendSharedTexture failed:', err);
             importedIds.delete(f.surfaceId);
+            // The failed import never reached the renderer; drop our
+            // reference too, or repeated failures for one surface grow
+            // `held` unboundedly, each entry pinning a GPU-process mailbox.
+            const i = held.indexOf(imported);
+            if (i >= 0) held.splice(i, 1);
+            try { imported.release(); } catch { /* already gone */ }
           });
         return;
       }
@@ -222,12 +230,20 @@ export function attach(win: BrowserWindow): boolean {
   // the next UE restart (2026-08-18). Re-arm on every subsequent page
   // load: dropping the held imports makes the pump re-import and
   // re-transfer the ring to the fresh page on its next frames.
-  win.webContents.on('did-finish-load', () => {
+  // Registered once per attach and removed in detach(): every lease reclaim
+  // calls attach() again, and the old always-add version accumulated one
+  // listener per phone/Chrome connect cycle on the same webContents.
+  if (reloadHandler && reloadTarget && !reloadTarget.isDestroyed()) {
+    reloadTarget.removeListener('did-finish-load', reloadHandler);
+  }
+  reloadHandler = () => {
     if (attached && framePumpCleanup) {
       console.log('[direct] renderer reloaded — re-transferring surfaces');
       framePumpCleanup();
     }
-  });
+  };
+  reloadTarget = win.webContents;
+  win.webContents.on('did-finish-load', reloadHandler);
 
   // The renderer needs to know when to get out of the way: it hides the video
   // element and drops its background so the layer underneath shows through.
@@ -293,6 +309,11 @@ export function stats(): DirectSurfaceStats | null {
 
 export function detach(): void {
   if (poll) { clearInterval(poll); poll = null; }
+  if (reloadHandler && reloadTarget && !reloadTarget.isDestroyed()) {
+    reloadTarget.removeListener('did-finish-load', reloadHandler);
+  }
+  reloadHandler = null;
+  reloadTarget = null;
   if (framePumpCleanup) { framePumpCleanup(); framePumpCleanup = null; }
   if (addon && attached) {
     try { addon.stop(); } catch { /* shutting down */ }

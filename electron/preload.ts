@@ -400,11 +400,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // and hands them here. hasVoices lets the renderer skip the fetch when the
     // files are already on disk (already-owned, warm case).
     hasVoices: (args: { characterId: string }): Promise<{
-      ok: boolean; present?: { supertonic: boolean; kokoro: boolean }; complete?: boolean; error?: string;
+      ok: boolean; present?: { supertonic: boolean; kokoro: boolean; pocket: boolean }; complete?: boolean; error?: string;
     }> => ipcRenderer.invoke('character-store:has-voices', args),
     downloadVoices: (args: {
       characterId: string;
-      files: { kind: 'supertonic' | 'kokoro'; filename: string; url: string }[];
+      files: { kind: 'supertonic' | 'kokoro' | 'pocket'; filename: string; url: string }[];
     }): Promise<{ ok: boolean; written?: number; error?: string }> =>
       ipcRenderer.invoke('character-store:download-voices', args),
     onPakProgress: (
@@ -474,7 +474,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     forceLease: (holder: 'local' | 'remote' | null): Promise<'local' | 'remote'> =>
       ipcRenderer.invoke('stream-lease:force', holder),
     /** Current lease holder, for hydrating on mount. */
-    getLease: (): Promise<'local' | 'remote'> => ipcRenderer.invoke('stream-lease:get'),
+    getLease: (): Promise<{ holder: 'local' | 'remote'; players: string[] }> =>
+      ipcRenderer.invoke('stream-lease:get'),
     /** Hang up on remote viewers so the desktop takes the stream back. */
     disconnectRemote: (): Promise<{ ok: boolean; disconnected?: number }> =>
       ipcRenderer.invoke('stream-lease:disconnect'),

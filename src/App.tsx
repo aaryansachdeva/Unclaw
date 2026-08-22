@@ -630,9 +630,9 @@ function AppMain() {
 
   // Active chat model, kept fresh so capability checks
   // (modelSupportsVision in particular) drive the input bar's
-  // attach-image button visibility. Refreshed on mount and after
-  // the onboarding wizard closes, that's the only time apiKeys
-  // mutates within a session.
+  // attach-image button visibility. Refreshed on mount, after the
+  // onboarding wizard closes, and whenever the Settings panel saves
+  // (its onSaved below): all three places apiKeys can mutate.
   const [activeLlmModel, setActiveLlmModel] = useState<string | null>(null);
   // Whether the agentic / escalation backend is enabled. When it is,
   // soul's image-attached fast-path routes any turn carrying images to
@@ -776,8 +776,16 @@ function AppMain() {
   // strip. Clamped via the same min/max as chatPaneWidth above so the
   // workspace can't be reduced below 280px. Persists to localStorage
   // so the chosen split survives reloads.
+  // Aborts any in-flight pane drag's document listeners if AppMain unmounts
+  // mid-drag (sign-out / reset flows): the only listener pair in this file
+  // that otherwise had no unmount path.
+  const paneDragAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => paneDragAbortRef.current?.abort(), []);
   const handlePaneResizeStart = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
+    paneDragAbortRef.current?.abort();
+    const drag = new AbortController();
+    paneDragAbortRef.current = drag;
     const onMove = (ev: PointerEvent) => {
       // Pane is right-anchored, so width = (winWidth - cursorX).
       const next = Math.round(
@@ -789,8 +797,7 @@ function AppMain() {
       setUserPaneWidth(next);
     };
     const onUp = () => {
-      document.removeEventListener('pointermove', onMove);
-      document.removeEventListener('pointerup', onUp);
+      drag.abort();
       // Persist the final width AFTER the drag ends so we don't write
       // localStorage on every pixel of motion.
       try {
@@ -802,8 +809,8 @@ function AppMain() {
         // Ignore, quota / private browsing.
       }
     };
-    document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointermove', onMove, { signal: drag.signal });
+    document.addEventListener('pointerup', onUp, { signal: drag.signal });
   }, []);
   // Mirror userPaneWidth into a ref so the persist-on-up callback
   // captured at drag-start time can see the latest value.
@@ -2190,8 +2197,11 @@ function AppMain() {
     clearBargeInTimer();
     const interruptedText = pendingInterruptedRef.current;
     pendingInterruptedRef.current = null;
-    const videoEl = document.querySelector('video');
-    if (videoEl) videoEl.muted = false;
+    // NOTE deliberately no video unmute here: on the desktop, stream audio
+    // is ALWAYS silent (UE plays the voice locally; usePixelStreaming's
+    // media guard enforces it). The old per-send unmute fought that guard
+    // once a turn and violated the single-audio-source invariant for up to
+    // a second each send.
 
     setIsSending(true);
     isAISpeakingRef.current = true;
@@ -2538,7 +2548,6 @@ function AppMain() {
     // with a real duration.
     isAISpeaking: () =>
       isAISpeakingRef.current || performance.now() < aiSpeakingUntilRef.current,
-    whisperPrompt: () => `Conversation with ${persona.displayName}.`,
     // Continuous voice mode pipes through the same Moonshine streaming
     // transcriber as push-to-talk, so the input bar shows partial
     // words while the user speaks. VoiceController owns the mic + VAD;
@@ -2589,10 +2598,8 @@ function AppMain() {
         // Only resume if no real chat fired in the meantime.
         if (pendingInterruptedRef.current !== null) {
           pendingInterruptedRef.current = null;
-          // Stage 1 no longer mutes, so there is nothing to unmute; this
-          // stays only to undo a mute left by an older build mid-session.
-          const v2 = document.querySelector('video');
-          if (v2 && v2.muted) v2.muted = false;
+          // Stage 1 no longer mutes, and desktop stream audio stays muted
+          // by invariant (media guard), so there is nothing to undo here.
           // Don't flip isAISpeakingRef back to true, the audio
           // was already in flight and its natural duration timer
           // (set in dispatchChatResult) will clear it normally.
@@ -2668,13 +2675,6 @@ function AppMain() {
   useEffect(() => {
     notifyAIFinishedRef.current = voice.notifyAIFinished;
   }, [voice.notifyAIFinished]);
-
-  useEffect(() => {
-    if (isSending) {
-      const v = document.querySelector('video');
-      if (v) v.muted = false;
-    }
-  }, [isSending]);
 
   // Top-level badge poll. Independent of the panels, the rail
   // shows counts from app start, and refresh on every chat round
@@ -4394,6 +4394,7 @@ function AppMain() {
       <SettingsPanel
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
+        onSaved={() => void refreshActiveLlmModel()}
       />
 
       {/* Greeting + ambient widgets. Gated only on a connected stream
@@ -4678,7 +4679,7 @@ function AppMain() {
                     // still hot, so you couldn't switch voice mode off until she
                     // finished. That was the erratic behaviour.
                     disabled: isSending && !voice.isListening,
-                    vadLevel: voice.vadLevel,
+                    getVadLevel: voice.getVadLevel,
                     isUserSpeaking: voice.isUserSpeaking,
                     isTranscribing: voice.isTranscribing,
                     toggle: () => { void handleVoiceToggle(); },

@@ -115,7 +115,7 @@ export function current(): LeaseHolder {
   return holder;
 }
 
-export function currentPlayers(): string[] {
+export function players(): string[] {
   return lastPlayers;
 }
 

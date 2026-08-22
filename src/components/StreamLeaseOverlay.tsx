@@ -30,7 +30,9 @@ export function StreamLeaseOverlay() {
   useEffect(() => {
     const ds = window.electronAPI?.directSurface;
     if (!ds) return;
-    void ds.getLease?.().then(setLease).catch(() => { /* older main process */ });
+    void ds.getLease?.()
+      .then((s) => { setLease(s.holder); setPlayers(s.players); })
+      .catch(() => { /* older main process */ });
     return ds.onLease?.((s) => { setLease(s.holder); setPlayers(s.players); });
   }, []);
 

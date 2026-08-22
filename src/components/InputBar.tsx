@@ -52,7 +52,9 @@ const PROMPTS = [
 export interface InputVoiceState {
   active: boolean;
   disabled: boolean;
-  vadLevel: number;
+  /** Live smoothed VAD level, polled by the visualizer's own rAF loop so
+   *  frame-rate updates never re-render the app tree. */
+  getVadLevel: () => number;
   isUserSpeaking: boolean;
   isTranscribing: boolean;
   toggle: () => void;
@@ -1516,9 +1518,25 @@ function VoiceButton({
   // listening (so they rise as you actually speak), and a gentle constant while
   // she's transcribing (no mic then, but the bars shouldn't look dead). Silent =
   // resting fan, nothing animating. No decorative keyframe — that read as random.
+  //
+  // The level is POLLED here with a rAF loop scoped to this tiny component.
+  // It used to arrive as a prop through per-frame setState in useVoiceAgent,
+  // which re-rendered the whole AppMain tree ~31x/sec while the mic was open.
+  const [liveLevel, setLiveLevel] = useState(0);
+  useEffect(() => {
+    if (!active || transcribing) { setLiveLevel(0); return; }
+    let raf = 0;
+    const tick = () => {
+      setLiveLevel(voice.getVadLevel());
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // voice's identity changes per parent render; the loop restart is free.
+  }, [active, transcribing, voice]);
   const energy = Math.max(
     0,
-    Math.min(1, active ? (transcribing ? 0.3 : voice.vadLevel) : 0),
+    Math.min(1, active ? (transcribing ? 0.3 : liveLevel) : 0),
   );
 
   // Dark bars at rest; warm red (--accent) while recording — the mic is live

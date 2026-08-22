@@ -238,12 +238,12 @@ interface ElectronAPI {
     listInstalled: () => Promise<{ ids: string[]; stale: string[] }>;
     /** Which of a character's cloned voice files are already on disk. */
     hasVoices: (args: { characterId: string }) => Promise<{
-      ok: boolean; present?: { supertonic: boolean; kokoro: boolean }; complete?: boolean; error?: string;
+      ok: boolean; present?: { supertonic: boolean; kokoro: boolean; pocket: boolean }; complete?: boolean; error?: string;
     }>;
     /** Download + install presigned cloned-voice files into the soul voices dirs. */
     downloadVoices: (args: {
       characterId: string;
-      files: { kind: 'supertonic' | 'kokoro'; filename: string; url: string }[];
+      files: { kind: 'supertonic' | 'kokoro' | 'pocket'; filename: string; url: string }[];
     }) => Promise<{ ok: boolean; written?: number; error?: string }>;
     /** Subscribe to byte progress for a pak download. */
     onPakProgress: (
@@ -265,7 +265,7 @@ interface ElectronAPI {
      *  'remote' means a phone (later a VS Code panel) took it and our last
      *  frame is frozen on screen deliberately. */
     onLease: (cb: (s: { holder: 'local' | 'remote'; players: string[] }) => void) => () => void;
-    getLease: () => Promise<'local' | 'remote'>;
+    getLease: () => Promise<{ holder: 'local' | 'remote'; players: string[] }>;
     /** Pin the lease for testing; null follows soul again. */
     forceLease: (holder: 'local' | 'remote' | null) => Promise<'local' | 'remote'>;
     /** Hang up on remote viewers and take the stream back. */

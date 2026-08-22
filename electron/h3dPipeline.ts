@@ -36,69 +36,12 @@ const GEMINI_BASECOLOR_MODEL = GEMINI_IMAGE_MODEL;
 const GEMINI_TEXT_MODEL = 'gemini-3.6-flash';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 
-// Image work moved BACK to OpenAI 2026-08-09. Gemini's image model kept
-// inventing detail on the cleanup pass and drifting on the basecolor layout;
-// gpt-image-2 holds a reference layout far better, which is the whole job here.
-// The text/vision grooming read stays on Gemini: it is cheap and it works.
-const OPENAI_IMAGE_MODEL = 'gpt-image-2';
-const OPENAI_EDITS_ENDPOINT = 'https://api.openai.com/v1/images/edits';
+// History note: image work bounced between OpenAI (gpt-image-2) and Gemini
+// during 2026-08. The pipeline as SHIPPED runs everything on Gemini: the
+// cleanup pass is geminiRemoveHair below, and basecolor generation holds the
+// reference layout on Gemini too. The OpenAI edit path was removed once it
+// had no callers left; see git history if that trade ever reopens.
 
-/** Width/height of an encoded image, for picking an edit size. Falls back to
- *  square, which is the safe default for an unreadable buffer. */
-function aspectOf(bytes: Uint8Array): number {
-  try {
-    const img = nativeImage.createFromBuffer(Buffer.from(bytes));
-    const { width, height } = img.getSize();
-    if (width > 0 && height > 0) return width / height;
-  } catch { /* fall through */ }
-  return 1;
-}
-
-/** Nearest supported edit size for a given aspect. The API takes only a fixed
- *  set, so a portrait photo goes to the portrait slot rather than being squashed
- *  into a square. */
-function editSizeFor(aspect: number): string {
-  if (aspect > 1.2) return '1536x1024';
-  if (aspect < 0.84) return '1024x1536';
-  return '1024x1024';
-}
-
-/** POST an /images/edits call with one or more reference images.
- *  Returns the first image as bytes. 1K output throughout: the texture is
- *  sampled onto a head at streaming resolution, and 2K costs multiples more. */
-async function openaiEdit(
-  images: Array<{ bytes: Uint8Array; name: string }>,
-  prompt: string,
-  size: string,
-  timeoutMs = 240_000,
-): Promise<Uint8Array> {
-  const key = readKey(OPENAI_KEY_FILE, 'OpenAI');
-  const form = new FormData();
-  form.append('model', OPENAI_IMAGE_MODEL);
-  form.append('prompt', prompt);
-  form.append('size', size);
-  form.append('quality', 'high');
-  // input_fidelity is deliberately absent: gpt-image-2 processes every input at
-  // high fidelity and rejects the parameter.
-  for (const img of images) {
-    form.append('image[]', new Blob([new Uint8Array(img.bytes)], { type: 'image/png' }), img.name);
-  }
-  const res = await fetch(OPENAI_EDITS_ENDPOINT, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${key}` },
-    body: form,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) {
-    const body = (await res.text()).slice(0, 400);
-    console.error('[h3d] openai edits HTTP', res.status, body);
-    throw new Error(`openai images/edits HTTP ${res.status}: ${body}`);
-  }
-  const json = await res.json() as { data?: Array<{ b64_json?: string }> };
-  const b64 = json.data?.[0]?.b64_json;
-  if (!b64) throw new Error('openai returned no image');
-  return new Uint8Array(Buffer.from(b64, 'base64'));
-}
 
 // Rodin Gen-2.5 is selected through `tier`, not a separate endpoint or a
 // version field. Gen-2.5-High is 0.5 credit; the HighPack addon would add 1.
@@ -137,11 +80,9 @@ export async function geminiRemoveHair(
   win: BrowserWindow | null,
   photoBytes: Uint8Array,
   mime: 'image/jpeg' | 'image/png',
-  aspect = 1,
 ): Promise<Uint8Array> {
   const key = readKey(GEMINI_KEY_FILE, 'Gemini');
   progress(win, 'clean', 'removing hair and accessories');
-  void aspect;
 
   const instruction = [
     'Edit this portrait photograph. Remove ALL hair from the subject:',
@@ -351,17 +292,15 @@ export async function geminiGenerateBasecolor(
     'MOUTH GEOMETRY: this is an UNWRAP, not a photograph, so features are flattened and stretched compared to a real face. In image 2 the lips are a wide, flat, nearly lens-shaped patch with a STRAIGHT horizontal seam through the middle, because UV space splays the mouth open. Fill that same region at that same width. The line between the lips is straight, thin and flat in colour: no curve, no cupid bow, no corners turning up, no dark crease, no shadow and no volume shading anywhere on the lips. Copy the SHAPES in image 2, never the shapes a camera would see.',
   ].join('\n');
 
-  // BASECOLOR STAYS ON GEMINI, cleanup stays on OpenAI.
+  // BASECOLOR STAYS ON GEMINI.
   //
-  // Measured across tonight's runs: gpt-image-2 paints better skin but drifts on
-  // the reference layout, putting features off their marked positions and
-  // shrinking the face within the frame. Gemini holds the layout, which matters
-  // more here because this texture maps onto fixed geometry: a beautiful face in
-  // the wrong place is unusable, a plainer face in the right place is not.
-  //
-  // The cleanup pass went the other way and is staying on OpenAI: that one is
-  // an edit of a photograph with no layout to respect, and gpt-image-2 stopped
-  // it inventing detail.
+  // Measured across the 08-09 runs: gpt-image-2 painted better skin but
+  // drifted on the reference layout, putting features off their marked
+  // positions and shrinking the face within the frame. Gemini holds the
+  // layout, which matters more here because this texture maps onto fixed
+  // geometry: a beautiful face in the wrong place is unusable, a plainer
+  // face in the right place is not. (The cleanup pass is also on Gemini
+  // now: geminiRemoveHair.)
   const key = readKey(GEMINI_KEY_FILE, 'Gemini');
   const res = await fetch(GEMINI_ENDPOINT, {
     method: 'POST',
@@ -464,17 +403,6 @@ export interface GroomPick {
   hairIndex: number;
   browIndex: number;
   lashIndex: number;
-}
-
-/** Body build -> setBlendsUnified axes. Deliberately gentle: a wrong guess on a
- *  stranger's body should read as "close enough", not as a caricature. */
-export function buildToAxes(build: GroomPick['build']): Record<string, number> {
-  switch (build) {
-    case 'skinny': return { fat: -0.55, musc: -0.25 };
-    case 'fat':    return { fat: 0.70, musc: -0.10 };
-    case 'fit':
-    default:       return { fat: -0.20, musc: 0.55 };
-  }
 }
 
 export interface GroomOption { index: number; name: string }
@@ -901,7 +829,7 @@ export async function runH3DPhotoToCharacter(
       return pick;
     });
 
-    const cleanBytes = await geminiRemoveHair(win, photoBytes, mime as 'image/jpeg' | 'image/png', aspectOf(photoBytes));
+    const cleanBytes = await geminiRemoveHair(win, photoBytes, mime as 'image/jpeg' | 'image/png');
     const cleanPath = path.join(workDir, 'clean.jpg');
     fs.writeFileSync(cleanPath, Buffer.from(cleanBytes));
 

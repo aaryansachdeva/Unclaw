@@ -102,7 +102,7 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
   useEffect(() => {
     const ds = window.electronAPI?.directSurface;
     if (!ds) return;
-    void ds.getLease?.().then((h) => setLease(h)).catch(() => { /* pre-1.1.9 main */ });
+    void ds.getLease?.().then((s) => setLease(s.holder)).catch(() => { /* pre-1.1.9 main */ });
     return ds.onLease?.((s) => {
       setLease(s.holder);
     });
