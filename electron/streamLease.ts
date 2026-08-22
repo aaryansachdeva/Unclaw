@@ -40,6 +40,7 @@ let lastPlayers: string[] = [];
 // start reaching the H.264 encoder. null = follow soul.
 let forced: LeaseHolder | null = null;
 let onChange: ((h: LeaseHolder, players: string[]) => void) | null = null;
+let lastCmdSeq = 0;
 let soulPort: (() => number | null) | null = null;
 let getWindow: (() => BrowserWindow | null) | null = null;
 
@@ -52,8 +53,30 @@ async function pollOnce(): Promise<void> {
       signal: AbortSignal.timeout(2000),
     });
     if (!res.ok) return; // soul restarting; keep the current lease
-    const body = (await res.json()) as { active_players?: string[] };
+    const body = (await res.json()) as {
+      active_players?: string[];
+      companion_cmd?: { seq: number; type: string; [k: string]: unknown };
+    };
     players = Array.isArray(body.active_players) ? body.active_players : [];
+    // Companion -> desktop command relay. A companion surface (the Chrome
+    // panel) can ask for desktop capabilities (switch the active character);
+    // soul queues the request and we carry it the last mile on this poll,
+    // acking so it is delivered once.
+    const cmd = body.companion_cmd;
+    if (cmd && typeof cmd.seq === 'number' && cmd.seq !== lastCmdSeq) {
+      lastCmdSeq = cmd.seq;
+      const win = getWindow?.();
+      if (win && !win.isDestroyed()) {
+        console.log(`[lease] companion command #${cmd.seq}: ${cmd.type}`);
+        win.webContents.send('companion:cmd', cmd);
+      }
+      void fetch(`http://127.0.0.1:${port}/companion/ack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seq: cmd.seq }),
+        signal: AbortSignal.timeout(2000),
+      }).catch(() => { /* re-delivered next poll; seq dedupe absorbs it */ });
+    }
   } catch {
     return; // transient; a dropped poll must never flip the lease
   }

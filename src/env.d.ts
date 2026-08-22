@@ -266,6 +266,8 @@ interface ElectronAPI {
      *  frame is frozen on screen deliberately. */
     onLease: (cb: (s: { holder: 'local' | 'remote'; players: string[] }) => void) => () => void;
     getLease: () => Promise<{ holder: 'local' | 'remote'; players: string[] }>;
+    /** Companion-relayed desktop commands (switch agent from the Chrome panel). */
+    onCompanionCmd?: (cb: (cmd: { seq: number; type: string; id?: string }) => void) => () => void;
     /** Pin the lease for testing; null follows soul again. */
     forceLease: (holder: 'local' | 'remote' | null) => Promise<'local' | 'remote'>;
     /** Hang up on remote viewers and take the stream back. */

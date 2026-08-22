@@ -476,6 +476,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     /** Current lease holder, for hydrating on mount. */
     getLease: (): Promise<{ holder: 'local' | 'remote'; players: string[] }> =>
       ipcRenderer.invoke('stream-lease:get'),
+    /** Companion surfaces (Chrome panel) relay desktop-capability requests
+     *  (switch agent) through soul; main forwards them here. */
+    onCompanionCmd: (
+      cb: (cmd: { seq: number; type: string; id?: string }) => void,
+    ): (() => void) => {
+      const handler = (_e: IpcRendererEvent, cmd: { seq: number; type: string; id?: string }) => cb(cmd);
+      ipcRenderer.on('companion:cmd', handler);
+      return () => ipcRenderer.removeListener('companion:cmd', handler);
+    },
     /** Hang up on remote viewers so the desktop takes the stream back. */
     disconnectRemote: (): Promise<{ ok: boolean; disconnected?: number }> =>
       ipcRenderer.invoke('stream-lease:disconnect'),

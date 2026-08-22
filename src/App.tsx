@@ -1270,6 +1270,20 @@ function AppMain() {
     if (fallback) selectInstance(fallback.id, 1);
   }, [onAddSlot, currentInstance, agentStack, selectInstance]);
 
+  // Companion-relayed commands. The Chrome panel asks soul to switch the
+  // active character; soul queues it and main's lease poller forwards it
+  // here, because THIS renderer owns the whole swap pipeline (descriptors,
+  // wardrobe, environment) and nothing else can drive it.
+  useEffect(() => {
+    const off = window.electronAPI?.directSurface?.onCompanionCmd?.((cmd) => {
+      if (cmd.type === 'switch_agent' && cmd.id) {
+        console.log(`[companion] switch_agent -> ${cmd.id}`);
+        selectInstance(cmd.id, 1);
+      }
+    });
+    return off;
+  }, [selectInstance]);
+
   const handlePickAgent = useCallback((agentId: string) => {
     const id = addInstance(agentId);
     setSelectedInstanceId(id);
