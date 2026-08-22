@@ -17,7 +17,7 @@
 // them. That is exactly the behaviour we want.
 import { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Smartphone } from 'lucide-react';
+import { Smartphone, Chrome, Code2 } from 'lucide-react';
 
 const EASE_OUT_EXPO = [0.16, 1, 0.3, 1] as const;
 
@@ -33,6 +33,19 @@ export function StreamLeaseOverlay() {
     void ds.getLease?.().then(setLease).catch(() => { /* older main process */ });
     return ds.onLease?.((s) => { setLease(s.holder); setPlayers(s.players); });
   }, []);
+
+  // Who took her. Local viewers self-tag on the signalling URL
+  // ("chrome:3", "vscode:7"); cloud players (the phone) carry no tag.
+  const who = (() => {
+    const kinds = new Set(players.map((p) => {
+      const tag = p.split(':')[0];
+      return tag === 'chrome' || tag === 'vscode' ? tag : 'mobile';
+    }));
+    if (kinds.size > 1) return { title: `Playing on ${players.length} devices`, Icon: Smartphone };
+    if (kinds.has('chrome')) return { title: 'Playing in Chrome', Icon: Chrome };
+    if (kinds.has('vscode')) return { title: 'Playing in VS Code', Icon: Code2 };
+    return { title: 'Playing on Unclaw Mobile', Icon: Smartphone };
+  })();
 
   const takeBack = useCallback(async () => {
     setBusy(true);
@@ -63,7 +76,7 @@ export function StreamLeaseOverlay() {
         >
           {/* Device glyph. Ghost-weight: it locates the state, it is not the
               point. Sized against the title, not floating free. */}
-          <Smartphone
+          <who.Icon
             size={22}
             strokeWidth={1.5}
             aria-hidden
@@ -107,7 +120,7 @@ export function StreamLeaseOverlay() {
               marginBottom: 26,
             }}
           >
-            Playing on Unclaw Mobile
+            {who.title}
           </h2>
 
           <button
