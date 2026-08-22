@@ -33,6 +33,7 @@ const POLL_MS = 1000;
 
 let timer: NodeJS.Timeout | null = null;
 let holder: LeaseHolder = 'local';
+let lastPlayers: string[] = [];
 // Dev override. Lets the whole handoff be exercised on this machine with no
 // phone: forcing 'remote' releases the surface exactly as a real viewer would,
 // so you can watch the desktop freeze, the overlay appear, and Unreal's frames
@@ -58,6 +59,7 @@ async function pollOnce(): Promise<void> {
   }
 
   const want: LeaseHolder = forced ?? (players.length > 0 ? 'remote' : 'local');
+  lastPlayers = players;
   if (want === holder) return;
 
   holder = want;
@@ -111,6 +113,20 @@ export function stop(): void {
 
 export function current(): LeaseHolder {
   return holder;
+}
+
+export function currentPlayers(): string[] {
+  return lastPlayers;
+}
+
+/** Re-emit the current lease through onChange. Called on every renderer
+ *  did-finish-load: the preload mirrors the lease into the DOM only when a
+ *  change event arrives, so a Cmd+R during a remote lease used to reset the
+ *  mirror to nothing. With the mirror stale, the desktop resumed sending its
+ *  resolution (fighting the phone's) and the frames-stalled watchdog treated
+ *  the deliberate stall as a fault. A reload now gets the truth immediately. */
+export function announce(): void {
+  onChange?.(holder, lastPlayers);
 }
 
 /** Pin the lease for testing, or pass null to follow soul again. Applied on

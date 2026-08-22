@@ -559,6 +559,11 @@ function createWindow() {
         directSurface.attach(mainWindow);
       }
     });
+    // Every load (reloads included): re-announce the current lease so the
+    // renderer's DOM mirror can never go stale across a Cmd+R mid-call.
+    mainWindow.webContents.on('did-finish-load', () => {
+      streamLease.announce();
+    });
     // The preload's draw loop logs its health grid to the renderer console,
     // which no log file ever sees; mirror those lines, the stream hook's
     // [ps] lines, and every renderer warning/error to stdout so a headless
@@ -1817,6 +1822,17 @@ app.on('before-quit', (event) => {
 // outlives any single window; it reads the soul port per tick, so a soul
 // restart on a fresh dynamic port needs no re-arming.
 if (process.platform === 'darwin') {
+  // Dev-only scriptable toggle: `kill -USR2 <electron pid>` flips the lease
+  // remote/back so the whole handoff (freeze, overlay, encoder switchover,
+  // media guard, reclaim) can be exercised from a shell with no phone and no
+  // devtools. Same path as __unclawStream.lease().
+  if (!app.isPackaged) {
+    process.on('SIGUSR2', () => {
+      const next = streamLease.current() === 'remote' ? null : 'remote';
+      console.log(`[lease] SIGUSR2 — forcing ${next ?? 'follow-soul (local)'}`);
+      void streamLease.force(next);
+    });
+  }
   streamLease.start(
     () => getSoulPorts()?.http ?? null,
     () => mainWindow,

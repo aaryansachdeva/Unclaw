@@ -479,15 +479,25 @@ export function usePixelStreaming({
       }
     };
 
-    // Audio guard. tuneReceivers silences the receiver at known lifecycle
-    // points, but something can still re-assert audio later (SDK unmute
-    // plumbing, a renegotiated receiver on a replaced pc, an element the SDK
-    // wires directly). Enforce the invariant once a second and LOG whenever
-    // a fighter is caught, so the culprit names itself: on the desktop, UE's
-    // local CoreAudio output is the single audible source and every stream
-    // audio path must be silent.
-    const audioGuard = window.setInterval(() => {
+    // Media guard. tuneReceivers sets things up at known lifecycle points,
+    // but state can be re-asserted later (SDK unmute plumbing, a renegotiated
+    // receiver, an element the SDK wires directly), so the invariants are
+    // enforced once a second, LOGGING whenever a fighter is caught so the
+    // culprit names itself. The invariants:
+    //
+    //  * AUDIO is always silent here. UE's local CoreAudio output is the
+    //    desktop's single audible source; the stream's audio track exists for
+    //    remote viewers (the mobile companion).
+    //  * VIDEO follows the stream lease. While a remote viewer holds the
+    //    lease the encoder is alive and this peer receives the same H.264
+    //    stream, which used to keep a hidden <video> decoding and playing at
+    //    full rate behind the frozen frame for the whole call. Disable the
+    //    receiver track and pause the element while remote; restore both on
+    //    reclaim (the WebRTC fallback must work again the moment the lease
+    //    is local).
+    const mediaGuard = window.setInterval(() => {
       try {
+        const leaseIsRemote = document.documentElement.dataset.unclawLease === 'remote';
         const pc = getPc();
         if (pc) {
           for (const recv of pc.getReceivers()) {
@@ -495,15 +505,29 @@ export function usePixelStreaming({
               recv.track.enabled = false;
               // eslint-disable-next-line no-console
               console.warn('[ps] audio receiver track was re-enabled; silenced again');
+            } else if (recv.track?.kind === 'video' && recv.track.enabled === leaseIsRemote) {
+              recv.track.enabled = !leaseIsRemote;
+              // eslint-disable-next-line no-console
+              console.log(`[ps] video receiver ${leaseIsRemote ? 'disabled (remote lease)' : 're-enabled (lease reclaimed)'}`);
             }
           }
         }
         for (const el of Array.from(document.querySelectorAll<HTMLMediaElement>('video, audio'))) {
           const s = el.srcObject as MediaStream | null;
-          if (s && s.getAudioTracks().length > 0 && !el.muted) {
+          if (!s) continue;
+          if (s.getAudioTracks().length > 0 && !el.muted) {
             el.muted = true;
             // eslint-disable-next-line no-console
             console.warn(`[ps] unmuted <${el.tagName.toLowerCase()}> carrying stream audio; muted it`);
+          }
+          if (el.tagName === 'VIDEO' && s.getVideoTracks().length > 0) {
+            if (leaseIsRemote && !el.paused) {
+              el.pause();
+              // eslint-disable-next-line no-console
+              console.log('[ps] stream video paused for remote lease');
+            } else if (!leaseIsRemote && el.paused) {
+              void el.play().catch(() => { /* no frames yet is fine */ });
+            }
           }
         }
       } catch { /* enforcement only; never break the stream */ }
@@ -667,7 +691,7 @@ export function usePixelStreaming({
     return () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       if (resizeTimer) clearTimeout(resizeTimer);
-      clearInterval(audioGuard);
+      clearInterval(mediaGuard);
       clearInterval(reconcile);
       offDirectStatus?.();
       document.removeEventListener('unclaw:direct-status', onDirectStatusEvent);
