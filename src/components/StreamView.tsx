@@ -190,7 +190,14 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
     // component subscribed. The bridge callback stays as the second route.
     const readAttr = () => {
       const v = document.documentElement.dataset.unclawDirectLive;
-      if (v !== undefined) setDirectLive(v === '1');
+      if (v !== undefined) {
+        setDirectLive((prev) => {
+          const next = v === '1';
+          // eslint-disable-next-line no-console
+          if (next !== prev) console.log(`[ps] StreamView directLive -> ${next}`);
+          return next;
+        });
+      }
     };
     readAttr();
     document.addEventListener('unclaw:direct-status', readAttr);
@@ -233,7 +240,14 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
         <canvas
           data-direct-canvas
           className="absolute inset-0 h-full w-full object-cover"
-          style={{ visibility: directLive ? 'visible' : 'hidden' }}
+          // z-index 1: the WebRTC <video> sits later in DOM order, and the
+          // SDK re-asserts `visibility: visible` on it (a child's explicit
+          // visibility escapes a hidden ancestor), which on window resize
+          // painted its stale boot frame (UE's blank-scene backdrop
+          // gradient) over the live canvas. Stacking the canvas above the
+          // video container ends that fight for good; when directLive is
+          // false the canvas is hidden and the video shows as before.
+          style={{ visibility: directLive ? 'visible' : 'hidden', zIndex: 1 }}
         />
       )}
       {/* Kept mounted, never unmounted: the PixelStreaming SDK owns the video

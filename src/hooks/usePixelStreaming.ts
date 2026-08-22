@@ -412,8 +412,11 @@ export function usePixelStreaming({
 
     }
 
-    ps.addEventListener('webRtcConnecting', () => setConnectionState('connecting'));
+    // eslint-disable-next-line no-console
+    ps.addEventListener('webRtcConnecting', () => { console.log('[ps] webRtcConnecting'); setConnectionState('connecting'); });
     ps.addEventListener('webRtcConnected', () => {
+      // eslint-disable-next-line no-console
+      console.log('[ps] webRtcConnected');
       setConnectionState('connected');
       // New session: forget the dedupe state so the first resolution send of
       // this connection always goes out on the wire. MUST be -1, not 0 — UE
@@ -592,10 +595,14 @@ export function usePixelStreaming({
       forceViewportResolutionUpdate();
     }, 3000);
     ps.addEventListener('webRtcDisconnected', () => {
+      // eslint-disable-next-line no-console
+      console.log('[ps] webRtcDisconnected');
       setConnectionState('connecting');
       scheduleRetry();
     });
     ps.addEventListener('webRtcFailed', () => {
+      // eslint-disable-next-line no-console
+      console.log('[ps] webRtcFailed');
       setConnectionState('connecting');
       scheduleRetry();
     });

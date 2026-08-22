@@ -560,10 +560,13 @@ function createWindow() {
       }
     });
     // The preload's draw loop logs its health grid to the renderer console,
-    // which no log file ever sees; mirror just those lines to stdout so a
-    // headless check can tell a live picture from a solid-white one.
-    mainWindow.webContents.on('console-message', (_e, _level, message) => {
-      if (message.includes('[direct-canvas]')) console.log(message);
+    // which no log file ever sees; mirror those lines, the stream hook's
+    // [ps] lines, and every renderer warning/error to stdout so a headless
+    // check can reconstruct the connection story, not just the picture.
+    mainWindow.webContents.on('console-message', (_e, level, message) => {
+      if (message.includes('[direct-canvas]') || message.includes('[ps]') || level >= 2) {
+        console.log(`[renderer${level >= 2 ? ':warn' : ''}] ${message}`);
+      }
     });
   }
 

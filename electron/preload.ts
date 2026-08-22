@@ -22,9 +22,15 @@ interface SoulPortsPayload {
 // place, show the canvas, and hide the video outright. A canvas holding a
 // drawn bitmap cannot animate, whatever the media stack does.
 const freezeForLease = (holder: 'local' | 'remote'): void => {
+  // The live picture is the injected <video> on the MSTG render path, or the
+  // StreamView canvas itself on the WebGPU path (which injects no element and
+  // whose canvas naturally holds the last drawn frame). Snapshot whichever
+  // is present.
   const v = document.querySelector<HTMLVideoElement>('video[data-direct-video]');
-  if (!v || !v.parentElement) {
-    console.warn(`[direct-canvas] freeze(${holder}): no direct video element — cannot snapshot`);
+  const directCanvas = v ? null : document.querySelector<HTMLCanvasElement>('canvas[data-direct-canvas]');
+  const live: HTMLVideoElement | HTMLCanvasElement | null = v ?? directCanvas;
+  if (!live || !live.parentElement) {
+    console.warn(`[direct-canvas] freeze(${holder}): no direct video/canvas element — cannot snapshot`);
     return;
   }
 
@@ -33,44 +39,51 @@ const freezeForLease = (holder: 'local' | 'remote'): void => {
   // node's `visibility` (it binds it to directLive), so every re-render
   // stomped the snapshot back to hidden. Three attempts at freezing the
   // picture failed on variations of that fight.
-  let frozen = v.parentElement.querySelector<HTMLCanvasElement>('canvas[data-frozen-frame]');
+  let frozen = live.parentElement.querySelector<HTMLCanvasElement>('canvas[data-frozen-frame]');
   if (!frozen) {
     frozen = document.createElement('canvas');
     frozen.dataset.frozenFrame = '1';
     frozen.style.cssText =
       'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:2;display:none;';
-    v.parentElement.insertBefore(frozen, v.nextSibling);
+    live.parentElement.insertBefore(frozen, live.nextSibling);
   }
 
   if (holder === 'remote') {
+    const srcW = v ? v.videoWidth : (directCanvas ? directCanvas.width : 0);
+    const srcH = v ? v.videoHeight : (directCanvas ? directCanvas.height : 0);
     let ok = false;
     try {
-      if (v.videoWidth > 0) {
-        frozen.width = v.videoWidth;
-        frozen.height = v.videoHeight;
+      if (srcW > 0 && srcH > 0) {
+        frozen.width = srcW;
+        frozen.height = srcH;
         const ctx = frozen.getContext('2d');
         if (ctx) {
           // Unreal writes alpha 0; source-over would ADD rather than replace
           // and saturate to white within a few draws (the original canvas-path
           // trap). 'copy' replaces.
           ctx.globalCompositeOperation = 'copy';
-          ctx.drawImage(v, 0, 0);
+          ctx.drawImage(live, 0, 0);
           ok = true;
         }
       }
     } catch { /* fall through: the overlay still covers the area */ }
     // Carry the gamut match over so the picture does not shift colour at the
-    // instant it freezes.
-    frozen.style.filter = v.style.filter;
+    // instant it freezes. The WebGPU canvas carries no CSS filter (its gamut
+    // match runs in-shader, so its pixels are already corrected).
+    frozen.style.filter = live.style.filter;
     frozen.style.display = ok ? '' : 'none';
-    v.pause();
-    v.style.visibility = 'hidden';
+    if (v) {
+      v.pause();
+      v.style.visibility = 'hidden';
+    }
     console.log(`[direct-canvas] frozen for remote lease: ${ok ? `${frozen.width}x${frozen.height}` : 'NO SNAPSHOT'}`);
   } else {
     frozen.style.display = 'none';
-    v.style.visibility = 'visible';
-    void v.play().catch(() => { /* muted autoplay is allowed */ });
-    console.log('[direct-canvas] lease reclaimed, live video restored');
+    if (v) {
+      v.style.visibility = 'visible';
+      void v.play().catch(() => { /* muted autoplay is allowed */ });
+    }
+    console.log('[direct-canvas] lease reclaimed, live picture restored');
   }
 };
 
@@ -557,33 +570,54 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
     // shared between the preload world and the page, so every status tick is
     // mirrored into a data attribute + DOM event; React reads the attribute,
     // which cannot go stale or miss a subscription window.
+    let lastStatusLogged: boolean | null = null;
     ipcRenderer.on('direct-surface:status', (_e, s: { connected: boolean }) => {
+      if (s.connected !== lastStatusLogged) {
+        lastStatusLogged = s.connected;
+        console.log(`[direct-canvas] status recv connected=${s.connected}`);
+      }
       try {
         document.documentElement.dataset.unclawDirectLive = s.connected ? '1' : '0';
         document.dispatchEvent(new Event('unclaw:direct-status'));
       } catch { /* document not ready yet; next tick in 2s */ }
     });
 
-    // Render-path selector. 'video' (default) pipes the frames into a
-    // MediaStreamTrackGenerator feeding a <video> element, which rides
-    // Chromium's dedicated video frame-submission path: no paint, video
-    // power optimisations. 'gpu' draws via a WebGPU external-texture pass
-    // instead. Both are zero-copy; measured 2026-08-15 at native res, same
-    // scene: video 19.0% app CPU, webgpu 21.9%, canvas-2d 22.5%. Failures
-    // cascade video -> gpu -> 2d, all landing on the same canvas element.
-    let renderVia: 'gpu' | 'video' = process.env.UNCLAW_DIRECT_RENDER === 'gpu' ? 'gpu' : 'video';
+    // Render-path selector. 'gpu' (default since 2026-08-21) draws via a
+    // WebGPU external-texture pass with the P3->sRGB gamut match folded into
+    // the shader. 'video' (UNCLAW_DIRECT_RENDER=video) pipes the frames into
+    // a MediaStreamTrackGenerator feeding a <video> element; it measured
+    // cheapest on 2026-08-15 (19.0% vs webgpu 21.9%), but that predates the
+    // gamut feColorMatrix: a CSS filter knocks the element off Chromium's
+    // dedicated video fast path, and the 2026-08-21 four-way had video as
+    // the MOST expensive config (126.9% CPU total vs 118.4% gpu, GPU and
+    // memory agreeing). Failures cascade video -> gpu -> 2d, all landing on
+    // the same canvas element.
+    let renderVia: 'gpu' | 'video' = process.env.UNCLAW_DIRECT_RENDER === 'video' ? 'video' : 'gpu';
     let videoStrikes = 0;
 
     // WebGPU state. The device/pipeline need no canvas, so they initialise
     // eagerly; the canvas context is configured on first draw. gpuFailed
     // flips the whole path over to the 2D fallback permanently.
     /* eslint-disable @typescript-eslint/no-explicit-any */
-    let gpuReady: { device: any; pipeline: any; sampler: any } | null = null;
+    let gpuReady: { device: any; pipeline: any; sampler: any; gamutBuf: any } | null = null;
     let gpuFailed = false;
     let gpuStrikes = 0;
     let gpuCtx: any = null;
+    let lastGamutOn = -1; // forces the first uniform write
     let readback: any = null;
     let readbackBusy = false;
+    // Resize hardening (2026-08-21): a window resize detaches Chromium's
+    // compositor from the webgpu canvas's swapchain. Draws keep succeeding
+    // into textures that are never presented again, so the element shows
+    // nothing while every counter stays healthy (the gradient-stuck symptom,
+    // webgpu edition). Reconfiguring the context mints a fresh swapchain
+    // bound to the live layer. The observer only flags; the draw loop
+    // reconfigures, so there is no rebuild storm during a drag.
+    let gpuNeedsReconfigure = false;
+    const gpuCanvasObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(() => { gpuNeedsReconfigure = true; })
+      : null;
+    let observedCanvas: HTMLCanvasElement | null = null;
 
     // Fullscreen triangle sampling the frame as an external texture. Alpha is
     // forced to 1 in the shader AND the canvas is configured opaque: Unreal's
@@ -600,8 +634,30 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
       }
       @group(0) @binding(0) var t: texture_external;
       @group(0) @binding(1) var s: sampler;
+      // 1.0 = apply the P3->sRGB gamut match, 0.0 = honest sRGB. Mirrors the
+      // feColorMatrix the video paths carry (StreamView's #ue-gamut-match):
+      // the same linear Display-P3 -> sRGB matrix, the same linearRGB working
+      // space, the same clamp. In-shader it is a mat3 multiply inside a pass
+      // that already touches every pixel, instead of a separate full-res SVG
+      // filter pass (which is also what knocks a <video> element off
+      // Chromium's fast path).
+      @group(0) @binding(2) var<uniform> gamutOn: f32;
+      fn srgbToLinear(c: vec3f) -> vec3f {
+        return select(pow((c + vec3f(0.055)) / 1.055, vec3f(2.4)), c / 12.92, c <= vec3f(0.04045));
+      }
+      fn linearToSrgb(c: vec3f) -> vec3f {
+        return select(1.055 * pow(c, vec3f(1.0 / 2.4)) - vec3f(0.055), c * 12.92, c <= vec3f(0.0031308));
+      }
       @fragment fn fs(v: VSOut) -> @location(0) vec4f {
-        return vec4f(textureSampleBaseClampToEdge(t, s, v.uv).rgb, 1.0);
+        var rgb = textureSampleBaseClampToEdge(t, s, v.uv).rgb;
+        if (gamutOn > 0.5) {
+          let m = mat3x3f(
+            vec3f(1.224940, -0.042057, -0.019638),
+            vec3f(-0.224940, 1.042057, -0.078636),
+            vec3f(0.0, 0.0, 1.098265));
+          rgb = linearToSrgb(clamp(m * srgbToLinear(rgb), vec3f(0.0), vec3f(1.0)));
+        }
+        return vec4f(rgb, 1.0);
       }
     `;
 
@@ -628,7 +684,10 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
           primitive: { topology: 'triangle-list' },
         });
         const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
-        gpuReady = { device, pipeline, sampler };
+        // Single-float uniform driving the in-shader gamut match.
+        // 0x40 | 0x0008 = UNIFORM | COPY_DST.
+        const gamutBuf = device.createBuffer({ size: 4, usage: 0x40 | 0x0008 });
+        gpuReady = { device, pipeline, sampler, gamutBuf };
         console.log('[direct-canvas] WebGPU pipeline ready');
       } catch (e) {
         gpuFailed = true;
@@ -661,21 +720,48 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
     // (external textures expire with their VideoFrame); both are trivially
     // cheap. The once-a-minute health grid is a GPU readback via
     // copyTextureToBuffer, since a webgpu canvas has no getImageData.
+    const gpuConfigure = (g: { device: any }): void => {
+      gpuCtx.configure({
+        device: g.device,
+        format: (navigator as any).gpu.getPreferredCanvasFormat(),
+        alphaMode: 'opaque',
+        usage: 0x10 | 0x01, // RENDER_ATTACHMENT | COPY_SRC (health grid)
+      });
+      gpuNeedsReconfigure = false;
+    };
     const drawWebGpu = (vf: VideoFrame): void => {
       const g = gpuReady!;
       if (!gpuCtx) {
         gpuCtx = (canvas as any).getContext('webgpu');
         if (!gpuCtx) throw new Error('webgpu context unavailable (canvas already 2d?)');
-        gpuCtx.configure({
-          device: g.device,
-          format: (navigator as any).gpu.getPreferredCanvasFormat(),
-          alphaMode: 'opaque',
-          usage: 0x10 | 0x01, // RENDER_ATTACHMENT | COPY_SRC (health grid)
-        });
+        gpuConfigure(g);
+      }
+      if (observedCanvas !== canvas && gpuCanvasObserver) {
+        if (observedCanvas) gpuCanvasObserver.unobserve(observedCanvas);
+        gpuCanvasObserver.observe(canvas!);
+        observedCanvas = canvas;
+        gpuNeedsReconfigure = false; // initial observe fires an entry; not a resize
       }
       if (canvas!.width !== vf.displayWidth || canvas!.height !== vf.displayHeight) {
         canvas!.width = vf.displayWidth;
         canvas!.height = vf.displayHeight;
+        gpuNeedsReconfigure = true;
+      }
+      if (gpuNeedsReconfigure) {
+        gpuConfigure(g);
+        console.log('[direct-canvas] webgpu context reconfigured after resize');
+      }
+      // Same toggle as the SVG filter (presence of the key disables it).
+      // Read per frame so __unclawStream.gamut() applies live; the buffer
+      // write only happens on change.
+      let gamutWanted = 1;
+      try {
+        if (localStorage.getItem('unclaw-stream-gamut-off') != null) gamutWanted = 0;
+      } catch { /* storage unavailable: keep the match on */ }
+      if (gamutWanted !== lastGamutOn) {
+        g.device.queue.writeBuffer(g.gamutBuf, 0, new Float32Array([gamutWanted]));
+        lastGamutOn = gamutWanted;
+        console.log(`[direct-canvas] in-shader gamut match ${gamutWanted ? 'ON' : 'OFF'}`);
       }
       const ext = g.device.importExternalTexture({ source: vf });
       const bind = g.device.createBindGroup({
@@ -683,6 +769,7 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
         entries: [
           { binding: 0, resource: ext },
           { binding: 1, resource: g.sampler },
+          { binding: 2, resource: { buffer: g.gamutBuf } },
         ],
       });
       const enc = g.device.createCommandEncoder();
