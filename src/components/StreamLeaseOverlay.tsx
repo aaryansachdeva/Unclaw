@@ -17,7 +17,7 @@
 // them. That is exactly the behaviour we want.
 import { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Smartphone, Chrome, Code2 } from 'lucide-react';
+import { Smartphone, Globe, Code2 } from 'lucide-react';
 
 const EASE_OUT_EXPO = [0.16, 1, 0.3, 1] as const;
 
@@ -42,7 +42,7 @@ export function StreamLeaseOverlay() {
       return tag === 'chrome' || tag === 'vscode' ? tag : 'mobile';
     }));
     if (kinds.size > 1) return { title: `Playing on ${players.length} devices`, Icon: Smartphone };
-    if (kinds.has('chrome')) return { title: 'Playing in Chrome', Icon: Chrome };
+    if (kinds.has('chrome')) return { title: 'Playing in Chrome', Icon: Globe };
     if (kinds.has('vscode')) return { title: 'Playing in VS Code', Icon: Code2 };
     return { title: 'Playing on Unclaw Mobile', Icon: Smartphone };
   })();
