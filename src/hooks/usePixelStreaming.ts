@@ -479,6 +479,36 @@ export function usePixelStreaming({
       }
     };
 
+    // Audio guard. tuneReceivers silences the receiver at known lifecycle
+    // points, but something can still re-assert audio later (SDK unmute
+    // plumbing, a renegotiated receiver on a replaced pc, an element the SDK
+    // wires directly). Enforce the invariant once a second and LOG whenever
+    // a fighter is caught, so the culprit names itself: on the desktop, UE's
+    // local CoreAudio output is the single audible source and every stream
+    // audio path must be silent.
+    const audioGuard = window.setInterval(() => {
+      try {
+        const pc = getPc();
+        if (pc) {
+          for (const recv of pc.getReceivers()) {
+            if (recv.track?.kind === 'audio' && recv.track.enabled) {
+              recv.track.enabled = false;
+              // eslint-disable-next-line no-console
+              console.warn('[ps] audio receiver track was re-enabled; silenced again');
+            }
+          }
+        }
+        for (const el of Array.from(document.querySelectorAll<HTMLMediaElement>('video, audio'))) {
+          const s = el.srcObject as MediaStream | null;
+          if (s && s.getAudioTracks().length > 0 && !el.muted) {
+            el.muted = true;
+            // eslint-disable-next-line no-console
+            console.warn(`[ps] unmuted <${el.tagName.toLowerCase()}> carrying stream audio; muted it`);
+          }
+        }
+      } catch { /* enforcement only; never break the stream */ }
+    }, 1000);
+
     ps.addEventListener('webRtcConnecting', () => { console.log('[ps] webRtcConnecting'); setConnectionState('connecting'); });
     ps.addEventListener('webRtcConnected', () => {
       // eslint-disable-next-line no-console
@@ -637,6 +667,7 @@ export function usePixelStreaming({
     return () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       if (resizeTimer) clearTimeout(resizeTimer);
+      clearInterval(audioGuard);
       clearInterval(reconcile);
       offDirectStatus?.();
       document.removeEventListener('unclaw:direct-status', onDirectStatusEvent);
