@@ -413,6 +413,72 @@ export function usePixelStreaming({
     }
 
     // eslint-disable-next-line no-console
+    // Receiver tuning, applied at every point a receiver can (re)appear.
+    //
+    // Latency: ask each video receiver to render frames as soon as decoded,
+    // no jitter buffer. Default Chromium playout delay is 50-200ms (designed
+    // to absorb network jitter); on loopback there's no jitter so the buffer
+    // is pure latency. Reaching the underlying RTCPeerConnection requires
+    // accessing private SDK state, hence the any-cast; the path is stable in
+    // PS5.6 and verified in the lib.
+    //
+    // Mac dual-audio: UE plays its own audio out of the Mac speakers via
+    // CoreAudio at the same time it sends the WebRTC audio track. Disable the
+    // track at the receiver so the renderer is silent and Grace is only heard
+    // once (from UE locally). track.enabled=false makes the WebRTC stack
+    // render silence regardless of any video/audio element's .muted state.
+    //
+    // This used to run ONCE, inside webRtcConnected, and lost the race
+    // whenever the audio track attached after that event (or a renegotiation
+    // minted a new receiver): result, Grace heard twice, slightly offset. So
+    // it now also runs at playStream, and a per-connection 'track' listener
+    // silences any audio track the moment it arrives.
+    const getPc = (): RTCPeerConnection | undefined =>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (ps as any)._webRtcController?.peerConnectionController?.peerConnection;
+    const tunedPcs = new WeakSet<RTCPeerConnection>();
+    const tuneReceivers = (why: string): void => {
+      try {
+        const pc = getPc();
+        if (!pc) return;
+        let audioSilenced = 0;
+        for (const recv of pc.getReceivers()) {
+          if (recv.track?.kind === 'video') {
+            // playoutDelayHint is the modern (2022+) standard property.
+            // 0 = "render with minimum delay possible".
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (recv as any).playoutDelayHint = 0;
+            // jitterBufferTarget (Chrome 92+) is the newer companion knob:
+            // explicit target depth in ms, 0 = no buffering. Belt and
+            // suspenders with playoutDelayHint; some Chromium builds honor
+            // one but not the other.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (recv as any).jitterBufferTarget = 0;
+          } else if (recv.track?.kind === 'audio') {
+            recv.track.enabled = false;
+            audioSilenced += 1;
+          }
+        }
+        if (!tunedPcs.has(pc)) {
+          tunedPcs.add(pc);
+          pc.addEventListener('track', (ev: RTCTrackEvent) => {
+            if (ev.track.kind === 'audio') {
+              ev.track.enabled = false;
+              // eslint-disable-next-line no-console
+              console.log('[ps] late audio track silenced');
+            }
+          });
+        }
+        // eslint-disable-next-line no-console
+        console.log(`[ps] receivers tuned (${why}): audio silenced x${audioSilenced}`);
+      } catch (err) {
+        // Don't break the connection if the SDK internals shifted;
+        // the tuning is a nice-to-have, not load-bearing.
+        // eslint-disable-next-line no-console
+        console.warn('[usePixelStreaming] receiver tuning failed:', err);
+      }
+    };
+
     ps.addEventListener('webRtcConnecting', () => { console.log('[ps] webRtcConnecting'); setConnectionState('connecting'); });
     ps.addEventListener('webRtcConnected', () => {
       // eslint-disable-next-line no-console
@@ -434,47 +500,7 @@ export function usePixelStreaming({
       // priming the pipe; the `playStream` triple-fire below carries the
       // real load.
       setTimeout(forceViewportResolutionUpdate, 500);
-      // Localhost optimization: ask the receiver to render frames as soon
-      // as decoded with no jitter buffer. Default Chromium playout delay is
-      // 50-200ms (designed to absorb network jitter); on loopback there's no
-      // jitter so the buffer is pure latency. Reaching the underlying
-      // RTCPeerConnection requires accessing private SDK state, hence the
-      // any-cast — the path is stable in PS5.6 and verified in the lib.
-      try {
-        const pc: RTCPeerConnection | undefined =
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (ps as any)._webRtcController?.peerConnectionController?.peerConnection;
-        if (pc) {
-          for (const recv of pc.getReceivers()) {
-            if (recv.track?.kind === 'video') {
-              // playoutDelayHint is the modern (2022+) standard property.
-              // 0 = "render with minimum delay possible".
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (recv as any).playoutDelayHint = 0;
-              // jitterBufferTarget (Chrome 92+) is the newer companion knob —
-              // explicit target depth in ms. 0 = no buffering. Belt and suspenders
-              // with playoutDelayHint; some Chromium builds honor one but not the
-              // other. Sofia's debug viewer sets both for the same reason.
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (recv as any).jitterBufferTarget = 0;
-            } else if (recv.track?.kind === 'audio') {
-              // Mac dual-audio: UE plays its own audio out of the Mac
-              // speakers via CoreAudio at the same time it sends the
-              // WebRTC audio track. Disable the track at the receiver so
-              // the renderer is silent and Grace is only heard once
-              // (from UE locally). track.enabled=false makes the WebRTC
-              // stack render silence regardless of any video/audio
-              // element's .muted state.
-              recv.track.enabled = false;
-            }
-          }
-        }
-      } catch (err) {
-        // Don't break the connection if the SDK internals shifted —
-        // the latency hint is a nice-to-have, not load-bearing.
-        // eslint-disable-next-line no-console
-        console.warn('[usePixelStreaming] playoutDelayHint apply failed:', err);
-      }
+      tuneReceivers('connected');
     });
     // Triple-fire viewport-res on stream start. Each one re-runs the
     // SDK's videoPlayer.updateVideoStreamSize() which sends a Resize
@@ -483,6 +509,7 @@ export function usePixelStreaming({
     // Electron layout is still settling (image first paint, container
     // reflow, etc.). PC reference uses the same 1/2/3-second pattern.
     ps.addEventListener('playStream', () => {
+      tuneReceivers('playStream');
       setTimeout(forceViewportResolutionUpdate, 1000);
       setTimeout(forceViewportResolutionUpdate, 2000);
       setTimeout(forceViewportResolutionUpdate, 3000);
