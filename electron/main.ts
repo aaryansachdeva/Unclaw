@@ -575,6 +575,21 @@ function createWindow() {
     });
   }
 
+  // Cmd+H hides all chrome (clean-capture / debug). Scoped to the FOCUSED
+  // Unclaw window via before-input-event: the old globalShortcut version
+  // hijacked Cmd+H system-wide, so no other app could hide itself while
+  // Unclaw ran. preventDefault also beats the app menu's "Hide" role, which
+  // is why the shortcut works at all. Lives inside createWindow so a
+  // recreated window (Dock-click after close) keeps the shortcut.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.meta
+        && !input.alt && !input.control && !input.shift
+        && input.key.toLowerCase() === 'h') {
+      event.preventDefault();
+      mainWindow?.webContents.send('temp:toggle-ui');
+    }
+  });
+
   mainWindow.on('closed', () => {
     directSurface.detach();
     mainWindow = null;
@@ -642,7 +657,7 @@ ipcMain.handle('stream-lease:disconnect', async () => {
     const body = await res.json().catch(() => ({}));
     // Clear any dev pin too, or a forced 'remote' would immediately re-take
     // the lease and the button would look broken.
-    streamLease.force(null);
+    void streamLease.force(null);
     return { ok: res.ok, ...(body as object) };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -1645,17 +1660,6 @@ app.whenReady().then(() => {
     console.warn(
       `[screenshot] failed to register ${SCREENSHOT_SHORTCUT}, another app likely owns it`,
     );
-  }
-
-  // TEMP(revert): Cmd+H hides all chrome (debug/clean-capture). Registered as a
-  // globalShortcut so it wins over the default app menu's "Hide" role (which
-  // also owns Cmd+H and would otherwise hide the whole app). Remove this block
-  // + the preload onToggleUi bridge + the App.tsx uiHidden handling to revert.
-  const tempUiToggle = globalShortcut.register('CommandOrControl+H', () => {
-    mainWindow?.webContents.send('temp:toggle-ui');
-  });
-  if (!tempUiToggle) {
-    console.warn('[temp] failed to register Cmd+H UI toggle');
   }
 
   createWindow();
