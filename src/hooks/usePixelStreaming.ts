@@ -505,6 +505,30 @@ export function usePixelStreaming({
     //    reclaim (the WebRTC fallback must work again the moment the lease
     //    is local).
     let lastPlaybackQualityBucket = -1;
+    // Sender-vs-receiver freeze triage: the same inbound-rtp counters the
+    // Chrome panel logs, from THIS receiver, every 15s while the stream
+    // video is live. If both receivers freeze in lockstep the stall is
+    // sender-side; if only one does, it's that receiver's environment.
+    let lastFreezeLog = 0;
+    const logInboundStats = async () => {
+      const now = Date.now();
+      if (now - lastFreezeLog < 15000) return;
+      lastFreezeLog = now;
+      try {
+        const pc = getPc();
+        if (!pc) return;
+        const report = await pc.getStats();
+        report.forEach((s: any) => {
+          if (s.type === 'inbound-rtp' && s.kind === 'video') {
+            // eslint-disable-next-line no-console
+            console.log(`[ps] inbound: fps=${s.framesPerSecond ?? 0} `
+              + `decoded=${s.framesDecoded} dropped=${s.framesDropped} `
+              + `freezes=${s.freezeCount} (${Math.round((s.totalFreezesDuration ?? 0) * 1000)}ms) `
+              + `res=${s.frameWidth}x${s.frameHeight}`);
+          }
+        });
+      } catch { /* diagnostic */ }
+    };
     const mediaGuard = window.setInterval(() => {
       try {
         const leaseIsRemote = document.documentElement.dataset.unclawLease === 'remote';
@@ -530,6 +554,7 @@ export function usePixelStreaming({
           // DROPPED. This is the receiver-side judder counter; UE-side drop
           // counters live in the encoder stats. Cheap (a struct read).
           if (el.tagName === 'VIDEO' && !el.paused && (el as HTMLVideoElement).videoWidth > 0) {
+            void logInboundStats();
             const q = (el as HTMLVideoElement).getVideoPlaybackQuality?.();
             if (q && q.totalVideoFrames > 0) {
               const bucket = Math.floor(Date.now() / 60000);
