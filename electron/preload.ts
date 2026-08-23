@@ -172,9 +172,15 @@ const STREAM_WGSL = `
 
   async function pump(): Promise<void> {
     try {
+      let lastT = 0;
       while (running && reader) {
         const { value, done } = await reader.read();
         if (done || !running) { value?.close(); break; }
+        const nowT = performance.now();
+        if (lastT && nowT - lastT > 80) {
+          console.log(`[rtc-gpu] hitch: ${Math.round(nowT - lastT)}ms between frames`);
+        }
+        lastT = nowT;
         try { paint(value); } finally { value.close(); }
       }
     } catch (e) {
