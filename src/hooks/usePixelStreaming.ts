@@ -495,6 +495,7 @@ export function usePixelStreaming({
     //    receiver track and pause the element while remote; restore both on
     //    reclaim (the WebRTC fallback must work again the moment the lease
     //    is local).
+    let lastPlaybackQualityBucket = -1;
     const mediaGuard = window.setInterval(() => {
       try {
         const leaseIsRemote = document.documentElement.dataset.unclawLease === 'remote';
@@ -515,6 +516,21 @@ export function usePixelStreaming({
         for (const el of Array.from(document.querySelectorAll<HTMLMediaElement>('video, audio'))) {
           const s = el.srcObject as MediaStream | null;
           if (!s) continue;
+          // Smoothness ground truth, once a minute while the WebRTC video is
+          // actually playing: how many frames the compositor RECEIVED vs
+          // DROPPED. This is the receiver-side judder counter; UE-side drop
+          // counters live in the encoder stats. Cheap (a struct read).
+          if (el.tagName === 'VIDEO' && !el.paused && (el as HTMLVideoElement).videoWidth > 0) {
+            const q = (el as HTMLVideoElement).getVideoPlaybackQuality?.();
+            if (q && q.totalVideoFrames > 0) {
+              const bucket = Math.floor(Date.now() / 60000);
+              if (bucket !== lastPlaybackQualityBucket) {
+                lastPlaybackQualityBucket = bucket;
+                // eslint-disable-next-line no-console
+                console.log(`[ps] playback quality: total=${q.totalVideoFrames} dropped=${q.droppedVideoFrames}`);
+              }
+            }
+          }
           if (s.getAudioTracks().length > 0 && !el.muted) {
             el.muted = true;
             // eslint-disable-next-line no-console

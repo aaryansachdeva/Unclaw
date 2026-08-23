@@ -564,16 +564,18 @@ function createWindow() {
     mainWindow.webContents.on('did-finish-load', () => {
       streamLease.announce();
     });
-    // The preload's draw loop logs its health grid to the renderer console,
-    // which no log file ever sees; mirror those lines, the stream hook's
-    // [ps] lines, and every renderer warning/error to stdout so a headless
-    // check can reconstruct the connection story, not just the picture.
-    mainWindow.webContents.on('console-message', (_e, level, message) => {
-      if (message.includes('[direct-canvas]') || message.includes('[ps]') || level >= 2) {
-        console.log(`[renderer${level >= 2 ? ':warn' : ''}] ${message}`);
-      }
-    });
   }
+
+  // The renderer's console lines are invisible to every log file; mirror the
+  // stream-relevant ones ([direct-canvas], [ps]) and all warnings/errors to
+  // stdout so a headless check can reconstruct the connection story. Lives
+  // OUTSIDE the direct-path gate: WebRTC-only runs need it just as much
+  // (learned when a WebRTC-mode probe came back with a blind log).
+  mainWindow.webContents.on('console-message', (_e, level, message) => {
+    if (message.includes('[direct-canvas]') || message.includes('[ps]') || level >= 2) {
+      console.log(`[renderer${level >= 2 ? ':warn' : ''}] ${message}`);
+    }
+  });
 
   // Cmd+H hides all chrome (clean-capture / debug). Scoped to the FOCUSED
   // Unclaw window via before-input-event: the old globalShortcut version
