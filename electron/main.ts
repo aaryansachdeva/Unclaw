@@ -572,7 +572,8 @@ function createWindow() {
   // OUTSIDE the direct-path gate: WebRTC-only runs need it just as much
   // (learned when a WebRTC-mode probe came back with a blind log).
   mainWindow.webContents.on('console-message', (_e, level, message) => {
-    if (message.includes('[direct-canvas]') || message.includes('[ps]') || level >= 2) {
+    if (message.includes('[direct-canvas]') || message.includes('[ps]')
+        || message.includes('[rtc-gpu]') || level >= 2) {
       console.log(`[renderer${level >= 2 ? ':warn' : ''}] ${message}`);
     }
   });

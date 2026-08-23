@@ -9,6 +9,274 @@ interface SoulPortsPayload {
   signallingPlayer: number;
 }
 
+// ---------------------------------------------------------------------------
+// The one stream shader. Fullscreen triangle sampling an external texture,
+// with the P3->sRGB gamut match behind a uniform (see the direct-mode block
+// for the full story). Shared by the direct-path renderer and the WebRTC
+// WebGPU painter below so both paths show the identical picture.
+const STREAM_WGSL = `
+      struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+      @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+        var p = array(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+        var o: VSOut;
+        o.pos = vec4f(p[i], 0.0, 1.0);
+        o.uv = vec2f(p[i].x * 0.5 + 0.5, 1.0 - (p[i].y * 0.5 + 0.5));
+        return o;
+      }
+      @group(0) @binding(0) var t: texture_external;
+      @group(0) @binding(1) var s: sampler;
+      // 1.0 = apply the P3->sRGB gamut match, 0.0 = honest sRGB. Mirrors the
+      // feColorMatrix the video paths carry (StreamView's #ue-gamut-match):
+      // the same linear Display-P3 -> sRGB matrix, the same linearRGB working
+      // space, the same clamp. In-shader it is a mat3 multiply inside a pass
+      // that already touches every pixel, instead of a separate full-res SVG
+      // filter pass (which is also what knocks a <video> element off
+      // Chromium's fast path).
+      @group(0) @binding(2) var<uniform> gamutOn: f32;
+      fn srgbToLinear(c: vec3f) -> vec3f {
+        return select(pow((c + vec3f(0.055)) / 1.055, vec3f(2.4)), c / 12.92, c <= vec3f(0.04045));
+      }
+      fn linearToSrgb(c: vec3f) -> vec3f {
+        return select(1.055 * pow(c, vec3f(1.0 / 2.4)) - vec3f(0.055), c * 12.92, c <= vec3f(0.0031308));
+      }
+      @fragment fn fs(v: VSOut) -> @location(0) vec4f {
+        var rgb = textureSampleBaseClampToEdge(t, s, v.uv).rgb;
+        if (gamutOn > 0.5) {
+          let m = mat3x3f(
+            vec3f(1.224940, -0.042057, -0.019638),
+            vec3f(-0.224940, 1.042057, -0.078636),
+            vec3f(0.0, 0.0, 1.098265));
+          rgb = linearToSrgb(clamp(m * srgbToLinear(rgb), vec3f(0.0), vec3f(1.0)));
+        }
+        return vec4f(rgb, 1.0);
+      }
+    `;
+
+// ---------------------------------------------------------------------------
+// WebRTC WebGPU painter (2026-08-23).
+//
+// The SDK's <video> carried an SVG feColorMatrix for the gamut match, and a
+// CSS filter on a video element knocks it off Chromium's dedicated video
+// path — measured as the last smoothness gap against 1.1.7 (which predates
+// the colour work entirely). This painter takes the decoded frames straight
+// off the MediaStreamTrack (MediaStreamTrackProcessor), draws them with the
+// SAME WebGPU shader the direct path uses (gamut as one mat3, free), onto a
+// canvas injected above the now-hidden video. Direct mode and WebRTC mode
+// end up sharing one renderer and one colour treatment.
+//
+// Activation is a 1 Hz scanner with the usual invariants: runs only while
+// the lease is local, the direct path is not live, and the SDK video has a
+// live remote video track. Falls back to the plain <video> (visible again)
+// on any failure — the painter must only ever be an upgrade.
+(() => {
+  if (process.platform !== 'darwin') return;
+  type GpuBits = {
+    device: any; pipeline: any; sampler: any; gamutBuf: any;
+    ctx: any; lastGamut: number; needsReconfigure: boolean;
+  };
+  let bits: GpuBits | null = null;
+  let canvas: HTMLCanvasElement | null = null;
+  let observedEl: HTMLCanvasElement | null = null;
+  let reader: ReadableStreamDefaultReader<VideoFrame> | null = null;
+  let boundVideo: HTMLVideoElement | null = null;
+  let boundTrack: MediaStreamTrack | null = null;
+  let running = false;
+  let failedPermanently = false;
+  let painted = 0;
+  const ro = typeof ResizeObserver !== 'undefined'
+    ? new ResizeObserver(() => { if (bits) bits.needsReconfigure = true; })
+    : null;
+
+  const gamutWanted = (): number => {
+    try { return localStorage.getItem('unclaw-stream-gamut-off') != null ? 0 : 1; }
+    catch { return 1; }
+  };
+
+  async function initGpu(target: HTMLCanvasElement): Promise<GpuBits> {
+    const g = (navigator as any).gpu;
+    if (!g) throw new Error('navigator.gpu unavailable');
+    const adapter = await g.requestAdapter();
+    if (!adapter) throw new Error('requestAdapter null');
+    const device = await adapter.requestDevice();
+    device.lost.then(() => { bits = null; });
+    const module = device.createShaderModule({ code: STREAM_WGSL });
+    const pipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vs' },
+      fragment: { module, entryPoint: 'fs', targets: [{ format: g.getPreferredCanvasFormat() }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+    const gamutBuf = device.createBuffer({ size: 4, usage: 0x40 | 0x0008 });
+    const ctx = (target as any).getContext('webgpu');
+    if (!ctx) throw new Error('webgpu context unavailable');
+    const configure = () => ctx.configure({
+      device,
+      format: (navigator as any).gpu.getPreferredCanvasFormat(),
+      alphaMode: 'opaque',
+      usage: 0x10,
+    });
+    configure();
+    return { device, pipeline, sampler, gamutBuf, ctx, lastGamut: -1, needsReconfigure: false };
+  }
+
+  function paint(vf: VideoFrame): void {
+    if (!bits || !canvas) return;
+    const b = bits;
+    if (canvas.width !== vf.displayWidth || canvas.height !== vf.displayHeight) {
+      canvas.width = vf.displayWidth;
+      canvas.height = vf.displayHeight;
+      b.needsReconfigure = true;
+    }
+    if (b.needsReconfigure) {
+      b.ctx.configure({
+        device: b.device,
+        format: (navigator as any).gpu.getPreferredCanvasFormat(),
+        alphaMode: 'opaque',
+        usage: 0x10,
+      });
+      b.needsReconfigure = false;
+    }
+    const want = gamutWanted();
+    if (want !== b.lastGamut) {
+      b.device.queue.writeBuffer(b.gamutBuf, 0, new Float32Array([want]));
+      b.lastGamut = want;
+    }
+    const ext = b.device.importExternalTexture({ source: vf });
+    const bind = b.device.createBindGroup({
+      layout: b.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: ext },
+        { binding: 1, resource: b.sampler },
+        { binding: 2, resource: { buffer: b.gamutBuf } },
+      ],
+    });
+    const enc = b.device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: b.ctx.getCurrentTexture().createView(),
+        loadOp: 'clear', storeOp: 'store',
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      }],
+    });
+    pass.setPipeline(b.pipeline);
+    pass.setBindGroup(0, bind);
+    pass.draw(3);
+    pass.end();
+    b.device.queue.submit([enc.finish()]);
+    painted++;
+    if (painted === 1 || painted % 1800 === 0) {
+      console.log(`[rtc-gpu] painted=${painted} ${canvas.width}x${canvas.height}`);
+    }
+  }
+
+  async function pump(): Promise<void> {
+    try {
+      while (running && reader) {
+        const { value, done } = await reader.read();
+        if (done || !running) { value?.close(); break; }
+        try { paint(value); } finally { value.close(); }
+      }
+    } catch (e) {
+      if (running) {
+        console.warn('[rtc-gpu] pump error, falling back to <video>:', e);
+        stop('pump error');
+      }
+    }
+  }
+
+  function start(video: HTMLVideoElement, track: MediaStreamTrack): void {
+    const MSTP = (window as any).MediaStreamTrackProcessor;
+    if (!MSTP) {
+      console.warn('[rtc-gpu] MediaStreamTrackProcessor unavailable in this world; keeping <video>');
+      failedPermanently = true;
+      return;
+    }
+    void (async () => {
+      try {
+        if (!canvas || !canvas.isConnected) {
+          canvas?.remove();
+          canvas = document.createElement('canvas');
+          canvas.dataset.rtcCanvas = '1';
+          canvas.style.cssText =
+            'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;';
+          video.parentElement?.insertBefore(canvas, video.nextSibling);
+          bits = null;
+        }
+        if (observedEl !== canvas) {
+          if (observedEl) ro?.unobserve(observedEl);
+          if (canvas) ro?.observe(canvas);
+          observedEl = canvas;
+        }
+        if (!bits) bits = await initGpu(canvas!);
+        const proc = new MSTP({ track });
+        reader = proc.readable.getReader();
+        boundVideo = video;
+        boundTrack = track;
+        running = true;
+        // The canvas sits above the video (z-index, the lesson of gotcha
+        // 85: never fight the SDK over visibility). The element keeps its
+        // srcObject so the resolution reconciler's intrinsic-size read
+        // stays truthful.
+        console.log('[rtc-gpu] painter active (shader gamut, video covered)');
+        // Mirror into the DOM so StreamView drops the SVG filter from the
+        // covered video (it would otherwise keep costing invisibly).
+        document.documentElement.dataset.unclawRtcGpu = '1';
+        document.dispatchEvent(new Event('unclaw:direct-status'));
+        void pump();
+      } catch (e) {
+        console.warn('[rtc-gpu] init failed, keeping <video>:', e);
+        failedPermanently = true;
+        stop('init failed');
+      }
+    })();
+  }
+
+  function stop(why: string): void {
+    running = false;
+    try { reader?.cancel(); } catch { /* done */ }
+    reader = null;
+    boundTrack = null;
+    boundVideo = null;
+    if (canvas) { canvas.remove(); canvas = null; bits = null; }
+    document.documentElement.dataset.unclawRtcGpu = '0';
+    document.dispatchEvent(new Event('unclaw:direct-status'));
+    console.log(`[rtc-gpu] painter stopped (${why})`);
+  }
+
+  let scanTicks = 0;
+  setInterval(() => {
+    try {
+      scanTicks++;
+      if (failedPermanently) return;
+      const leaseRemote = document.documentElement.dataset.unclawLease === 'remote';
+      const directLive = document.documentElement.dataset.unclawDirectLive === '1';
+      // Find the SDK's stream video: has a live remote video track and is
+      // NOT one of ours (direct-injected or frozen).
+      let candidate: { v: HTMLVideoElement; t: MediaStreamTrack } | null = null;
+      for (const v of Array.from(document.querySelectorAll<HTMLVideoElement>('video'))) {
+        if (v.dataset.directVideo) continue;
+        const s = v.srcObject as MediaStream | null;
+        const t = s?.getVideoTracks?.()[0];
+        if (t && t.readyState === 'live') { candidate = { v, t }; break; }
+      }
+      const shouldRun = !!candidate && !leaseRemote && !directLive;
+      if (scanTicks % 30 === 1 && !running) {
+        console.log(`[rtc-gpu] scan: videos=${document.querySelectorAll('video').length} `
+          + `candidate=${!!candidate} leaseRemote=${leaseRemote} directLive=${directLive} `
+          + `mstp=${!!(window as any).MediaStreamTrackProcessor}`);
+      }
+      if (shouldRun && !running) start(candidate!.v, candidate!.t);
+      else if (running && !shouldRun) stop(leaseRemote ? 'lease remote' : directLive ? 'direct live' : 'track gone');
+      else if (running && candidate && candidate.t !== boundTrack) {
+        // Renegotiation minted a new track; rebind.
+        stop('track changed');
+        start(candidate.v, candidate.t);
+      }
+    } catch { /* scanner must never throw */ }
+  }, 1000);
+})();
+
 // Freeze the picture when another surface takes the stream.
 //
 // Two earlier attempts failed, so this asserts a still image rather than
@@ -28,7 +296,10 @@ const freezeForLease = (holder: 'local' | 'remote'): void => {
   // is present.
   const v = document.querySelector<HTMLVideoElement>('video[data-direct-video]');
   const directCanvas = v ? null : document.querySelector<HTMLCanvasElement>('canvas[data-direct-canvas]');
-  const live: HTMLVideoElement | HTMLCanvasElement | null = v ?? directCanvas;
+  // Third source: the WebRTC WebGPU painter's canvas (webrtc mode).
+  const rtcCanvas = (v || directCanvas) ? null
+    : document.querySelector<HTMLCanvasElement>('canvas[data-rtc-canvas]');
+  const live: HTMLVideoElement | HTMLCanvasElement | null = v ?? directCanvas ?? rtcCanvas;
   if (!live || !live.parentElement) {
     console.warn(`[direct-canvas] freeze(${holder}): no direct video/canvas element — cannot snapshot`);
     return;
@@ -49,8 +320,9 @@ const freezeForLease = (holder: 'local' | 'remote'): void => {
   }
 
   if (holder === 'remote') {
-    const srcW = v ? v.videoWidth : (directCanvas ? directCanvas.width : 0);
-    const srcH = v ? v.videoHeight : (directCanvas ? directCanvas.height : 0);
+    const srcCanvas = directCanvas ?? rtcCanvas;
+    const srcW = v ? v.videoWidth : (srcCanvas ? srcCanvas.width : 0);
+    const srcH = v ? v.videoHeight : (srcCanvas ? srcCanvas.height : 0);
     let ok = false;
     try {
       if (srcW > 0 && srcH > 0) {
@@ -634,43 +906,7 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
     // forced to 1 in the shader AND the canvas is configured opaque: Unreal's
     // backbuffer carries alpha 0 (see the 2D path's 'copy' saga) and nothing
     // downstream may ever blend with it.
-    const WGSL = `
-      struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
-      @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
-        var p = array(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
-        var o: VSOut;
-        o.pos = vec4f(p[i], 0.0, 1.0);
-        o.uv = vec2f(p[i].x * 0.5 + 0.5, 1.0 - (p[i].y * 0.5 + 0.5));
-        return o;
-      }
-      @group(0) @binding(0) var t: texture_external;
-      @group(0) @binding(1) var s: sampler;
-      // 1.0 = apply the P3->sRGB gamut match, 0.0 = honest sRGB. Mirrors the
-      // feColorMatrix the video paths carry (StreamView's #ue-gamut-match):
-      // the same linear Display-P3 -> sRGB matrix, the same linearRGB working
-      // space, the same clamp. In-shader it is a mat3 multiply inside a pass
-      // that already touches every pixel, instead of a separate full-res SVG
-      // filter pass (which is also what knocks a <video> element off
-      // Chromium's fast path).
-      @group(0) @binding(2) var<uniform> gamutOn: f32;
-      fn srgbToLinear(c: vec3f) -> vec3f {
-        return select(pow((c + vec3f(0.055)) / 1.055, vec3f(2.4)), c / 12.92, c <= vec3f(0.04045));
-      }
-      fn linearToSrgb(c: vec3f) -> vec3f {
-        return select(1.055 * pow(c, vec3f(1.0 / 2.4)) - vec3f(0.055), c * 12.92, c <= vec3f(0.0031308));
-      }
-      @fragment fn fs(v: VSOut) -> @location(0) vec4f {
-        var rgb = textureSampleBaseClampToEdge(t, s, v.uv).rgb;
-        if (gamutOn > 0.5) {
-          let m = mat3x3f(
-            vec3f(1.224940, -0.042057, -0.019638),
-            vec3f(-0.224940, 1.042057, -0.078636),
-            vec3f(0.0, 0.0, 1.098265));
-          rgb = linearToSrgb(clamp(m * srgbToLinear(rgb), vec3f(0.0), vec3f(1.0)));
-        }
-        return vec4f(rgb, 1.0);
-      }
-    `;
+    const WGSL = STREAM_WGSL;
 
     (async () => {
       // Initialised even when the video path is primary: an idle device costs

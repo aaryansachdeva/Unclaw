@@ -179,6 +179,10 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
   // the ordinary WebRTC video keeps playing, which is what makes this safe to
   // leave enabled.
   const [directLive, setDirectLive] = useState(false);
+  // True while the preload's WebRTC WebGPU painter covers the video: the
+  // gamut then lives in the shader, so the SVG filter must come OFF the
+  // covered element or it keeps costing invisibly.
+  const [rtcGpu, setRtcGpu] = useState(false);
   const directMode = window.electronAPI?.directSurface?.mode ?? null;
   useEffect(() => {
     // Two routes to the same fact, because on 2026-08-15 the bridge callback
@@ -189,6 +193,7 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
     // stale, and reading it on mount also covers statuses sent before this
     // component subscribed. The bridge callback stays as the second route.
     const readAttr = () => {
+      setRtcGpu(document.documentElement.dataset.unclawRtcGpu === '1');
       const v = document.documentElement.dataset.unclawDirectLive;
       if (v !== undefined) {
         setDirectLive((prev) => {
@@ -255,7 +260,7 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
           connection that still carries input and audio. Hidden only. */}
       <div
         ref={videoParentRef}
-        className={`absolute inset-0${gamutOn && !directLive ? ' stream-gamut-match' : ''}`}
+        className={`absolute inset-0${gamutOn && !directLive && !rtcGpu ? ' stream-gamut-match' : ''}`}
         style={directLive || lease === 'remote' ? { visibility: 'hidden' } : undefined}
       />
 

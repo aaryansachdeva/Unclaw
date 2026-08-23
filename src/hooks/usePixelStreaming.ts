@@ -453,16 +453,19 @@ export function usePixelStreaming({
         let audioSilenced = 0;
         for (const recv of pc.getReceivers()) {
           if (recv.track?.kind === 'video') {
-            // Zero-buffer hints REMOVED (2026-08-23). playoutDelayHint=0 +
-            // jitterBufferTarget=0 pinned the buffer to ~20ms, and with the
-            // sender's capture timestamps still jittered (worker-thread
-            // stamping after the fence poll), every wobble rendered as
-            // judder: the mechanism behind "1.1.7 felt smoother" (its
-            // stack had no hints; the buffer adapted to ~127ms and
-            // absorbed everything). Let the receiver adapt. Re-introduce a
-            // small bounded target only after the render-thread timestamp
-            // fix ships, walking it down while watching the freeze/judder
-            // counters.
+            // Bounded buffer target, the tuned middle (2026-08-23).
+            // History: 0 pinned the buffer to ~20ms and rendered every
+            // sender wobble as judder (the "1.1.7 felt smoother" saga);
+            // fully adaptive converged at ~168ms because webrtc's
+            // estimator also reacts to frame-SIZE variation, overshooting
+            // 1.1.7's 127ms. With capture timestamps now stamped on the
+            // render thread (UE 2026.0823.01), a bounded 80ms holds
+            // smoothness at half the adaptive latency. Walk lower only
+            // with the freeze counters watching.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (recv as any).jitterBufferTarget = 80;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (recv as any).playoutDelayHint = 0.08;
           } else if (recv.track?.kind === 'audio') {
             recv.track.enabled = false;
             audioSilenced += 1;
@@ -521,10 +524,13 @@ export function usePixelStreaming({
         report.forEach((s: any) => {
           if (s.type === 'inbound-rtp' && s.kind === 'video') {
             // eslint-disable-next-line no-console
+            const jb = s.jitterBufferEmittedCount
+              ? Math.round((s.jitterBufferDelay / s.jitterBufferEmittedCount) * 1000)
+              : 0;
             console.log(`[ps] inbound: fps=${s.framesPerSecond ?? 0} `
               + `decoded=${s.framesDecoded} dropped=${s.framesDropped} `
               + `freezes=${s.freezeCount} (${Math.round((s.totalFreezesDuration ?? 0) * 1000)}ms) `
-              + `res=${s.frameWidth}x${s.frameHeight}`);
+              + `jb=${jb}ms res=${s.frameWidth}x${s.frameHeight}`);
           }
         });
       } catch { /* diagnostic */ }
