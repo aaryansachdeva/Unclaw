@@ -206,6 +206,15 @@ export function usePixelStreaming({
     // drivers below funnel through this so the cap, the quantize step and the
     // dedupe can never drift apart between the WebRTC and direct paths.
     const applyTargetResolution = (cssW: number, cssH: number) => {
+      // Lease gate, read LIVE from the DOM at send time. The cached
+      // `leaseRemote` flag has a race: on a renderer (re)connect the flag
+      // can still be stale-false when webRtcConnected's 500ms nudge and the
+      // playStream 1/2/3s nudges fire, so the desktop stomped the remote
+      // viewer's resolution with its own (panel asked 832x1600, stream
+      // flipped back to 1168x1536; same mechanism as the phone losing its
+      // resolution mid-call). The DOM mirror is announced on every load and
+      // cannot be stale here.
+      if (document.documentElement.dataset.unclawLease === 'remote') return;
       const dpr = window.devicePixelRatio || 1;
       let w = Math.round(cssW * dpr);
       let h = Math.round(cssH * dpr);
