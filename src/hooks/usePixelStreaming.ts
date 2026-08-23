@@ -453,16 +453,16 @@ export function usePixelStreaming({
         let audioSilenced = 0;
         for (const recv of pc.getReceivers()) {
           if (recv.track?.kind === 'video') {
-            // playoutDelayHint is the modern (2022+) standard property.
-            // 0 = "render with minimum delay possible".
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (recv as any).playoutDelayHint = 0;
-            // jitterBufferTarget (Chrome 92+) is the newer companion knob:
-            // explicit target depth in ms, 0 = no buffering. Belt and
-            // suspenders with playoutDelayHint; some Chromium builds honor
-            // one but not the other.
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (recv as any).jitterBufferTarget = 0;
+            // Zero-buffer hints REMOVED (2026-08-23). playoutDelayHint=0 +
+            // jitterBufferTarget=0 pinned the buffer to ~20ms, and with the
+            // sender's capture timestamps still jittered (worker-thread
+            // stamping after the fence poll), every wobble rendered as
+            // judder: the mechanism behind "1.1.7 felt smoother" (its
+            // stack had no hints; the buffer adapted to ~127ms and
+            // absorbed everything). Let the receiver adapt. Re-introduce a
+            // small bounded target only after the render-thread timestamp
+            // fix ships, walking it down while watching the freeze/judder
+            // counters.
           } else if (recv.track?.kind === 'audio') {
             recv.track.enabled = false;
             audioSilenced += 1;
