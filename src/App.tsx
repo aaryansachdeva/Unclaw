@@ -1022,6 +1022,44 @@ function AppMain() {
   // so they keep their own.
   const personaVoices = voicesForInstance(
     activeAgentId, currentInstance?.identity?.gender ?? null, personaCustomName);
+  // Companion surfaces (the Chrome panel, the phone) chat through soul's
+  // RPC path, which knows nothing about the renderer's character profiles:
+  // without this push they spoke with the globally-saved BYOK voice and the
+  // default persona no matter who was on stage (2026-08-27: Chris on stage,
+  // Grace's voice and prompt in the panel). Push the active agent's context
+  // on every change; retry through soul's boot window and re-push when soul
+  // respawns on new ports. Soul persists it, so restarts stay correct.
+  const personaVoicesKey = JSON.stringify(personaVoices);
+  useEffect(() => {
+    let cancelled = false;
+    const push = async () => {
+      for (const delayMs of [0, 2000, 5000, 10000, 20000, 30000]) {
+        if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+        if (cancelled) return;
+        try {
+          const res = await fetch(`${getSoulBaseUrl()}/companion/context`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              agent_id: activeAgentId,
+              label: persona.displayName,
+              prompt: persona.prompt,
+              voices: JSON.parse(personaVoicesKey),
+            }),
+            signal: AbortSignal.timeout(3000),
+          });
+          if (res.ok) return;
+        } catch { /* soul not up yet; retry above */ }
+      }
+    };
+    void push();
+    const unsub = subscribeSoulPorts(() => { void push(); });
+    return () => { cancelled = true; unsub(); };
+    // persona/personaVoices are recomputed objects each render; depend on
+    // their stable string content, not identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeAgentId, persona.displayName, persona.prompt, personaVoicesKey]);
+
   // Chat history is keyed by the ROSTER INSTANCE, not the persona — so two
   // Marks, a renamed Ava, and base Grace each remember independently (persona
   // collapses every non-Grace/Mark character onto Grace, which would otherwise
