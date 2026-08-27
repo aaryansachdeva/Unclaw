@@ -59,7 +59,15 @@ export function usePixelStreaming({
         StartVideoMuted: false,
         HoveringMouse: true,
         WaitForStreamer: true,
-        MatchViewportRes: true,
+        // MatchViewportRes is OFF (2026-08-27): with it on, the SDK's
+        // VideoPlayer fires its stock callback (CSS pixels, no dpr, no
+        // alignment) on its own resize events. We drive resolution entirely
+        // ourselves below (ResizeObserver + 3s reconciler through
+        // applyTargetResolution), and the stock path kept escaping the
+        // override after reconnects, feeding UE unaligned sizes (695x750 in
+        // the 2026-08-27 log) that alternated with ours, one render-target
+        // + encoder rebuild per flip.
+        MatchViewportRes: false,
         // PS 5.6 SDK defaults to UE-as-offerer (legacy Epic plugin behavior).
         // Our PixelStreaming2NativeMac plugin (1.0.8+) is browser-as-offerer —
         // UE awaits the browser's offer in OnRemoteOffer and answers via AddTrack.
@@ -264,14 +272,20 @@ export function usePixelStreaming({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (ps as any).emitCommand({ 'Resolution.Width': w, 'Resolution.Height': h });
     };
+    const dprOverrideCallback = (cssW: number, cssH: number) =>
+      applyTargetResolution(cssW, cssH);
     const installDprResolutionOverride = (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vp: any,
     ) => {
-      if (!vp || vp.__unclawDprOverride) return;
-      vp.onMatchViewportResolutionCallback = (cssW: number, cssH: number) =>
-        applyTargetResolution(cssW, cssH);
-      vp.__unclawDprOverride = true;
+      // Compare by function identity, not a marker flag. The SDK's
+      // WebRtcPlayerController CONSTRUCTOR re-assigns the stock CSS-pixel
+      // callback onto the (reused) videoPlayer, so after any reconnect() the
+      // stock sender was back while the old __unclawDprOverride marker still
+      // said "installed" and this function skipped re-installing. That is the
+      // escape that let UE receive unaligned CSS-pixel resolutions.
+      if (!vp || vp.onMatchViewportResolutionCallback === dprOverrideCallback) return;
+      vp.onMatchViewportResolutionCallback = dprOverrideCallback;
     };
     const forceViewportResolutionUpdate = () => {
       // A remote viewer owns the viewport; stay out of its way.
@@ -679,6 +693,14 @@ export function usePixelStreaming({
     // already-applied resolution is a no-op UE-side (r.SetRes with the current
     // value), so a transient mismatch while UE is mid-apply costs nothing, and
     // a genuinely lost send now recovers within one 3s tick instead of never.
+    // One dedupe-wipe per DISTINCT disagreement. If UE cannot honour the
+    // exact target (it clamps or aligns internally), the mismatch is
+    // permanent, and wiping the dedupe every tick re-sent r.SetRes every 3
+    // seconds for the life of the session (2026-08-27 log: identical
+    // 832x1600 at 09:33:45/48/51). Remember the disagreement we already
+    // re-sent for; fire again only when the picture actually changes, and
+    // forget it as soon as sender and stream agree.
+    let lastReconcileSig = '';
     const reconcile = window.setInterval(() => {
       // DIRECT PATH closed loop (2026-08-20). The dedupe below records what we
       // SENT before knowing it landed, and emitCommand is fire-and-forget. On
@@ -698,13 +720,19 @@ export function usePixelStreaming({
         const [aw, ah] = (published ?? '').split('x').map((n) => parseInt(n, 10));
         if (aw > 0 && ah > 0 && lastSentRes.w > 0
             && (Math.abs(aw - lastSentRes.w) > 16 || Math.abs(ah - lastSentRes.h) > 16)) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[ps] direct frames are ${aw}x${ah} but target is `
-            + `${lastSentRes.w}x${lastSentRes.h} — resolution send was lost, re-sending`,
-          );
-          lastSentRes.w = -1;
-          lastSentRes.h = -1;
+          const sig = `d:${aw}x${ah}->${lastSentRes.w}x${lastSentRes.h}`;
+          if (sig !== lastReconcileSig) {
+            lastReconcileSig = sig;
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[ps] direct frames are ${aw}x${ah} but target is `
+              + `${lastSentRes.w}x${lastSentRes.h}: resolution send was lost, re-sending`,
+            );
+            lastSentRes.w = -1;
+            lastSentRes.h = -1;
+          }
+        } else {
+          lastReconcileSig = '';
         }
       }
       const video = videoParentRef.current?.querySelector('video');
@@ -721,13 +749,19 @@ export function usePixelStreaming({
         && (Math.abs(video.videoWidth - lastSentRes.w) > 16
             || Math.abs(video.videoHeight - lastSentRes.h) > 16)
       ) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[ps] stream is ${video.videoWidth}x${video.videoHeight} but target is `
-          + `${lastSentRes.w}x${lastSentRes.h} — resolution send was lost, re-sending`,
-        );
-        lastSentRes.w = -1;
-        lastSentRes.h = -1;
+        const sig = `v:${video.videoWidth}x${video.videoHeight}->${lastSentRes.w}x${lastSentRes.h}`;
+        if (sig !== lastReconcileSig) {
+          lastReconcileSig = sig;
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[ps] stream is ${video.videoWidth}x${video.videoHeight} but target is `
+            + `${lastSentRes.w}x${lastSentRes.h}: resolution send was lost, re-sending`,
+          );
+          lastSentRes.w = -1;
+          lastSentRes.h = -1;
+        }
+      } else if (!directLive) {
+        lastReconcileSig = '';
       }
       forceViewportResolutionUpdate();
     }, 3000);
