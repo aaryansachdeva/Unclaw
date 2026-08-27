@@ -1775,7 +1775,7 @@ function AppMain() {
   // Set below (near applyCamera); called when a big body animation fires so the
   // camera briefly pulls back to reveal it. A ref so the earlier chat callbacks
   // can reach the later-defined camera helper.
-  const triggerActionCameraRef = useRef<(() => void) | null>(null);
+  const triggerActionCameraRef = useRef<((actionName?: string) => void) | null>(null);
   const dispatchChatResult = useCallback((result: SoulChatResult) => {
     let addedTurn: Turn | null = null;
     if (result.response) {
@@ -1842,7 +1842,7 @@ function AppMain() {
 
       if (isAnimAction && action) {
         dispatchActionToUE(pixelStreaming, action, result.response);
-        triggerActionCameraRef.current?.();
+        triggerActionCameraRef.current?.(action.name);
       }
       if (pixelStreaming) {
         dispatchBodyToUE(pixelStreaming, result.body);
@@ -1931,7 +1931,7 @@ function AppMain() {
         || action.name === 'celebrate';
       if (isAnim) {
         dispatchActionToUE(pixelStreaming, action, chunk.response);
-        triggerActionCameraRef.current?.();
+        triggerActionCameraRef.current?.(action.name);
       }
       if (isReminderAction(action.name)) {
         setRefreshKey(k => k + 1);
@@ -2474,7 +2474,7 @@ function AppMain() {
       Timestamp: new Date().toISOString(),
     });
     // Same reveal-then-return camera move as the chat-driven actions.
-    triggerActionCameraRef.current?.();
+    triggerActionCameraRef.current?.(name);
   }, [pixelStreaming]);
 
   // Voice failures (mic permission, worklet, etc.) otherwise reject straight to
@@ -3132,9 +3132,20 @@ function AppMain() {
   // already at the full pull-back (a move to waist would zoom IN). Re-arming
   // (a second action) restarts the hold; the restore reads the CURRENT mode via
   // applyCameraRef, so a manual toggle mid-action is honored.
-  const ACTION_CAMERA_HOLD_MS = 1500;
+  // Hold roughly the length of each animation so the camera stays wide for
+  // the WHOLE gesture and only then eases home. The old flat 1500ms returned
+  // mid-dance, which read as a nervous zoom bounce. These are eyeballed
+  // against the anim loops; tune per action here.
+  const ACTION_CAMERA_HOLD_MS: Record<string, number> = {
+    do_dance: 9000,
+    give_a_kiss: 4500,
+    say_hello: 3500,
+    react_as_star_wars_fan: 6000,
+    celebrate: 5000,
+  };
+  const ACTION_CAMERA_HOLD_DEFAULT_MS = 4000;
   const actionCameraTimerRef = useRef<number | null>(null);
-  const triggerActionCamera = useCallback(() => {
+  const triggerActionCamera = useCallback((actionName?: string) => {
     if (!pixelStreaming || customizationActive || cameraMode === 'full') return;
     const [x, y, z] = cameraForMode(activeAgentId, 'waist');
     pixelStreaming.emitUIInteraction({
@@ -3144,11 +3155,12 @@ function AppMain() {
       'locB.z': round3(z),
       Timestamp: new Date().toISOString(),
     });
+    const holdMs = (actionName && ACTION_CAMERA_HOLD_MS[actionName]) || ACTION_CAMERA_HOLD_DEFAULT_MS;
     if (actionCameraTimerRef.current !== null) window.clearTimeout(actionCameraTimerRef.current);
     actionCameraTimerRef.current = window.setTimeout(() => {
       actionCameraTimerRef.current = null;
       applyCameraRef.current?.();
-    }, ACTION_CAMERA_HOLD_MS);
+    }, holdMs);
   }, [pixelStreaming, activeAgentId, customizationActive, cameraMode]);
   triggerActionCameraRef.current = triggerActionCamera;
 
