@@ -3132,16 +3132,22 @@ function AppMain() {
   // already at the full pull-back (a move to waist would zoom IN). Re-arming
   // (a second action) restarts the hold; the restore reads the CURRENT mode via
   // applyCameraRef, so a manual toggle mid-action is honored.
-  // Hold roughly the length of each animation so the camera stays wide for
-  // the WHOLE gesture and only then eases home. The old flat 1500ms returned
-  // mid-dance, which read as a nervous zoom bounce. These are eyeballed
-  // against the anim loops; tune per action here.
+  // Hold the measured length of each animation (queried from the UE assets,
+  // 2026-08-26, headless get_play_length) plus ~600ms for the camera travel
+  // and the pose to settle, so the camera stays wide for the WHOLE gesture
+  // and only then eases home. The old flat 1500ms returned mid-dance.
+  //   do_dance                Silly_Dancing_Anim      7.625s
+  //   give_a_kiss             Blow_A_Kiss_Anim        4.583s
+  //   say_hello               WavingHand_Anim         4.583s
+  //   react_as_star_wars_fan  Saber idle/fight        7.542-8.167s
+  //   celebrate               Cheering_Anim           1.875s (genuinely short)
+  // If UE ever loops one of these in the BP, bump its hold here.
   const ACTION_CAMERA_HOLD_MS: Record<string, number> = {
-    do_dance: 9000,
-    give_a_kiss: 4500,
-    say_hello: 3500,
-    react_as_star_wars_fan: 6000,
-    celebrate: 5000,
+    do_dance: 8200,
+    give_a_kiss: 5200,
+    say_hello: 5200,
+    react_as_star_wars_fan: 8800,
+    celebrate: 2500,
   };
   const ACTION_CAMERA_HOLD_DEFAULT_MS = 4000;
   const actionCameraTimerRef = useRef<number | null>(null);
