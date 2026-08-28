@@ -14,10 +14,11 @@ export function WelcomeStep() {
       style={{
         display: 'flex',
         alignItems: 'center',
+        // True centering, not the old fixed-padding nudge: the row now
+        // lands centered at any panel width.
+        justifyContent: 'center',
         gap: 36,
-        // Nudge the whole row (logo + title block) a little right so it
-        // sits more centered in the panel rather than hugging the edge.
-        padding: '14px 0 10px 52px',
+        padding: '14px 0 10px',
       }}
     >
       <BrandLogo size={168} />
