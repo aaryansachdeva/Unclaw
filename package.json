@@ -72,6 +72,12 @@
       }
     ],
     "win": {
+      "extraResources": [
+        {
+          "from": "electron/native/surface_layer/build/Release/surface_layer.node",
+          "to": "surface_layer.node"
+        }
+      ],
       "target": [
         {
           "target": "nsis",
@@ -152,6 +158,12 @@
       ]
     },
     "linux": {
+      "extraResources": [
+        {
+          "from": "electron/native/surface_layer/build/Release/surface_layer.node",
+          "to": "surface_layer.node"
+        }
+      ],
       "target": [
         {
           "target": "AppImage",

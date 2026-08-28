@@ -25,9 +25,22 @@ export interface DirectSurfaceStats {
 }
 
 interface FrameInfo {
-  /** Raw IOSurfaceRef pointer bytes; exactly what Electron's
-   *  sharedTexture.importSharedTexture expects for handle.ioSurface. */
-  ioSurface: Buffer;
+  /** macOS: raw IOSurfaceRef pointer bytes — exactly what Electron's
+   *  sharedTexture.importSharedTexture wants for handle.ioSurface. */
+  ioSurface?: Buffer;
+  /** Windows: the D3D11 shared-texture NT HANDLE value, already DUPLICATED
+   *  into THIS process by the publisher (Electron's handle.ntHandle is
+   *  documented as process-local, so a raw cross-process value would be
+   *  meaningless here — see the pid handshake in the addon). BGRA/RGBA
+   *  handles carry no keyed mutex, so there is nothing to acquire. */
+  ntHandle?: Buffer;
+  /** Linux: dmabuf planes + DRM modifier for handle.nativePixmap. FDs are
+   *  passed over the unix socket with SCM_RIGHTS and are already ours. */
+  nativePixmap?: {
+    planes: { fd: number; stride: number; offset: number; size: number }[];
+    modifier: string;
+    supportsZeroCopyWebGpuImport: boolean;
+  };
   surfaceId: number;
   serial: number;
   width: number;
@@ -48,8 +61,15 @@ let reloadHandler: (() => void) | null = null;
 let reloadTarget: Electron.WebContents | null = null;
 
 export function isEnabled(): boolean {
-  return (process.env.UNCLAW_DIRECT_SURFACE === '1'
-    || process.env.UNCLAW_DIRECT_SURFACE === '2') && process.platform === 'darwin';
+  const flag = process.env.UNCLAW_DIRECT_SURFACE;
+  if (flag !== '1' && flag !== '2') return false;
+  // Mode 1 composites on a CAMetalLayer and exists only on macOS. Windows and
+  // Linux have no equivalent and are shared-texture (mode 2) only, so a '1'
+  // there would silently mean "off" — normalise in mode() instead of
+  // refusing, so the same env var works everywhere.
+  return process.platform === 'darwin'
+    || process.platform === 'win32'
+    || process.platform === 'linux';
 }
 
 /**
@@ -63,6 +83,8 @@ export function isEnabled(): boolean {
  *       CSS effect works, still zero-copy.
  */
 export function mode(): '1' | '2' {
+  // Windows/Linux have no CAMetalLayer path; shared texture is the only mode.
+  if (process.platform !== 'darwin') return '2';
   return process.env.UNCLAW_DIRECT_SURFACE === '2' ? '2' : '1';
 }
 
@@ -143,7 +165,13 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
             // no errors, pixels gone). The vibrancy match is done in the
             // preload instead: the injected video element gets the same
             // ue-gamut-match feColorMatrix the WebRTC path uses.
-            handle: { ioSurface: f.ioSurface },
+            // One field per platform; the addon fills exactly the one its
+            // OS uses and Electron reads the matching member.
+            handle: process.platform === 'darwin'
+              ? { ioSurface: f.ioSurface as Buffer }
+              : process.platform === 'win32'
+                ? { ntHandle: f.ntHandle as Buffer }
+                : { nativePixmap: f.nativePixmap as never },
           },
         });
         // Held for the connection's lifetime: the renderer keeps its
@@ -198,6 +226,32 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
   return ok;
 }
 
+/**
+ * The publisher endpoint. Three transports, one job: carry a texture handle
+ * plus a per-frame {surfaceId, serial} ping.
+ *
+ *   darwin  a launchd-registered Mach service (only a launchd job may claim
+ *           the name — see Mac - Direct IOSurface Display Path)
+ *   win32   a named pipe. No launchd equivalent is needed: any process may
+ *           create a pipe, and NT handles are duplicated to us explicitly.
+ *   linux   a unix domain socket, because dmabuf FDs need SCM_RIGHTS.
+ */
+export function endpoint(): string {
+  const override = process.env.UNCLAW_SURFACE_SERVICE;
+  if (override) return override;
+  if (process.platform === 'win32') {
+    // \\.\pipe\<name>, assembled from parts: a literal here needs
+    // four levels of escaping and has been got wrong twice already.
+    const B = String.fromCharCode(92);
+    return `${B}${B}.${B}pipe${B}unclaw-surface`;
+  }
+  if (process.platform === 'linux') {
+    const base = process.env.XDG_RUNTIME_DIR || '/tmp';
+    return `${base}/unclaw-surface.sock`;
+  }
+  return 'com.fotonlabs.unclaw.surface';
+}
+
 let framePumpCleanup: (() => void) | null = null;
 
 export function attach(win: BrowserWindow): boolean {
@@ -205,7 +259,7 @@ export function attach(win: BrowserWindow): boolean {
   const a = load();
   if (!a) return false;
 
-  const service = process.env.UNCLAW_SURFACE_SERVICE || 'com.fotonlabs.unclaw.surface';
+  const service = endpoint();
 
   let ok: boolean;
   if (mode() === '2') {
