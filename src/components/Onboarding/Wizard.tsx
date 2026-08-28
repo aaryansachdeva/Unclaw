@@ -94,9 +94,10 @@ type StepKey = 'welcome' | 'auth' | 'claws' | 'identity' | 'vibe' | 'llm' | 'voi
 // First-run for a NOT-yet-signed-in user (reordered 2026-08-27): the wizard
 // leads with the PERSON, not the account. Pocket runs locally with no key
 // and its weights ship with the install, so nothing early needs auth: name
-// and profile come first, then setup, then Claws as the pitch for the
-// account, and login is the final beat before Finish.
-const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'identity', 'vibe', 'llm', 'voice', 'claws', 'auth'];
+// and profile come first, then setup, then login, and Claws lands AFTER
+// the account exists (the balance it describes is real by then). Finish
+// lives on the Claws step.
+const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'identity', 'vibe', 'llm', 'voice', 'auth', 'claws'];
 // First-run when ALREADY signed in (e.g. fresh device, profile not synced):
 // same person-first order, minus welcome + auth; Claws intro still shown.
 const FIRST_RUN_STEPS_AUTHED: StepKey[] = ['identity', 'vibe', 'llm', 'voice', 'claws'];
@@ -565,12 +566,13 @@ export function Wizard({
       setError('Please enter your name.');
       return;
     }
-    // Keys are skippable; the rest of the flow (Claws intro, sign-in) is
+    // Keys are skippable; the rest of the flow (sign-in, Claws intro) is
     // not. Remember the skip so handleFinish doesn't re-impose the key
-    // gate, and continue forward instead of finishing on the spot.
+    // gate, and continue forward instead of finishing on the spot: to
+    // login first if it's still owed, else straight to Claws.
     skipKeysRef.current = true;
-    const next = stepOrder.indexOf('claws') >= 0 ? 'claws'
-      : stepOrder.indexOf('auth') >= 0 ? 'auth' : null;
+    const next = !hasSession && stepOrder.indexOf('auth') >= 0 ? 'auth'
+      : stepOrder.indexOf('claws') >= 0 ? 'claws' : null;
     if (next) setStep(next as StepKey);
     else void finishOnboarding();
   };

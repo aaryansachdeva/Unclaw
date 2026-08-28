@@ -9,7 +9,7 @@
 import { motion } from 'framer-motion';
 import { MessageCircle, Sparkles, ShoppingBag } from 'lucide-react';
 import { ClawsIcon } from '../ClawsBalance';
-import { STARTING_CLAWS, CHARACTER_CLAW_COST } from '../../services/claws';
+import { STARTING_CLAWS } from '../../services/claws';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -102,13 +102,13 @@ export function ClawsStep() {
             delay={0.05}
             icon={<MessageCircle size={16} strokeWidth={2.2} />}
             title="Earn by talking"
-            body="1 claw per message you send."
+            body="Earn a claw every time you message."
           />
           <Row
             delay={0.12}
             icon={<ShoppingBag size={16} strokeWidth={2.2} />}
             title="Unlock characters"
-            body={`${CHARACTER_CLAW_COST} claws adds a new character. No purchase needed.`}
+            body="Use them to unlock new characters. No purchase needed."
           />
           <Row
             delay={0.19}
