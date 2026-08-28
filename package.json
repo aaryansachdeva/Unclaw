@@ -7,6 +7,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc -b tsconfig.node.json tsconfig.web.json --force",
+    "build:addon": "node-gyp rebuild --directory electron/native/surface_layer --target=41.1.1 --dist-url=https://electronjs.org/headers",
     "preview": "electron-vite preview",
     "start": "electron .",
     "prepare-build": "node scripts/prepare-build.cjs",
@@ -74,8 +75,10 @@
     "win": {
       "extraResources": [
         {
-          "from": "electron/native/surface_layer/build/Release/surface_layer.node",
-          "to": "surface_layer.node"
+          "//": "Directory + filter, not a direct file path: a direct path makes electron-builder hard-fail on any machine that has not run `npm run build:addon`, and the direct path is meant to be optional everywhere. An empty match just ships nothing and directSurface.ts logs 'no addon built'.",
+          "from": "electron/native/surface_layer/build/Release",
+          "to": ".",
+          "filter": [ "surface_layer.node" ]
         }
       ],
       "target": [
@@ -101,8 +104,10 @@
     "mac": {
       "extraResources": [
         {
-          "from": "electron/native/surface_layer/build/Release/surface_layer.node",
-          "to": "surface_layer.node"
+          "//": "Directory + filter, not a direct file path: a direct path makes electron-builder hard-fail on any machine that has not run `npm run build:addon`, and the direct path is meant to be optional everywhere. An empty match just ships nothing and directSurface.ts logs 'no addon built'.",
+          "from": "electron/native/surface_layer/build/Release",
+          "to": ".",
+          "filter": [ "surface_layer.node" ]
         }
       ],
       "target": [
@@ -160,8 +165,10 @@
     "linux": {
       "extraResources": [
         {
-          "from": "electron/native/surface_layer/build/Release/surface_layer.node",
-          "to": "surface_layer.node"
+          "//": "Directory + filter, not a direct file path: a direct path makes electron-builder hard-fail on any machine that has not run `npm run build:addon`, and the direct path is meant to be optional everywhere. An empty match just ships nothing and directSurface.ts logs 'no addon built'.",
+          "from": "electron/native/surface_layer/build/Release",
+          "to": ".",
+          "filter": [ "surface_layer.node" ]
         }
       ],
       "target": [

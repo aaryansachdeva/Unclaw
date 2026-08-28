@@ -737,6 +737,17 @@ function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
   if (!POCKET_TTS_ENABLED && merged.tts_provider === 'pocket') {
     merged.tts_provider = 'supertonic';
   }
+  // Same rescue for an engine this PLATFORM cannot run, which the flag alone
+  // does not cover. Pocket is Apple MLX and qwen3 needs runtimes that only
+  // ship on macOS, so a profile that arrives from a Mac - through account
+  // sync, or just a copied profile - would otherwise sit on a selection soul
+  // refuses, and the user hears nothing with no way to see why (the option
+  // that would explain it is not in the dropdown on this platform).
+  const isMac =
+    typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+  if (!isMac && (merged.tts_provider === 'pocket' || merged.tts_provider === 'qwen3')) {
+    merged.tts_provider = 'supertonic';
+  }
   if (merged.llm_provider && !VALID_PROVIDER_IDS.has(merged.llm_provider)) {
     // Stale provider — drop the {provider, model, key} triple together
     // so the user gets prompted to pick from the new catalog.

@@ -42,6 +42,11 @@ import {
 } from '../services/apiKeys';
 import { Dropdown } from './Onboarding/Dropdown';
 import { POCKET_TTS_ENABLED } from '../features';
+
+/** Pocket TTS runs on Apple MLX, so the option is macOS-only. Same detection
+ *  idiom as Titlebar's isMacPlatform. */
+const IS_MAC_PLATFORM =
+  typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
 import { usePassthroughPrefs } from '../hooks/usePassthroughPrefs';
 import { Slider } from './Onboarding/Slider';
 import { TZ_CATALOG } from './Onboarding/IdentityStep';
@@ -819,10 +824,12 @@ function VoiceFacet({ draft, update }: PaneContext) {
             onChange={(v) => update('tts_provider', v as TtsProviderId)}
             options={[
               { id: 'elevenlabs', label: 'ElevenLabs (cloud, realistic)' },
-              // Pocket is hidden unless POCKET_TTS_ENABLED: a packaged install
-              // has neither torch nor pocket_tts, so offering it would be a
-              // dead option. Same treatment qwen3 already gets.
-              ...(POCKET_TTS_ENABLED
+              // Pocket is hidden unless POCKET_TTS_ENABLED, and hidden off
+              // macOS regardless: it runs on Apple MLX (the official pip
+              // package pulls torch, which was removed from the dep set), so
+              // on Windows and Linux it is a dead option that soul refuses
+              // with a 400. Same treatment qwen3 already gets.
+              ...(POCKET_TTS_ENABLED && IS_MAC_PLATFORM
                 ? [{ id: 'pocket', label: 'Pocket (local, cloned voices, fastest)' }]
                 : []),
               { id: 'supertonic', label: 'Supertonic-3 (local, 31 languages, ~5× realtime)' },

@@ -10,6 +10,24 @@ interface SoulPortsPayload {
 }
 
 // ---------------------------------------------------------------------------
+// Direct-path gating. MUST agree with electron/directSurface.ts's isEnabled()
+// and mode(): main imports the texture and calls sendSharedTexture, and that
+// call REQUIRES a receiver to already be registered here (1000 ms timeout). If
+// the two sides disagree about the platform, main transfers into the void and
+// the direct path silently does nothing while the stream still looks healthy
+// over WebRTC - exactly the "half-armed pipeline" main.ts warns about.
+//
+// Mode 1 is the macOS CAMetalLayer path; off-darwin a '1' normalises to '2'
+// rather than silently meaning "off", same as mode() does.
+const DIRECT_FLAG = process.env.UNCLAW_DIRECT_SURFACE;
+const DIRECT_ENABLED = DIRECT_FLAG === '1' || DIRECT_FLAG === '2';
+const DIRECT_MODE: '1' | '2' | null = !DIRECT_ENABLED
+  ? null
+  : process.platform !== 'darwin'
+    ? '2'
+    : (DIRECT_FLAG === '2' ? '2' : '1');
+
+// ---------------------------------------------------------------------------
 // The one stream shader. Fullscreen triangle sampling an external texture,
 // with the P3->sRGB gamut match behind a uniform (see the direct-mode block
 // for the full story). Shared by the direct-path renderer and the WebRTC
@@ -69,7 +87,9 @@ const STREAM_WGSL = `
 // live remote video track. Falls back to the plain <video> (visible again)
 // on any failure — the painter must only ever be an upgrade.
 (() => {
-  if (process.platform !== 'darwin') return;
+  // Cross-platform: WebGPU is available in Chromium everywhere, and this is
+  // an upgrade-only path - both failure sites (init and pump) call stop() and
+  // reveal the plain <video> again, so the worst case is the status quo.
   type GpuBits = {
     device: any; pipeline: any; sampler: any; gamutBuf: any;
     ctx: any; lastGamut: number; needsReconfigure: boolean;
@@ -744,10 +764,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     /** '1' native layer, '2' shared-texture canvas, null when off. The
      *  renderer needs this to decide between hiding its backgrounds (mode 1)
      *  and showing the stream canvas (mode 2). */
-    mode: process.platform === 'darwin'
-      && (process.env.UNCLAW_DIRECT_SURFACE === '1' || process.env.UNCLAW_DIRECT_SURFACE === '2')
-      ? process.env.UNCLAW_DIRECT_SURFACE
-      : null,
+    mode: DIRECT_MODE,
     /** Pin the lease for testing (null = follow soul again). */
     forceLease: (holder: 'local' | 'remote' | null): Promise<'local' | 'remote'> =>
       ipcRenderer.invoke('stream-lease:force', holder),
@@ -840,7 +857,7 @@ interface UpdateSnapshotShape {
 // sandbox: false for exactly this reason, context isolation still on). The
 // preload shares the page's DOM, so it can draw straight onto the canvas that
 // StreamView renders; the two sides rendezvous on the data attribute alone.
-if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') {
+if (DIRECT_MODE === '2') {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { sharedTexture } = require('electron');
   if (!sharedTexture?.setSharedTextureReceiver) {
