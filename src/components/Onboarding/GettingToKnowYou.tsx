@@ -1,7 +1,7 @@
 // Combined onboarding step: the personal facts Grace uses to sound like
-// she knows you. Name, then the optional texture: hobbies and a free-text
-// note. Everything past the name is optional, said once in the subtitle so
-// the fields stay clean.
+// she knows you. Two things only: a name and the hobby chips. The
+// free-text note left with city/timezone/schedule; anything extra comes
+// up naturally in conversation, which is the product's whole thesis.
 //
 // City and timezone left the UI 2026-08-27: the timezone is auto-detected
 // from the system (the wizard seeds it via detectTimezone()) and asking a
@@ -50,7 +50,6 @@ const HOBBIES: Array<{ tag: string; Icon: LucideIcon }> = [
 ];
 const PRESET_TAGS = new Set(HOBBIES.map((h) => h.tag));
 
-const NOTES_LIMIT = 500;
 const CUSTOM_TAG_LIMIT = 24;
 
 export function GettingToKnowYou({
@@ -88,12 +87,6 @@ export function GettingToKnowYou({
     if (!tag || interests.interests.includes(tag)) return;
     onInterestsChange({ ...interests, interests: [...interests.interests, tag] });
   };
-
-  const setNotes = (next: string) =>
-    onInterestsChange({ ...interests, notes: next.slice(0, NOTES_LIMIT) });
-
-  const charsLeft = NOTES_LIMIT - interests.notes.length;
-  const showCount = interests.notes.length > NOTES_LIMIT - 60;
 
   // Custom tags the user typed themselves; rendered after the presets and
   // removed entirely when toggled off (they only exist because chosen).
@@ -157,12 +150,9 @@ export function GettingToKnowYou({
     </motion.button>
   );
 
-  // Layout (2026-08-27): this step got short enough that the shared
-  // side-header pattern left a void where taller steps put their fields.
-  // Header runs as a band across the top, the one REQUIRED field (name)
-  // sits alone under it at a deliberate width, and the two optional
-  // texture fields share a row: content fills the panel instead of
-  // huddling in the right half.
+  // Layout (2026-08-27): header as a band across the top, the one
+  // REQUIRED field (name) alone under it at a deliberate width, then the
+  // hobby chips flowing the full panel width. Two beats, nothing else.
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20, width: 760, maxWidth: '100%' }}>
       <StepHeader title="Getting to know you" subtitle={subtitle} wide />
@@ -183,8 +173,7 @@ export function GettingToKnowYou({
         </FieldLabel>
       )}
 
-      <div style={{ display: 'flex', gap: 26, alignItems: 'flex-start' }}>
-        <FieldLabel text="Hobbies" style={{ flex: 1.25, minWidth: 0 }}>
+      <FieldLabel text="Hobbies">
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
             {HOBBIES.map(({ tag, Icon }) =>
               renderChip(tag, Icon, interests.interests.includes(tag)))}
@@ -231,25 +220,7 @@ export function GettingToKnowYou({
               </button>
             )}
           </div>
-        </FieldLabel>
-
-        <FieldLabel
-          text="Anything else"
-          count={showCount ? charsLeft : undefined}
-          style={{ flex: 1, minWidth: 0 }}
-        >
-          <textarea
-            rows={5}
-            value={interests.notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Favorite shows, current project, allergies, anything."
-            style={FIELD_BASE}
-            maxLength={NOTES_LIMIT}
-            onFocus={(e) => applyFocus(e.target)}
-            onBlur={(e) => applyBlur(e.target)}
-          />
-        </FieldLabel>
-      </div>
+      </FieldLabel>
     </div>
   );
 }
