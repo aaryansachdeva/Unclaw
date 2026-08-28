@@ -21,7 +21,7 @@ import { VibeStep } from './VibeStep';
 import { type InterestsValues } from './InterestsStep';
 import { GettingToKnowYou } from './GettingToKnowYou';
 import { WelcomeStep } from './WelcomeStep';
-import { BrandLogo } from './BrandLogo';
+import { StepHeader } from './StepHeader';
 import { ClawsStep } from './ClawsStep';
 import { ConnectionsStep } from './ConnectionsStep';
 import { AuthPanel } from '../Auth/AuthPanel';
@@ -101,6 +101,11 @@ const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'identity', 'vibe', 'llm', 'voice
 // First-run when ALREADY signed in (e.g. fresh device, profile not synced):
 // same person-first order, minus welcome + auth; Claws intro still shown.
 const FIRST_RUN_STEPS_AUTHED: StepKey[] = ['identity', 'vibe', 'llm', 'voice', 'claws'];
+// Returning user who picked "Sign in" on the welcome screen. A real path,
+// not a jump into the middle of the long one: Back walks it correctly and
+// the progress dots describe the three steps actually ahead (they used to
+// promise seven and strand Back on the voice page).
+const RETURNING_STEPS: StepKey[] = ['welcome', 'auth', 'claws'];
 const EDIT_STEPS: StepKey[] = ['identity', 'vibe', 'llm', 'voice'];
 
 /** localStorage key for the onboarding-mute preference. Persisted so a
@@ -141,8 +146,13 @@ export function Wizard({
   // first-run (e.g. a fresh device whose profile hasn't synced), skip the
   // welcome + login steps and go straight to profile setup. Captured once.
   const signedInAtMountRef = useRef(hasSession);
+  // Set by the welcome screen's Sign in button; cleared by walking Back to
+  // welcome, so the two forks stay honest in both directions.
+  const [signInPath, setSignInPath] = useState(false);
   const stepOrder = firstRun
-    ? (signedInAtMountRef.current ? FIRST_RUN_STEPS_AUTHED : FIRST_RUN_STEPS)
+    ? (signInPath
+        ? RETURNING_STEPS
+        : signedInAtMountRef.current ? FIRST_RUN_STEPS_AUTHED : FIRST_RUN_STEPS)
     : EDIT_STEPS;
   const [step, setStep] = useState<StepKey>(stepOrder[0]);
 
@@ -449,7 +459,16 @@ export function Wizard({
   };
 
   const handleBack = () => {
-    if (stepIdx > 0) setStep(stepOrder[stepIdx - 1]);
+    if (stepIdx <= 0) return;
+    const prev = stepOrder[stepIdx - 1];
+    // Landing back on welcome means the user is reconsidering the fork:
+    // drop the returning-user path so Get started offers the full flow
+    // again (and the dots go back to describing it).
+    if (prev === 'welcome') {
+      setSignInPath(false);
+      skipKeysRef.current = false;
+    }
+    setStep(prev);
   };
 
   const handleSkip = () => {
@@ -518,6 +537,9 @@ export function Wizard({
 
   const handleFinish = async () => {
     if (!hasName) {
+      // The short path has no identity step; a returning account with no
+      // name on it needs the full flow to supply one.
+      setSignInPath(false);
       setStep('identity');
       setError('Please enter your name.');
       return;
@@ -610,10 +632,14 @@ export function Wizard({
     if (step === 'welcome') {
       return (
         <WelcomeStep
-          onGetStarted={handleAdvance}
+          onGetStarted={() => {
+            setSignInPath(false);
+            handleAdvance();
+          }}
           onSignIn={() => {
-            // Returning user: straight to login, key gate waived (their
-            // profile follows the account).
+            // Returning user: switch to the short path and step into it.
+            // Key gate waived, their profile follows the account.
+            setSignInPath(true);
             skipKeysRef.current = true;
             setStep('auth');
           }}
@@ -623,27 +649,19 @@ export function Wizard({
     if (step === 'claws') return <ClawsStep />;
     if (step === 'auth') {
       return (
-        // Two-column sign-in: brand mark on the left, the auth form on
-        // the right — same visual language as the welcome ("Get started")
-        // step so the two surfaces read as one continuous moment.
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 44,
-            padding: '14px 0 10px',
-          }}
-        >
-          <BrandLogo size={168} />
-          <div style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div>
-              <h2 style={{ fontSize: 17, fontWeight: 600, color: 'var(--text-primary)', margin: '0 0 4px' }}>
-                Create your account
-              </h2>
-              <p style={{ fontSize: 12.5, color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45 }}>
-                Sign in to save your setup and sync it across devices.
-              </p>
-            </div>
+        // Band layout like every other step: the brand mark already had
+        // its moment on the welcome screen, so repeating it here just
+        // made this surface read as a different app. Copy adapts to the
+        // fork the user actually took.
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20, width: 760, maxWidth: '100%' }}>
+          <StepHeader
+            title={signInPath ? 'Welcome back.' : 'Create your account.'}
+            subtitle={signInPath
+              ? 'Sign in and your characters, setup, and history come with you.'
+              : 'Saves your setup and syncs it across your devices.'}
+            wide
+          />
+          <div style={{ width: 420, maxWidth: '100%' }}>
             <AuthPanel onSignedIn={(s) => onSignedIn?.(s)} />
           </div>
         </div>
@@ -695,7 +713,7 @@ export function Wizard({
       />
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, identity, vibe, interests, apiKeys, llmValidated, voiceValidated]);
+  }, [step, signInPath, identity, vibe, interests, apiKeys, llmValidated, voiceValidated]);
 
   return (
     <motion.div
