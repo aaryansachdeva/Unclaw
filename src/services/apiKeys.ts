@@ -676,7 +676,13 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   llm_model:                null,
   llm_api_key:              null,
   ollama_base_url:          null,
-  tts_provider:             'elevenlabs',
+  // Pocket as of 2026-08-27: local, keyless, per-character clones, ~12x
+  // realtime, weights ship with the install via runtimeAssets. Saved
+  // profiles keep their own choice (spread-with-defaults only fills
+  // absent fields). REVISIT for Windows/Linux: the pocket runtime is
+  // MLX, Apple-silicon only; other platforms need the torch-CPU path or
+  // a different default (elevenlabs) until that exists.
+  tts_provider:             'pocket',
   elevenlabs_api_key:       null,
   // Grace's cloned voice on ElevenLabs (the persona-canonical voice).
   // Power users can override with their own voice id; existing users
