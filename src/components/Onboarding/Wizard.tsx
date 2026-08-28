@@ -639,23 +639,7 @@ export function Wizard({
   const skipLabel = 'Skip';
 
   const stepBody = useMemo(() => {
-    if (step === 'welcome') {
-      return (
-        <WelcomeStep
-          onGetStarted={() => {
-            setSignInPath(false);
-            handleAdvance();
-          }}
-          onSignIn={() => {
-            // Returning user: switch to the short path and step into it.
-            // Key gate waived, their profile follows the account.
-            setSignInPath(true);
-            setKeysWaived(true);
-            setStep('auth');
-          }}
-        />
-      );
-    }
+    if (step === 'welcome') return <WelcomeStep />;
     if (step === 'claws') return <ClawsStep />;
     if (step === 'auth') {
       return (
@@ -951,7 +935,9 @@ export function Wizard({
           {/* Progress dots — current step is a wider pill with a subtle
               accent glow; past steps are small filled circles; future
               steps are small ghost circles. The width transitions on
-              step change so the active marker visibly slides forward. */}
+              step change so the active marker visibly slides forward.
+              Hidden on welcome: nothing has started yet, and that row
+              belongs to the Get started / Sign in fork. */}
           <div
             style={{
               display: 'flex',
@@ -961,7 +947,7 @@ export function Wizard({
               alignItems: 'center',
             }}
           >
-            {stepOrder.map((k, i) => {
+            {step === 'welcome' ? null : stepOrder.map((k, i) => {
               const isCurrent = i === stepIdx;
               const isPast = i < stepIdx;
               return (
@@ -1014,11 +1000,48 @@ export function Wizard({
             </button>
           )}
 
-          {/* Welcome carries its own Get started / Sign in buttons in the
-              step body, so the footer holds only a mirror of the left
-              placeholder: the progress dots stay centred. */}
+          {/* Welcome fork. The dots are hidden on this step, so both
+              buttons sit in the action row without crowding anything. */}
           {step === 'welcome' ? (
-            <span style={{ width: 50, flexShrink: 0 }} aria-hidden />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+              <motion.button
+                type="button"
+                onClick={() => {
+                  // Returning user: switch to the short path and step into
+                  // it. Key gate waived, their setup follows the account.
+                  setSignInPath(true);
+                  setKeysWaived(true);
+                  setStep('auth');
+                }}
+                whileHover={{ y: -1 }}
+                whileTap={{ y: 0, scale: 0.98 }}
+                transition={{ duration: 0.12, ease: EASE_OUT_EXPO }}
+                style={footerSecondaryStyle}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = 'var(--glass-border-focus)';
+                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.07)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = 'var(--glass-border)';
+                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
+                }}
+              >
+                Sign in
+              </motion.button>
+              <motion.button
+                type="button"
+                onClick={() => {
+                  setSignInPath(false);
+                  handleAdvance();
+                }}
+                whileHover={{ y: -1 }}
+                whileTap={{ y: 0, scale: 0.98 }}
+                transition={{ duration: 0.12, ease: EASE_OUT_EXPO }}
+                style={footerPrimaryStyle(true)}
+              >
+                Get started →
+              </motion.button>
+            </div>
           ) : !isLastStep ? (
             <motion.button
               type="button"
@@ -1067,6 +1090,23 @@ const footerLinkStyle: React.CSSProperties = {
 // soft drop shadow. The strongest CTA shape in UnClaw is "white round
 // thing on glass chrome" — we re-use that here so Continue/Finish read
 // as siblings of the send button rather than a one-off red badge.
+// Secondary action: same pill geometry as the primary but glass instead
+// of white, so it reads as a real second choice without competing.
+const footerSecondaryStyle: React.CSSProperties = {
+  background: 'rgba(255, 255, 255, 0.04)',
+  color: 'var(--text-primary)',
+  border: '1px solid var(--glass-border)',
+  borderRadius: 10,
+  fontSize: 13,
+  fontFamily: 'inherit',
+  fontWeight: 500,
+  padding: '8px 14px',
+  cursor: 'pointer',
+  letterSpacing: '0.005em',
+  flexShrink: 0,
+  transition: 'background 0.15s var(--ease-out-quart), border-color 0.15s var(--ease-out-quart)',
+};
+
 const footerPrimaryStyle = (enabled: boolean): React.CSSProperties => ({
   background: '#ffffff',
   color: 'rgba(20, 20, 20, 0.88)',
