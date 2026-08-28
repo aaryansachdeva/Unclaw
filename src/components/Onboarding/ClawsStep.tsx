@@ -9,7 +9,7 @@
 import { motion } from 'framer-motion';
 import { MessageCircle, Sparkles, ShoppingBag } from 'lucide-react';
 import { ClawsIcon } from '../ClawsBalance';
-import { StepHeader } from './StepHeader';
+import { StepShell } from './onboardingKit';
 import { STARTING_CLAWS } from '../../services/claws';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
@@ -47,23 +47,18 @@ function Row({ icon, title, body, delay }: { icon: React.ReactNode; title: strin
 
 export function ClawsStep() {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20, width: 760, maxWidth: '100%' }}>
-      {/* Header band. The mark rides at its right as decoration, filling
-          the band's natural height rather than opening a second column. */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 28 }}>
-        <StepHeader
-          title="Meet Claws"
-          subtitle={`Your in-app currency. You start with ${STARTING_CLAWS}.`}
-          wide
-        />
+    <StepShell
+      title="Meet Claws"
+      subtitle={`Your in-app currency. You start with ${STARTING_CLAWS}.`}
+      aside={(
         <motion.div
           initial={{ scale: 0.82, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           transition={{ type: 'spring', stiffness: 360, damping: 22 }}
           style={{
             position: 'relative',
-            width: 116,
-            height: 116,
+            width: 92,
+            height: 92,
             flexShrink: 0,
             display: 'grid',
             placeItems: 'center',
@@ -81,30 +76,28 @@ export function ClawsStep() {
               pointerEvents: 'none',
             }}
           />
-          <ClawsIcon size={104} animated style={{ position: 'relative', zIndex: 1 }} />
+          <ClawsIcon size={84} animated style={{ position: 'relative', zIndex: 1 }} />
         </motion.div>
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
-        <Row
-          delay={0.05}
-          icon={<MessageCircle size={16} strokeWidth={2.2} />}
-          title="Earn by talking"
-          body="Earn a claw every time you message."
-        />
-        <Row
-          delay={0.12}
-          icon={<ShoppingBag size={16} strokeWidth={2.2} />}
-          title="Unlock characters"
-          body="Use them to unlock new characters. No purchase needed."
-        />
-        <Row
-          delay={0.19}
-          icon={<Sparkles size={16} strokeWidth={2.2} />}
-          title="More to come"
-          body="Outfits, accessories, and extras, soon."
-        />
-      </div>
-    </div>
+      )}
+    >
+      <Row
+        delay={0.05}
+        icon={<MessageCircle size={16} strokeWidth={2.2} />}
+        title="Earn by talking"
+        body="Earn a claw every time you message."
+      />
+      <Row
+        delay={0.12}
+        icon={<ShoppingBag size={16} strokeWidth={2.2} />}
+        title="Unlock characters"
+        body="Use them to unlock new characters. No purchase needed."
+      />
+      <Row
+        delay={0.19}
+        icon={<Sparkles size={16} strokeWidth={2.2} />}
+        title="More to come"
+        body="Outfits, accessories, and extras, soon."
+      />
+    </StepShell>
   );
 }

@@ -6,8 +6,19 @@
 
 import type { CSSProperties, ReactNode } from 'react';
 
-/** Width of the left title column on every two-column step. */
-export const STEP_COL_WIDTH = 200;
+import { StepHeader } from './StepHeader';
+
+/** The one content measure. Every step renders inside a column of this
+ *  width, CENTRED in the wizard panel.
+ *
+ *  The panel itself spans the window (left:16 / right:16), so any step
+ *  that set its own width sat against the panel's left edge with a void
+ *  beside it, and every step measured differently. One centred measure
+ *  fixes the alignment, the voids, and the panel resizing between steps,
+ *  in one place. 560 is a comfortable form measure: wide enough for a
+ *  two-up slider grid, narrow enough that a single line of copy does not
+ *  outrun the eye. */
+export const STEP_WIDTH = 560;
 
 /** The shared text-input / textarea surface. */
 export const FIELD_BASE: CSSProperties = {
@@ -84,5 +95,51 @@ export function FieldLabel({
       </div>
       {children}
     </label>
+  );
+}
+
+
+/** Every step's outer frame: the centred measure, the title block, and a
+ *  consistent rhythm between the header and the content. Steps supply
+ *  their fields; nothing below has to think about width or alignment
+ *  again.
+ *
+ *  `aside` is for a step that wants one decorative element riding at the
+ *  right of the header band (the Claws mark). It is deliberately not a
+ *  second content column. */
+export function StepShell({
+  title,
+  subtitle,
+  aside,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  aside?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        width: '100%',
+        maxWidth: STEP_WIDTH,
+        margin: '0 auto',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 22,
+      }}
+    >
+      {aside ? (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24 }}>
+          <StepHeader title={title} subtitle={subtitle} />
+          {aside}
+        </div>
+      ) : (
+        <StepHeader title={title} subtitle={subtitle} />
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+        {children}
+      </div>
+    </div>
   );
 }

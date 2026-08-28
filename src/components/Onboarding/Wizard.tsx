@@ -21,7 +21,7 @@ import { VibeStep } from './VibeStep';
 import { type InterestsValues } from './InterestsStep';
 import { GettingToKnowYou } from './GettingToKnowYou';
 import { WelcomeStep } from './WelcomeStep';
-import { StepHeader } from './StepHeader';
+import { StepShell } from './onboardingKit';
 import { ClawsStep } from './ClawsStep';
 import { ConnectionsStep } from './ConnectionsStep';
 import { AuthPanel } from '../Auth/AuthPanel';
@@ -643,22 +643,17 @@ export function Wizard({
     if (step === 'claws') return <ClawsStep />;
     if (step === 'auth') {
       return (
-        // Band layout like every other step: the brand mark already had
-        // its moment on the welcome screen, so repeating it here just
-        // made this surface read as a different app. Copy adapts to the
-        // fork the user actually took.
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 20, width: 760, maxWidth: '100%' }}>
-          <StepHeader
-            title={signInPath ? 'Welcome back.' : 'Create your account.'}
-            subtitle={signInPath
-              ? 'Sign in and your characters, setup, and history come with you.'
-              : 'Saves your setup and syncs it across your devices.'}
-            wide
-          />
-          <div style={{ width: 420, maxWidth: '100%' }}>
-            <AuthPanel onSignedIn={(s) => onSignedIn?.(s)} />
-          </div>
-        </div>
+        // The brand mark already had its moment on the welcome screen;
+        // repeating it here made this surface read as a different app.
+        // Copy adapts to the fork the user actually took.
+        <StepShell
+          title={signInPath ? 'Welcome back.' : 'Create your account.'}
+          subtitle={signInPath
+            ? 'Sign in and your characters, setup, and history come with you.'
+            : 'Saves your setup and syncs it across your devices.'}
+        >
+          <AuthPanel onSignedIn={(s) => onSignedIn?.(s)} />
+        </StepShell>
       );
     }
     if (step === 'identity') {

@@ -18,7 +18,7 @@ import {
   Eye, EyeOff, Search, ExternalLink, Zap,
   AlertCircle, CheckCircle2, Loader2, Download,
 } from 'lucide-react';
-import { StepHeader } from './StepHeader';
+import { StepShell } from './onboardingKit';
 import { Dropdown } from './Dropdown';
 import {
   CliProviderStatusCard,
@@ -499,21 +499,8 @@ export function ConnectionsStep({
       ? 'Provider and model for chat. Anything stored is encrypted on this device.'
       : 'Pick a chat provider and a voice. Anything stored is encrypted on this device.';
 
-  // Band layout (2026-08-27), matching the other reworked steps: header
-  // across the top instead of a side column that left a void. One column
-  // everywhere by request; the step scrolls internally when it must.
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 18,
-        width: 760,
-        maxWidth: '100%',
-      }}
-    >
-      <StepHeader title={headerTitle} subtitle={headerSubtitle} wide />
-
+    <StepShell title={headerTitle} subtitle={headerSubtitle}>
       <div
         style={{
           minWidth: 0,
@@ -767,7 +754,7 @@ export function ConnectionsStep({
           />
         ))}
       </div>
-    </div>
+    </StepShell>
   );
 }
 

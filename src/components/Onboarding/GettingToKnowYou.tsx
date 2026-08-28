@@ -19,8 +19,7 @@ import {
   Dumbbell, PenTool, ChefHat, Plane, Plus, Sparkles,
   type LucideIcon,
 } from 'lucide-react';
-import { StepHeader } from './StepHeader';
-import { FIELD_BASE, applyFocus, applyBlur, FieldLabel } from './onboardingKit';
+import { FIELD_BASE, applyFocus, applyBlur, FieldLabel, StepShell } from './onboardingKit';
 import { type IdentityValues } from './IdentityStep';
 import type { InterestsValues } from './InterestsStep';
 
@@ -150,15 +149,10 @@ export function GettingToKnowYou({
     </motion.button>
   );
 
-  // Layout (2026-08-27): header as a band across the top, the one
-  // REQUIRED field (name) alone under it at a deliberate width, then the
-  // hobby chips flowing the full panel width. Two beats, nothing else.
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20, width: 760, maxWidth: '100%' }}>
-      <StepHeader title="Getting to know you" subtitle={subtitle} wide />
-
+    <StepShell title="Getting to know you" subtitle={subtitle}>
       {!hideName && (
-        <FieldLabel text="What should I call you?" style={{ width: 420, maxWidth: '100%' }}>
+        <FieldLabel text="What should I call you?">
           <input
             type="text"
             autoFocus
@@ -174,53 +168,53 @@ export function GettingToKnowYou({
       )}
 
       <FieldLabel text="Hobbies">
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
-            {HOBBIES.map(({ tag, Icon }) =>
-              renderChip(tag, Icon, interests.interests.includes(tag)))}
-            {customTags.map((tag) => renderChip(tag, Sparkles, true))}
-            {addingHobby ? (
-              <input
-                type="text"
-                autoFocus
-                value={hobbyDraft}
-                maxLength={CUSTOM_TAG_LIMIT}
-                onChange={(e) => setHobbyDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') { e.preventDefault(); commitHobbyDraft(); }
-                  if (e.key === 'Escape') { setHobbyDraft(''); setAddingHobby(false); }
-                }}
-                onBlur={commitHobbyDraft}
-                placeholder="your thing"
-                style={{
-                  width: 110,
-                  padding: '7px 13px',
-                  borderRadius: 999,
-                  border: '1px solid var(--glass-border-focus)',
-                  background: 'rgba(255, 255, 255, 0.05)',
-                  color: 'var(--text-primary)',
-                  fontSize: 12,
-                  fontFamily: 'inherit',
-                  letterSpacing: '-0.005em',
-                  outline: 'none',
-                }}
-              />
-            ) : (
-              <button
-                type="button"
-                onClick={() => setAddingHobby(true)}
-                style={{
-                  ...chipBase(false),
-                  background: 'transparent',
-                  color: 'var(--text-ghost)',
-                }}
-                {...chipHover}
-              >
-                <Plus size={13} strokeWidth={1.8} style={{ flexShrink: 0 }} />
-                <span>add your own</span>
-              </button>
-            )}
-          </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
+          {HOBBIES.map(({ tag, Icon }) =>
+            renderChip(tag, Icon, interests.interests.includes(tag)))}
+          {customTags.map((tag) => renderChip(tag, Sparkles, true))}
+          {addingHobby ? (
+            <input
+              type="text"
+              autoFocus
+              value={hobbyDraft}
+              maxLength={CUSTOM_TAG_LIMIT}
+              onChange={(e) => setHobbyDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); commitHobbyDraft(); }
+                if (e.key === 'Escape') { setHobbyDraft(''); setAddingHobby(false); }
+              }}
+              onBlur={commitHobbyDraft}
+              placeholder="your thing"
+              style={{
+                width: 110,
+                padding: '7px 13px',
+                borderRadius: 999,
+                border: '1px solid var(--glass-border-focus)',
+                background: 'rgba(255, 255, 255, 0.05)',
+                color: 'var(--text-primary)',
+                fontSize: 12,
+                fontFamily: 'inherit',
+                letterSpacing: '-0.005em',
+                outline: 'none',
+              }}
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAddingHobby(true)}
+              style={{
+                ...chipBase(false),
+                background: 'transparent',
+                color: 'var(--text-ghost)',
+              }}
+              {...chipHover}
+            >
+              <Plus size={13} strokeWidth={1.8} style={{ flexShrink: 0 }} />
+              <span>add your own</span>
+            </button>
+          )}
+        </div>
       </FieldLabel>
-    </div>
+    </StepShell>
   );
 }

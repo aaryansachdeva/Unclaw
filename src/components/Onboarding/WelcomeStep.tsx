@@ -7,6 +7,7 @@
 
 import { BrandLogo } from './BrandLogo';
 import { TypewriterTitle } from '../Auth/TypewriterTitle';
+import { STEP_WIDTH } from './onboardingKit';
 
 // The Get started / Sign in fork lives in the wizard's footer action bar
 // (the welcome step hides the progress dots, so the two buttons have that
@@ -15,29 +16,21 @@ export function WelcomeStep() {
   return (
     <div
       style={{
+        width: '100%',
+        maxWidth: STEP_WIDTH,
+        margin: '0 auto',
         display: 'flex',
         alignItems: 'center',
-        // True centering, not the old fixed-padding nudge: the row now
-        // lands centered at any panel width.
-        justifyContent: 'center',
-        gap: 36,
-        padding: '14px 0 10px',
+        gap: 32,
+        padding: '10px 0 6px',
       }}
     >
-      <BrandLogo size={168} />
+      <BrandLogo size={140} />
 
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 16,
-          alignItems: 'flex-start',
-        }}
-      >
-        {/* Typewriter brand mark — matches the sign-in screen so the
-            transition between the two surfaces feels like a single
-            continuous moment. Re-mounts with this step so the typing
-            animation replays each time the wizard opens. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
+        {/* Typewriter brand mark, shared with the sign-in screen so the
+            two surfaces read as one continuous moment. Re-mounts with
+            this step so the typing animation replays each time. */}
         <TypewriterTitle />
         <p
           style={{
@@ -46,7 +39,6 @@ export function WelcomeStep() {
             margin: 0,
             letterSpacing: '0.005em',
             lineHeight: 1.55,
-            maxWidth: 380,
           }}
         >
           A quick minute of setup so I can sound a little more like

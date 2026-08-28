@@ -7,12 +7,9 @@
 interface Props {
   title: string;
   subtitle?: string;
-  /** Band mode: the header runs across the top of a step instead of
-   *  down a side column, so the subtitle may breathe to a full line. */
-  wide?: boolean;
 }
 
-export function StepHeader({ title, subtitle, wide }: Props) {
+export function StepHeader({ title, subtitle }: Props) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <span
@@ -46,7 +43,6 @@ export function StepHeader({ title, subtitle, wide }: Props) {
               margin: 0,
               letterSpacing: '-0.003em',
               lineHeight: 1.5,
-              maxWidth: wide ? 560 : 240,
             }}
           >
             {subtitle}

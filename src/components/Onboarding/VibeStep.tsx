@@ -5,8 +5,7 @@
 // header / labels / field surface match every other step.
 
 import { Slider } from './Slider';
-import { StepHeader } from './StepHeader';
-import { FIELD_BASE, applyFocus, applyBlur, FieldLabel } from './onboardingKit';
+import { FIELD_BASE, applyFocus, applyBlur, FieldLabel, StepShell } from './onboardingKit';
 import { vibeWord } from '../../services/userSettings';
 
 export interface VibeValues {
@@ -30,28 +29,22 @@ export function VibeStep({ values, onChange }: Props) {
 
   const displayName = values.agent_name.trim() || 'Grace';
 
-  // Band layout (2026-08-27), matching Getting to know you: header across
-  // the top, the name field at a deliberate width, sliders filling the
-  // panel. The old side column left a void on a step this short.
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20, width: 760, maxWidth: '100%' }}>
-      <StepHeader
-        title="Set the vibe."
-        subtitle={`How ${displayName} talks to you. Change it anytime.`}
-        wide
-      />
-
-      <FieldLabel text="Name your assistant" style={{ width: 420, maxWidth: '100%' }}>
-          <input
-            type="text"
-            value={values.agent_name}
-            onChange={(e) => set('agent_name', e.target.value)}
-            placeholder="Grace"
-            style={FIELD_BASE}
-            onFocus={(e) => applyFocus(e.target)}
-            onBlur={(e) => applyBlur(e.target)}
-          />
-        </FieldLabel>
+    <StepShell
+      title="Set the vibe."
+      subtitle={`How ${displayName} talks to you. Change it anytime.`}
+    >
+      <FieldLabel text="Name your assistant">
+        <input
+          type="text"
+          value={values.agent_name}
+          onChange={(e) => set('agent_name', e.target.value)}
+          placeholder="Grace"
+          style={FIELD_BASE}
+          onFocus={(e) => applyFocus(e.target)}
+          onBlur={(e) => applyBlur(e.target)}
+        />
+      </FieldLabel>
 
       {/* Hairline groups the name from the personality sliders. */}
       <div style={{ height: 1, background: 'var(--border-subtle)', margin: '2px 0 0' }} />
@@ -64,39 +57,39 @@ export function VibeStep({ values, onChange }: Props) {
           columnGap: 36,
         }}
       >
-          <Slider
-            value={values.formality}
-            onChange={(v) => set('formality', v)}
-            leftLabel="Casual"
-            rightLabel="Formal"
-            caption="Formality"
-            word={vibeWord('formality', values.formality)}
-          />
-          <Slider
-            value={values.humor}
-            onChange={(v) => set('humor', v)}
-            leftLabel="Dry"
-            rightLabel="Playful"
-            caption="Humor"
-            word={vibeWord('humor', values.humor)}
-          />
-          <Slider
-            value={values.directness}
-            onChange={(v) => set('directness', v)}
-            leftLabel="Gentle"
-            rightLabel="Blunt"
-            caption="Directness"
-            word={vibeWord('directness', values.directness)}
-          />
-          <Slider
-            value={values.verbosity}
-            onChange={(v) => set('verbosity', v)}
-            leftLabel="Brief"
-            rightLabel="Thorough"
-            caption="Verbosity"
-            word={vibeWord('verbosity', values.verbosity)}
-          />
+        <Slider
+          value={values.formality}
+          onChange={(v) => set('formality', v)}
+          leftLabel="Casual"
+          rightLabel="Formal"
+          caption="Formality"
+          word={vibeWord('formality', values.formality)}
+        />
+        <Slider
+          value={values.humor}
+          onChange={(v) => set('humor', v)}
+          leftLabel="Dry"
+          rightLabel="Playful"
+          caption="Humor"
+          word={vibeWord('humor', values.humor)}
+        />
+        <Slider
+          value={values.directness}
+          onChange={(v) => set('directness', v)}
+          leftLabel="Gentle"
+          rightLabel="Blunt"
+          caption="Directness"
+          word={vibeWord('directness', values.directness)}
+        />
+        <Slider
+          value={values.verbosity}
+          onChange={(v) => set('verbosity', v)}
+          leftLabel="Brief"
+          rightLabel="Thorough"
+          caption="Verbosity"
+          word={vibeWord('verbosity', values.verbosity)}
+        />
       </div>
-    </div>
+    </StepShell>
   );
 }
