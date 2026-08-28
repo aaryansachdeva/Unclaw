@@ -382,6 +382,27 @@ export function SoulBootScreen({ onReady }: SoulBootScreenProps) {
         }}
       />
 
+      {/* Reassurance on a slow-but-healthy cold boot (first run loads
+          models). Whisper-quiet so it never reads as an error. */}
+      {showSlowHint && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '60%',
+            left: 0,
+            right: 0,
+            textAlign: 'center',
+            fontSize: 12.5,
+            lineHeight: 1.5,
+            color: 'rgba(255, 255, 255, 0.5)',
+            pointerEvents: 'none',
+            padding: '0 40px',
+          }}
+        >
+          First launch is preparing your companion.<br />Loading the AI models can take a minute.
+        </div>
+      )}
+
       {/* Auto-respawn in progress: brief, calm. */}
       {status === 'retrying' && (
         <div
