@@ -1,8 +1,8 @@
 // Thin React adapter around VoiceController. Exposes:
 //   - status flags  (isListening, isUserSpeaking, isTranscribing, error)
-//   - live signals  (vadLevel for the visualizer, silence countdown)
+//   - live signals  (getVadLevel for the visualizer, silence countdown)
 //   - controls      (toggle, start, stop)
-//   - hooks         (onTranscript, isAISpeaking, whisperPrompt)
+//   - hooks         (onTranscript, isAISpeaking)
 //
 // All heavy logic lives in VoiceController; this file is just glue.
 
@@ -20,7 +20,6 @@ export interface UseVoiceAgentOptions {
   /** Returns whether the AI is currently producing audio (gates VAD). */
   isAISpeaking: () => boolean;
   /** Optional Whisper prompt (persona name, vocabulary) to bias accuracy. */
-  whisperPrompt?: () => string;
   /** Called when the user has visibly tried to interrupt (mute AI etc.). */
   onBargeIn?: () => void;
   /** Called when an unrecoverable voice error happens (mic denied, etc.). */
@@ -38,8 +37,6 @@ export interface VoiceAgentState {
   isUserSpeaking: boolean;    // VAD says they're talking right now
   isTranscribing: boolean;    // a Whisper request is in flight
   state: EndpointerState;
-  /** Smoothed [0, 1] speech probability for visualizer. */
-  vadLevel: number;
   /** Silence countdown: required ms until endpoint, elapsed ms so far. */
   silence: { requiredMs: number; elapsedMs: number };
   error: string | null;
@@ -50,25 +47,28 @@ const INITIAL: VoiceAgentState = {
   isUserSpeaking: false,
   isTranscribing: false,
   state: 'idle',
-  vadLevel: 0,
   silence: { requiredMs: 0, elapsedMs: 0 },
   error: null,
 };
 
 export function useVoiceAgent(opts: UseVoiceAgentOptions) {
   const [state, setState] = useState<VoiceAgentState>(INITIAL);
+  // Live VAD level for the visualizer. A ref, NOT state: 'frame' events fire
+  // per 32ms audio frame, and routing them through setState re-rendered the
+  // entire AppMain tree ~31x/sec for the whole time the mic was open. This is
+  // the same fix useStreamingTranscriber documents for its 'level' events;
+  // the visualizer polls getVadLevel() from its own rAF loop instead.
+  const vadLevelRef = useRef(0);
 
   // Stable refs for callbacks so VoiceController is constructed once.
   const onTranscriptRef = useRef(opts.onTranscript);
   const isAISpeakingRef = useRef(opts.isAISpeaking);
-  const whisperPromptRef = useRef(opts.whisperPrompt);
   const onBargeInRef = useRef(opts.onBargeIn);
   const onErrorRef = useRef(opts.onError);
   const streamingRef = useRef(opts.streaming);
   useEffect(() => {
     onTranscriptRef.current = opts.onTranscript;
     isAISpeakingRef.current = opts.isAISpeaking;
-    whisperPromptRef.current = opts.whisperPrompt;
     onBargeInRef.current = opts.onBargeIn;
     onErrorRef.current = opts.onError;
     streamingRef.current = opts.streaming;
@@ -76,7 +76,6 @@ export function useVoiceAgent(opts: UseVoiceAgentOptions) {
 
   const controller = useMemo(() => new VoiceController({
     isAISpeaking: () => isAISpeakingRef.current(),
-    whisperPrompt: () => whisperPromptRef.current?.() ?? '',
     // Indirection so a late-mounted streaming hook still wires up.
     // VoiceController only checks `streaming` on the relevant code
     // paths, so this proxy stays cheap.
@@ -95,7 +94,7 @@ export function useVoiceAgent(opts: UseVoiceAgentOptions) {
     const off = controller.on((ev: VoiceEvent) => {
       switch (ev.kind) {
         case 'frame':
-          setState(s => ({ ...s, vadLevel: ev.smoothedProb }));
+          vadLevelRef.current = ev.smoothedProb;
           break;
         case 'silenceTimer':
           setState(s => ({ ...s, silence: { requiredMs: ev.requiredMs, elapsedMs: ev.elapsedMs } }));
@@ -163,8 +162,11 @@ export function useVoiceAgent(opts: UseVoiceAgentOptions) {
     controller.notifyAIFinished();
   }, [controller]);
 
+  const getVadLevel = useCallback(() => vadLevelRef.current, []);
+
   return {
     ...state,
+    getVadLevel,
     start,
     stop,
     toggle,

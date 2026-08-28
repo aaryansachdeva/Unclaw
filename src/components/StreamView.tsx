@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ConnectionState } from '../hooks/usePixelStreaming';
 import logoUrl from '../assets/logo.png';
@@ -94,6 +94,21 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
   // Dev/live-tuning console surface:
   //   __unclawStream.gamut(false)  toggle the P3 match without a reload
   //   __unclawStream.sample()      decoded center-patch RGB (see helper above)
+  // Stream lease. Unclaw renders to exactly ONE place at a time; when a phone
+  // (later a VS Code panel) takes the lease the desktop releases the surface
+  // so Unreal's frames reach the H.264 encoder instead. Our last frame stays
+  // frozen underneath the overlay below — that is deliberate, not a stall.
+  const [lease, setLease] = useState<'local' | 'remote'>('local');
+  useEffect(() => {
+    const ds = window.electronAPI?.directSurface;
+    if (!ds) return;
+    void ds.getLease?.().then((s) => setLease(s.holder)).catch(() => { /* pre-1.1.9 main */ });
+    return ds.onLease?.((s) => {
+      setLease(s.holder);
+    });
+  }, []);
+
+
   useEffect(() => {
     const api = {
       gamut: (on: boolean) => {
@@ -103,6 +118,13 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
         return `stream gamut match: ${on ? 'ON (UE-window look)' : 'OFF (honest sRGB)'}`;
       },
       sample: sampleStreamRGB,
+      /** Exercise the handoff with no second device:
+       *    __unclawStream.lease('remote')  release the surface to the encoder
+       *    __unclawStream.lease(null)      follow soul again */
+      lease: async (holder: 'local' | 'remote' | null) => {
+        const h = await window.electronAPI?.directSurface?.forceLease?.(holder);
+        return `stream lease: ${h ?? 'unavailable'}`;
+      },
     };
     (window as unknown as Record<string, unknown>).__unclawStream = api;
     return () => {
@@ -150,17 +172,97 @@ export function StreamView({ videoParentRef, connectionState }: StreamViewProps)
     };
   }, [streamReady]);
 
-  const isConnected = streamReady && canShowStream;
+  // Direct IOSurface mode: Unreal's frames are composited by the window server
+  // on a native layer BEHIND this web content, so the video element and the
+  // opaque backdrop have to get out of the way. Only once real frames are
+  // arriving, though. If the publisher is not up, `connected` stays false and
+  // the ordinary WebRTC video keeps playing, which is what makes this safe to
+  // leave enabled.
+  const [directLive, setDirectLive] = useState(false);
+  // True while the preload's WebRTC WebGPU painter covers the video: the
+  // gamut then lives in the shader, so the SVG filter must come OFF the
+  // covered element or it keeps costing invisibly.
+  const [rtcGpu, setRtcGpu] = useState(false);
+  const directMode = window.electronAPI?.directSurface?.mode ?? null;
+  useEffect(() => {
+    // Two routes to the same fact, because on 2026-08-15 the bridge callback
+    // alone silently stopped delivering and the app sat on the backdrop
+    // gradient with the character fully rendered but hidden. The preload
+    // mirrors every status tick into a data attribute on <html> and fires a
+    // DOM event; the attribute is shared DOM, so this cannot miss or go
+    // stale, and reading it on mount also covers statuses sent before this
+    // component subscribed. The bridge callback stays as the second route.
+    const readAttr = () => {
+      setRtcGpu(document.documentElement.dataset.unclawRtcGpu === '1');
+      const v = document.documentElement.dataset.unclawDirectLive;
+      if (v !== undefined) {
+        setDirectLive((prev) => {
+          const next = v === '1';
+          // eslint-disable-next-line no-console
+          if (next !== prev) console.log(`[ps] StreamView directLive -> ${next}`);
+          return next;
+        });
+      }
+    };
+    readAttr();
+    document.addEventListener('unclaw:direct-status', readAttr);
+    const api = window.electronAPI?.directSurface;
+    const off = api?.onStatus?.((s) => setDirectLive(!!s.connected));
+    return () => {
+      document.removeEventListener('unclaw:direct-status', readAttr);
+      off?.();
+    };
+  }, []);
+
+  // Mode 1 only: the native layer sits BEHIND the page, so the page's opaque
+  // backgrounds have to get out of the way. Mode 2 draws the frame on the
+  // canvas below, which is ordinary page content over an opaque window, so the
+  // backgrounds stay and backdrop-filter works.
+  useEffect(() => {
+    const on = directLive && directMode === '1';
+    document.documentElement.classList.toggle('direct-surface', on);
+    return () => document.documentElement.classList.remove('direct-surface');
+  }, [directLive, directMode]);
+
+  const isConnected = (streamReady && canShowStream) || directLive;
 
   return (
-    <div className="absolute inset-0 overflow-hidden" style={{ background: 'var(--bg-void)' }}>
+    <div
+      className="absolute inset-0 overflow-hidden"
+      style={{ background: directLive && directMode === '1' ? 'transparent' : 'var(--bg-void)' }}
+    >
       {/* Filter definition for the gamut match. Zero-size, never paints. */}
       <svg width="0" height="0" style={{ position: 'absolute' }} aria-hidden="true">
         <filter id="ue-gamut-match" colorInterpolationFilters="linearRGB">
           <feColorMatrix type="matrix" values={GAMUT_MATRIX} />
         </filter>
       </svg>
-      <div ref={videoParentRef} className={`absolute inset-0${gamutOn ? ' stream-gamut-match' : ''}`} />
+      {/* Shared-texture mode: the preload draws Unreal's frames here (it finds
+          this element by the data attribute). Always mounted in mode 2 so the
+          receiver has a target from the first frame; revealed once frames are
+          actually flowing. object-cover mirrors how the <video> fills. */}
+      {directMode === '2' && (
+        <canvas
+          data-direct-canvas
+          className="absolute inset-0 h-full w-full object-cover"
+          // z-index 1: the WebRTC <video> sits later in DOM order, and the
+          // SDK re-asserts `visibility: visible` on it (a child's explicit
+          // visibility escapes a hidden ancestor), which on window resize
+          // painted its stale boot frame (UE's blank-scene backdrop
+          // gradient) over the live canvas. Stacking the canvas above the
+          // video container ends that fight for good; when directLive is
+          // false the canvas is hidden and the video shows as before.
+          style={{ visibility: directLive ? 'visible' : 'hidden', zIndex: 1 }}
+        />
+      )}
+      {/* Kept mounted, never unmounted: the PixelStreaming SDK owns the video
+          element inside this node, and tearing it down would drop the peer
+          connection that still carries input and audio. Hidden only. */}
+      <div
+        ref={videoParentRef}
+        className={`absolute inset-0${gamutOn && !directLive && !rtcGpu ? ' stream-gamut-match' : ''}`}
+        style={directLive || lease === 'remote' ? { visibility: 'hidden' } : undefined}
+      />
 
       {/* Bottom vignette */}
       <AnimatePresence>

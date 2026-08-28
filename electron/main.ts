@@ -19,12 +19,15 @@ import path from 'path';
 import fs from 'fs';
 import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
-import { startSoul, stopSoul, restartSoul, getSoulSnapshot, getSoulPorts, writeSoulKeysBridge, clearSoulKeysBridge } from './soulSupervisor';
-import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent, installedPakVersions } from './setupCoordinator';
+import { startSoul, stopSoul, restartSoul, shutdownEverything, getSoulSnapshot, getSoulPorts, writeSoulKeysBridge, clearSoulKeysBridge } from './soulSupervisor';
+import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent, installedPakVersions, quarantineStalePaks } from './setupCoordinator';
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { runLocalIdentityInference, runLocalPhotoInference, type GroomArgs } from './identityInference';
+import { listBasecolors, regenerateBasecolor, runH3DPhotoToCharacter } from './h3dPipeline';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
+import * as directSurface from './directSurface';
+import * as streamLease from './streamLease';
 
 // Cap Chromium's GPU memory budget. By default Chromium scales its tile /
 // cache / staging budget to system RAM (generous on a 64GB machine); measured
@@ -35,6 +38,25 @@ import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
 // (decoded frames live in VideoToolbox surfaces outside this budget).
 // Must run before app ready, so module top level.
 app.commandLine.appendSwitch('force-gpu-mem-available-mb', '512');
+
+// Direct IOSurface display path: ON by default on macOS as of 1.1.8.
+//
+// Resolved HERE, at module top level, and written back into process.env rather
+// than being computed per-reader. Three separate places consume this — this
+// process, the preload (which decides whether to install the shared-texture
+// receiver), and soulSupervisor (which must set UNCLAW_UE_LAUNCHD so UE is
+// spawned by launchd and can own the Mach service) — and if any of them
+// disagreed about the default we would get a half-armed pipeline. Renderer
+// processes inherit the environment at spawn, which happens well after this
+// line, so one assignment covers all three.
+//
+// `UNCLAW_DIRECT_SURFACE=0` opts out and falls back to WebRTC. The path also
+// degrades on its own if the engine has no publisher (older UE bundle) or the
+// native addon is missing: directSurface logs "no publisher — WebRTC still in
+// use" and the stream continues over WebRTC.
+if (process.platform === 'darwin' && !process.env.UNCLAW_DIRECT_SURFACE) {
+  process.env.UNCLAW_DIRECT_SURFACE = '2';
+}
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -439,9 +461,19 @@ function createWindow() {
     // Nudge the lights down + right so they sit comfortably in our chrome
     // rather than hugging the top-left corner.
     trafficLightPosition: { x: 12, y: 12 },
-    transparent: false,
-    backgroundColor: '#050506',
-    alwaysOnTop: true,
+    // Direct-surface mode 1 composites Unreal's CALayer BEHIND the web
+    // content, so the window has to be transparent or Chromium's background
+    // paints over it. Transparency cannot be toggled after construction, hence
+    // the flag is read here as well as in directSurface.ts. Mode 2 draws the
+    // frame INSIDE the page (shared texture -> canvas), so the window stays
+    // opaque and the window server stops alpha-blending the whole surface.
+    transparent: directSurface.isEnabled() && directSurface.mode() === '1',
+    backgroundColor:
+      directSurface.isEnabled() && directSurface.mode() === '1' ? '#00000000' : '#050506',
+    // Opt-in, not default (2026-08-15): the window starts ordinary and the
+    // titlebar pin button raises it. Matches `pinned` initial state in
+    // src/components/Titlebar.tsx.
+    alwaysOnTop: false,
     resizable: true,
     minimizable: true,
     maximizable: false,
@@ -468,19 +500,22 @@ function createWindow() {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // Shared-texture mode: the PRELOAD needs `electron.sharedTexture` to
+      // register the frame receiver, and sandboxed preloads only get the
+      // small allowlisted module set (ipcRenderer, contextBridge, ...).
+      // Disabling the sandbox for this window is what exposes it. Context
+      // isolation stays on and nodeIntegration stays off, so page code still
+      // has no Node access; only our own preload gains it.
+      sandbox: !(directSurface.isEnabled() && directSurface.mode() === '2'),
     },
   });
 
-  // Always-on-top level: 'floating' (NSFloatingWindowLevel = 3) instead
-  // of 'screen-saver' (level 1000). The screen-saver level promotes the
-  // window into macOS's "accessory" panel category, which auto-hides the
-  // dock icon for the owning app, users had no way to see Unclaw was
-  // running or quit it from the dock. 'floating' keeps the window above
-  // normal app windows (which is the 99% case) while letting the dock
-  // icon stay visible. Trade-off: full-screen video / Screen Sharing can
-  // cover Unclaw briefly; acceptable since the dock-icon affordance is
-  // more important to the daily UX than the rare full-screen scenario.
-  mainWindow.setAlwaysOnTop(true, 'floating');
+  // Always-on-top is user-opt-in via the titlebar pin (window:toggle-pin
+  // below); nothing to set here. When pinned, the level used is 'floating'
+  // (NSFloatingWindowLevel = 3), NOT 'screen-saver' (level 1000): the
+  // screen-saver level promotes the window into macOS's "accessory" panel
+  // category, which auto-hides the dock icon for the owning app, and users
+  // had no way to see Unclaw was running or quit it from the dock.
   // visibleOnAllWorkspaces is mac/linux; harmless on Windows.
   try {
     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
@@ -514,8 +549,68 @@ function createWindow() {
     }
   });
 
+  // Direct-surface path. Attached after the window exists so the native handle
+  // is valid; no-op unless UNCLAW_DIRECT_SURFACE=1 and the addon was built.
+  // Safe before Unreal is up: `connected` simply stays false and the renderer
+  // keeps the WebRTC video until real frames arrive.
+  if (directSurface.isEnabled()) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        directSurface.attach(mainWindow);
+      }
+    });
+    // Every load (reloads included): re-announce the current lease so the
+    // renderer's DOM mirror can never go stale across a Cmd+R mid-call.
+    mainWindow.webContents.on('did-finish-load', () => {
+      streamLease.announce();
+    });
+  }
+
+  // The renderer's console lines are invisible to every log file; mirror the
+  // stream-relevant ones ([direct-canvas], [ps]) and all warnings/errors to
+  // stdout so a headless check can reconstruct the connection story. Lives
+  // OUTSIDE the direct-path gate: WebRTC-only runs need it just as much
+  // (learned when a WebRTC-mode probe came back with a blind log).
+  mainWindow.webContents.on('console-message', (_e, level, message) => {
+    if (message.includes('[direct-canvas]') || message.includes('[ps]')
+        || message.includes('[rtc-gpu]') || level >= 2) {
+      console.log(`[renderer${level >= 2 ? ':warn' : ''}] ${message}`);
+    }
+  });
+
+  // Cmd+H hides all chrome (clean-capture / debug). Scoped to the FOCUSED
+  // Unclaw window via before-input-event: the old globalShortcut version
+  // hijacked Cmd+H system-wide, so no other app could hide itself while
+  // Unclaw ran. preventDefault also beats the app menu's "Hide" role, which
+  // is why the shortcut works at all. Lives inside createWindow so a
+  // recreated window (Dock-click after close) keeps the shortcut.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.meta
+        && !input.alt && !input.control && !input.shift
+        && input.key.toLowerCase() === 'h') {
+      event.preventDefault();
+      mainWindow?.webContents.send('temp:toggle-ui');
+    }
+  });
+
   mainWindow.on('closed', () => {
+    directSurface.detach();
     mainWindow = null;
+    // Closing the main window quits the app, and it has to be said HERE
+    // rather than left to window-all-closed, for two reasons that stack:
+    //
+    //   1. `titleBarStyle: 'hidden'` gives us the real macOS traffic lights,
+    //      so the red button closes this NSWindow directly. It never reaches
+    //      the renderer's `window:close` IPC, which is the only other place
+    //      that calls app.quit().
+    //   2. window-all-closed never fires anyway: createOverlayWindow() warms
+    //      the screenshot overlay at startup and that hidden BrowserWindow
+    //      stays open for the app's whole life, so "all closed" is never true.
+    //
+    // Net effect before this line existed: red button closed the window and
+    // nothing else happened. No before-quit, no teardown, app idle in the
+    // Dock with soul, coturn and UE (at ~80% CPU) still running.
+    app.quit();
   });
 }
 
@@ -544,6 +639,36 @@ function createTray() {
 }
 
 // IPC handlers for window controls from renderer
+// Force the stream lease for testing the handoff without a second device.
+// Renderer surface: __unclawStream.lease('remote' | 'local' | null)
+ipcMain.handle('stream-lease:force', async (_e, holder: 'local' | 'remote' | null) => {
+  return streamLease.force(holder);
+});
+ipcMain.handle('stream-lease:get', () => (
+  { holder: streamLease.current(), players: streamLease.players() }
+));
+
+// Desktop "Disconnect" button: hang up on every remote viewer. soul closes
+// the bridges and tells the Worker, active_players empties, and the lease
+// poller reclaims the direct path on its next tick.
+ipcMain.handle('stream-lease:disconnect', async () => {
+  const port = getSoulPorts()?.http;
+  if (!port) return { ok: false, error: 'soul_not_ready' };
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/pair/disconnect`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(5000),
+    });
+    const body = await res.json().catch(() => ({}));
+    // Clear any dev pin too, or a forced 'remote' would immediately re-take
+    // the lease and the button would look broken.
+    void streamLease.force(null);
+    return { ok: res.ok, ...(body as object) };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
 ipcMain.on('window:minimize', () => mainWindow?.minimize());
 ipcMain.on('window:close', () => app.quit());
 
@@ -752,8 +877,9 @@ ipcMain.handle('setup:start', async () => {
 ipcMain.on('window:toggle-pin', (_event, pinned: boolean) => {
   // Same level as the createWindow setup, 'screen-saver' is the
   // highest standard level and survives full-screen apps stealing
-  // focus. When unpinned we drop back to a normal window.
-  mainWindow?.setAlwaysOnTop(pinned, 'screen-saver');
+  // focus. When unpinned we drop back to a normal window. 'floating', not
+  // 'screen-saver': the latter hides the dock icon (see createWindow).
+  mainWindow?.setAlwaysOnTop(pinned, 'floating');
 });
 
 // =====================================================================
@@ -1374,6 +1500,50 @@ ipcMain.handle(
   },
 );
 
+// H3D tier: photo -> Gemini hair removal -> Rodin bust -> local UE chain ->
+// .dna + .ujnt. Long-running (Rodin plus a headless UE boot), progress arrives
+// on the same identity:progress channel.
+ipcMain.handle(
+  'identity:run-h3d',
+  async (_event, args: {
+    localId: string; photoBytes: Uint8Array; ext: 'jpg' | 'png';
+    catalogs?: { hairs: { index: number; name: string }[]; brows: { index: number; name: string }[]; lashes: { index: number; name: string }[] };
+  }) => {
+    if (!args?.localId || !args?.photoBytes?.length || !['jpg', 'png'].includes(args?.ext)) {
+      return { ok: false, error: 'invalid_args' };
+    }
+    const workDir = path.join(app.getPath('userData'), 'identities', args.localId);
+    return runH3DPhotoToCharacter(mainWindow, {
+      localId: args.localId,
+      photoBytes: args.photoBytes,
+      ext: args.ext,
+      workDir,
+      catalogs: args.catalogs,
+    });
+  },
+);
+
+// Regenerate ONLY the skin texture for an existing character. Seconds and one
+// image call, against a full chain's Rodin credit + headless UE boot.
+ipcMain.handle(
+  'identity:regen-basecolor',
+  async (_event, args: { localId: string }) => {
+    if (!args?.localId) return { ok: false, error: 'invalid_args' };
+    const workDir = path.join(app.getPath('userData'), 'identities', args.localId);
+    return regenerateBasecolor(mainWindow, args.localId, workDir);
+  },
+);
+
+// Every skin generated for a character, so the UI can offer the earlier ones.
+ipcMain.handle(
+  'identity:list-basecolors',
+  async (_event, args: { localId: string }) => {
+    if (!args?.localId) return { ok: false, skins: [] };
+    const workDir = path.join(app.getPath('userData'), 'identities', args.localId);
+    return { ok: true, skins: listBasecolors(args.localId, workDir) };
+  },
+);
+
 // IPC: download + extract a purchased character pak. The renderer fetches the
 // short-lived presigned URL from the store Worker (it holds the auth token)
 // and passes { characterId, url } here; main reads the pak's sha256 + sizeBytes
@@ -1421,7 +1591,13 @@ ipcMain.handle('character-store:has-voices', async (_event, args: { characterId:
   if (!args?.characterId) return { ok: false, error: 'invalid_args' };
   try {
     const present = characterVoicesPresent(args.characterId);
-    return { ok: true, present, complete: present.supertonic && present.kokoro };
+    // `complete` must count EVERY engine we ship, or adding one strands every
+    // existing owner: they already have supertonic + kokoro on disk, so the
+    // renderer short-circuits before the gated fetch and the new engine's file
+    // never arrives. Adding pocket to this AND to characterVoicesPresent is
+    // what makes 1.1.8 backfill it for characters bought before 1.1.8.
+    const complete = present.supertonic && present.kokoro && present.pocket;
+    return { ok: true, present, complete };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -1514,12 +1690,14 @@ app.whenReady().then(() => {
     return ['media', 'audioCapture', 'mediaKeySystem', 'geolocation']
       .includes(permission);
   });
-  session.defaultSession.setDevicePermissionHandler((details) => {
-    if (details.deviceType === 'audioInput' || details.deviceType === 'audioOutput') {
-      return true;
-    }
-    return false;
-  });
+  // Device permissions (WebHID / WebSerial / WebUSB): nothing in the app
+  // uses these; deny all. NOTE: audio does NOT flow through this handler —
+  // deviceType is only ever 'hid' | 'serial' | 'usb', and microphone access
+  // is granted above via setPermissionRequestHandler ('media' /
+  // 'audioCapture'). An earlier version checked for 'audioInput' here, a
+  // branch the types prove can never fire (caught by the 2026-08-16 tsc
+  // pass); behavior is unchanged by removing it.
+  session.defaultSession.setDevicePermissionHandler(() => false);
 
   // Pre-warm the overlay window now so the first Ctrl+Shift+G is fast
   // and visually clean.
@@ -1534,17 +1712,6 @@ app.whenReady().then(() => {
     );
   }
 
-  // TEMP(revert): Cmd+H hides all chrome (debug/clean-capture). Registered as a
-  // globalShortcut so it wins over the default app menu's "Hide" role (which
-  // also owns Cmd+H and would otherwise hide the whole app). Remove this block
-  // + the preload onToggleUi bridge + the App.tsx uiHidden handling to revert.
-  const tempUiToggle = globalShortcut.register('CommandOrControl+H', () => {
-    mainWindow?.webContents.send('temp:toggle-ui');
-  });
-  if (!tempUiToggle) {
-    console.warn('[temp] failed to register Cmd+H UI toggle');
-  }
-
   createWindow();
   createTray();
 
@@ -1553,13 +1720,39 @@ app.whenReady().then(() => {
   // line. Streaming starts in the background; the React side renders
   // a LoadingScreen until it receives the 'soul:ready' IPC event.
   if (mainWindow) {
-    startSoul(mainWindow).catch((err) => {
-      console.warn('[unclaw] startSoul failed:', err);
-    });
+    // FIRST-LAUNCH GUARD: park any staged character pak that is not provably
+    // current (manifest version + byte hash both verified) BEFORE soul stages
+    // paks into UE. Boot-mounting a pak from a different UE build wedged the
+    // 1.1.5 first launch ("getting Goblin ready" forever); a briefly-missing
+    // paid character that re-downloads is strictly better. Sequential on
+    // purpose: soul must not race the quarantine.
+    const pakVersions: Record<string, string | undefined> = {};
+    for (const [id, entry] of Object.entries(MANIFEST.characterPaks ?? {})) {
+      pakVersions[id] = entry.version;
+    }
+    quarantineStalePaks(pakVersions)
+      .then((parked) => {
+        if (parked.length) {
+          console.warn(`[unclaw] quarantined stale paks before boot: ${parked.join(', ')}`);
+        }
+      })
+      .catch((err) => console.warn('[unclaw] pak quarantine failed:', err))
+      .finally(() => {
+        startSoul(mainWindow!).catch((err) => {
+          console.warn('[unclaw] startSoul failed:', err);
+        });
+      });
   }
 });
 
-app.on('will-quit', () => {
+// The synchronous last-mile teardown. Extracted from will-quit so the
+// hard-exit watchdog below can run it too: app.exit() skips will-quit
+// entirely, and skipping this would leak plaintext BYOK keys and orphan UE.
+// Idempotent, so running it twice is harmless.
+let finalTeardownDone = false;
+function finalTeardown() {
+  if (finalTeardownDone) return;
+  finalTeardownDone = true;
   globalShortcut.unregisterAll();
   // A second instance that lost the single-instance lock is quitting
   // immediately (line ~1156) and never owned the soul/UE stack. It MUST NOT
@@ -1615,17 +1808,99 @@ app.on('will-quit', () => {
       }
     }
   }
-});
+}
+
+app.on('will-quit', finalTeardown);
 
 app.on('window-all-closed', () => {
   // Unclaw is a single-window foreground experience, not a typical
   // Mac menubar/background app. Closing the window means the user is
-  // done, quit the whole app so `will-quit` fires and `stopSoul()`
-  // can SIGTERM the soul subprocess. Without this, on macOS the app
-  // stayed alive with no window and soul + UE leaked across sessions.
+  // done; quit (the before-quit hook below owns the full teardown).
+  //
+  // NOTE: this is a backstop, not the live path. The screenshot overlay is
+  // warmed at startup and stays open for the app's life, so "all windows
+  // closed" is never actually true. mainWindow's own `closed` handler is
+  // what quits us. Do not add a third quit trigger that depends on this one.
   app.quit();
 });
 
+// Closing the window (or Cmd+Q) means the user is done — with EVERYTHING.
+// stopSoul() alone only reaches the soul child we spawned; an externally
+// attached soul (dev flow) and the launchd-managed UE job survived it, so
+// closing the app left the character engine burning GPU in the background
+// (observed repeatedly, fixed 2026-08-15). shutdownEverything() takes the
+// whole tree down — soul, launchd UE job, wilbur, coturn — bounded to
+// ~1.6s. before-quit rather than will-quit because the sweep is async and
+// will-quit cannot wait; the preventDefault/flag dance runs it exactly once
+// and then resumes the quit.
+//
+// Two hard rules on this path, both learned the hard way:
+//   1. NOTHING may block it without a bound. shutdownEverything() shells out
+//      to ps and to `launchctl bootout`, and bootout does not return until the
+//      UE job is really gone. A wedged UE meant that promise never settled, so
+//      the .finally() never ran, app.quit() was never re-issued, and the app
+//      sat in the Dock with no window until Force Quit. That is the bug this
+//      race exists to make impossible.
+//   2. The process MUST end. app.quit() is a request, not a guarantee, so a
+//      watchdog force-exits after it, running the same teardown first.
+const SHUTDOWN_DEADLINE_MS = 6000;
+const HARD_EXIT_MS = 1500;
+let fullShutdownDone = false;
+let quitting = false;
+app.on('before-quit', (event) => {
+  quitting = true;
+  if (fullShutdownDone) return;
+  event.preventDefault();
+  fullShutdownDone = true;
+  // Instant feedback: the teardown takes a beat, and a window that sits there
+  // unresponsive after the user pressed X reads as a hang. Hide first, die
+  // second. Safe because the watchdog guarantees the process follows.
+  try { mainWindow?.hide(); } catch { /* already destroyed */ }
+  const deadline = new Promise<void>((resolve) => {
+    setTimeout(resolve, SHUTDOWN_DEADLINE_MS).unref?.();
+  });
+  void Promise.race([shutdownEverything().catch(() => { /* quitting regardless */ }), deadline])
+    .finally(() => {
+      app.quit();
+      setTimeout(() => {
+        // Still here: something re-prevented the quit or a stuck handle is
+        // holding the process open. will-quit may never have fired, so run
+        // its teardown (idempotent) before exiting for real.
+        finalTeardown();
+        app.exit(0);
+      }, HARD_EXIT_MS).unref?.();
+    });
+});
+
+// Stream lease: exactly one renderer owns Unreal's frames. Started here so it
+// outlives any single window; it reads the soul port per tick, so a soul
+// restart on a fresh dynamic port needs no re-arming.
+if (process.platform === 'darwin') {
+  // Dev-only scriptable toggle: `kill -USR2 <electron pid>` flips the lease
+  // remote/back so the whole handoff (freeze, overlay, encoder switchover,
+  // media guard, reclaim) can be exercised from a shell with no phone and no
+  // devtools. Same path as __unclawStream.lease().
+  if (!app.isPackaged) {
+    process.on('SIGUSR2', () => {
+      const next = streamLease.current() === 'remote' ? null : 'remote';
+      console.log(`[lease] SIGUSR2 — forcing ${next ?? 'follow-soul (local)'}`);
+      void streamLease.force(next);
+    });
+  }
+  streamLease.start(
+    () => getSoulPorts()?.http ?? null,
+    () => mainWindow,
+    (holder, players) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('stream-lease:changed', { holder, players });
+      }
+    },
+  );
+}
+
 app.on('activate', () => {
+  // Never resurrect the window mid-quit: clicking the Dock icon during the
+  // teardown window used to build a fresh window on a stack being torn down.
+  if (quitting) return;
   if (mainWindow === null) createWindow();
 });

@@ -375,6 +375,14 @@ async function runStagePreflight(
 // Stage 2: runtime (Python venv + pip install)
 // ----------------------------------------------------------------------
 
+/** Drop uv's wheel/http cache after a successful install. It only speeds up
+ *  the install that just finished; left in place it permanently costs ~1.5GB
+ *  per user. The managed CPython is NOT here (UV_PYTHON_INSTALL_DIR), so this
+ *  only removes re-downloadable wheels. */
+function clearUvCache(paths: ReturnType<typeof runtimePaths>): void {
+  try { fs.rmSync(path.join(paths.cache, 'uv'), { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
 async function runStageRuntime(
   window: BrowserWindow,
   paths: ReturnType<typeof runtimePaths>,
@@ -503,6 +511,7 @@ async function runStageRuntime(
         `[runtime] onnxruntime-gpu reconcile failed (GPU may be unavailable): ${(err as Error).message}`);
     }
   }
+  clearUvCache(paths);
 
   setStage(window, {
     id: 'runtime',
@@ -617,6 +626,7 @@ export async function syncSoulVenv(
   );
   pushLog(window, 'meta',
     `[venv-sync] pip install complete; new sha=${newSha.slice(0, 8)}`);
+  clearUvCache(paths);
   return { ran: true, sha: newSha };
 }
 
@@ -1098,13 +1108,89 @@ export function installedPakVersions(): Record<string, string> {
       const id = f.replace(/\.pak$/i, '');
       let version = 'unknown';
       try {
-        const v = fs.readFileSync(path.join(dir, `${id}.version`), 'utf8').trim();
-        if (v) version = v;
-      } catch { /* no sidecar => unknown */ }
+        const raw = fs.readFileSync(path.join(dir, `${id}.version`), 'utf8').trim();
+        if (raw.startsWith('{')) {
+          // New sidecar format: {version, pakSha256}. The sha is verified by
+          // quarantineStalePaks before soul/UE launch; here we only parse.
+          const meta = JSON.parse(raw) as { version?: string };
+          if (meta.version) version = meta.version;
+        } else if (raw) {
+          // Legacy plain-string sidecar: version claim with NO byte proof.
+          // Treated as its own value so drift detection still works, but
+          // quarantineStalePaks refuses to boot-mount legacy-stamped paks
+          // whose version does not match the manifest.
+          version = raw;
+        }
+      } catch { /* no/bad sidecar => unknown */ }
       out[id] = version;
     }
   } catch { /* ignore */ }
   return out;
+}
+
+/** First-impression guard (2026-08-05 incident): move any staged pak that is
+ *  NOT provably current out of the boot-mount stage dir before soul launches
+ *  UE. "Provably current" = sidecar version matches the manifest AND the
+ *  staged bytes hash to the sidecar's recorded pakSha256. Everything else
+ *  (drifted version, legacy sha-less stamp, hash mismatch) is parked in
+ *  stale/ — UE boots without it, the store flow re-downloads it, and a
+ *  mid-session mount brings it back. A missing paid character that arrives a
+ *  minute later beats a wedged first launch every time. */
+export async function quarantineStalePaks(
+  manifestVersions: Record<string, string | undefined>,
+): Promise<string[]> {
+  const parked: string[] = [];
+  try {
+    const dir = characterPaksStageDir();
+    if (!fs.existsSync(dir)) return parked;
+    const staleDir = path.join(dir, 'stale');
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.toLowerCase().endsWith('.pak')) continue;
+      const id = f.replace(/\.pak$/i, '');
+      const want = manifestVersions[id];
+      if (!want) continue; // not a manifest-managed pak; leave it alone
+      let ok = false;
+      try {
+        const raw = fs.readFileSync(pakVersionFile(id), 'utf8').trim();
+        if (raw.startsWith('{')) {
+          const meta = JSON.parse(raw) as { version?: string; pakSha256?: string };
+          ok = meta.version === want
+            && !!meta.pakSha256
+            && (await sha256File(path.join(dir, f))) === meta.pakSha256;
+        }
+        // Legacy plain-string sidecars are never ok: no byte proof.
+      } catch { ok = false; }
+      if (!ok) {
+        fs.mkdirSync(staleDir, { recursive: true });
+        fs.renameSync(path.join(dir, f), path.join(staleDir, f));
+        try { fs.renameSync(pakVersionFile(id), path.join(staleDir, `${id}.version`)); } catch { /* ok */ }
+        // Also evict the UE-container copy: run_soul stages from THIS dir,
+        // but a previous session's copy inside the sandbox container would
+        // still get mounted by UE at boot, which is the exact wedge we are
+        // preventing.
+        try { fs.unlinkSync(path.join(ueContainerPaksDir(), f)); } catch { /* none */ }
+        parked.push(id);
+        console.warn(`[pak] quarantined stale/unverified pak for '${id}' (want ${want}) — will re-download`);
+      }
+    }
+    // Prune old quarantine. Parked paks exist for post-incident debugging and
+    // as a re-mount source; after 30 days they are dead weight (~150MB each)
+    // that no one returns to, and stale/ otherwise grows forever.
+    try {
+      if (fs.existsSync(staleDir)) {
+        const cutoff = Date.now() - 30 * 24 * 3600 * 1000;
+        for (const f of fs.readdirSync(staleDir)) {
+          const p = path.join(staleDir, f);
+          try {
+            if (fs.statSync(p).mtimeMs < cutoff) fs.rmSync(p, { recursive: true, force: true });
+          } catch { /* skip entry */ }
+        }
+      }
+    } catch { /* best effort */ }
+  } catch (err) {
+    console.warn(`[pak] quarantine pass failed: ${(err as Error).message}`);
+  }
+  return parked;
 }
 
 export async function downloadAndExtractCharacterPak(
@@ -1156,11 +1242,20 @@ export async function downloadAndExtractCharacterPak(
   fs.mkdirSync(stageDir, { recursive: true });
   const stagedPak = path.join(stageDir, stagedName);
   fs.copyFileSync(srcPak, stagedPak);
-  // Stamp the staged version so a later provisioning pass can detect drift.
-  // Written AFTER the copy so a crash mid-copy leaves no false "current" mark.
+  // Stamp the staged version AND the staged pak's own sha256 so a later
+  // provisioning pass can detect drift or byte/stamp divergence. Written
+  // AFTER the copy so a crash mid-copy leaves no false "current" mark.
+  // The sha guard exists because of the 1.1.5 first-launch incident
+  // (2026-08-05): stale June pak bytes ended up stamped with the new
+  // version, UE boot-mounted them against a newer base build, and the app
+  // wedged on "getting Goblin ready". A version string alone cannot catch
+  // bytes-vs-stamp divergence; hashing the staged file can, always.
   try {
-    if (asset.version) fs.writeFileSync(pakVersionFile(characterId), asset.version);
-    else { try { fs.unlinkSync(pakVersionFile(characterId)); } catch { /* none */ } }
+    if (asset.version) {
+      const stagedSha = await sha256File(stagedPak);
+      fs.writeFileSync(pakVersionFile(characterId),
+        JSON.stringify({ version: asset.version, pakSha256: stagedSha }));
+    } else { try { fs.unlinkSync(pakVersionFile(characterId)); } catch { /* none */ } }
   } catch { /* non-fatal: worst case it re-downloads next launch */ }
 
   // (2) Mid-session mount path — the renderer sends MountCharacterPak(<this>)
@@ -1189,7 +1284,13 @@ export async function downloadAndExtractCharacterPak(
     containerPak = stagedPak;
   }
 
-  return { extractDir: destDir, stagedPak, containerPak };
+  // The extract dir was only a staging area: the canonical pak now lives in
+  // character-paks/ (plus the container copy). Historically this dir was left
+  // behind forever, silently duplicating every installed character on disk
+  // (~150MB each). Nothing reads it after this point.
+  try { fs.rmSync(destDir, { recursive: true, force: true }); } catch { /* best effort */ }
+
+  return { extractDir: stageDir, stagedPak, containerPak };
 }
 
 // ----------------------------------------------------------------------
@@ -1204,7 +1305,9 @@ export async function downloadAndExtractCharacterPak(
 //   supertonic -> <SOUL_DATA>/supertonic/voices/<id>.json
 //   kokoro     -> <SOUL_DATA>/kokoro/voices/<id>_kokoro.safetensors
 // ----------------------------------------------------------------------
-function soulVoicesDir(engine: 'supertonic' | 'kokoro'): string {
+type VoiceEngine = 'supertonic' | 'kokoro' | 'pocket';
+
+function soulVoicesDir(engine: VoiceEngine): string {
   // getSoulDataDir() resolves SOUL_DATA_DIR exactly like run_soul, so this lands
   // where soul reads in BOTH packaged (<runtime>/data) and dev. On Windows dev,
   // getSoulDataDir() -> resolveSoulScript().cwd/data, and resolveSoulScript
@@ -1216,16 +1319,27 @@ function soulVoicesDir(engine: 'supertonic' | 'kokoro'): string {
 /** Expected on-disk voice filenames for a character, by engine. Kept in lockstep
  *  with src/characters/<id>.ts (supertonic stem `<id>`, kokoro stem `<id>_kokoro`)
  *  and the store Worker's /voice key layout. */
-function voiceFileNames(characterId: string): { supertonic: string; kokoro: string } {
+function voiceFileNames(characterId: string): Record<VoiceEngine, string> {
   assertSafeCharacterId(characterId);
-  return { supertonic: `${characterId}.json`, kokoro: `${characterId}_kokoro.safetensors` };
+  return {
+    supertonic: `${characterId}.json`,
+    kokoro: `${characterId}_kokoro.safetensors`,
+    // Pocket's per-character file is the MLX conditioning embedding
+    // (`{audio_prompt: tensor}`), ~1.1 MB, which pocket_runtime loads as its
+    // tier-1 voice. The R2 object is `<id>_pocket.safetensors` so it cannot
+    // collide with kokoro's key; on disk it is `<id>.safetensors` because
+    // pocket_runtime looks it up by bare voice name.
+    pocket: `${characterId}.safetensors`,
+  };
 }
 
 /** Which of a character's voice files are already present on disk (non-empty).
  *  Lets the renderer skip a gated fetch when nothing is missing. */
-export function characterVoicesPresent(characterId: string): { supertonic: boolean; kokoro: boolean } {
+export function characterVoicesPresent(
+  characterId: string,
+): Record<VoiceEngine, boolean> {
   const names = voiceFileNames(characterId);
-  const ok = (engine: 'supertonic' | 'kokoro', name: string): boolean => {
+  const ok = (engine: VoiceEngine, name: string): boolean => {
     try {
       const st = fs.statSync(path.join(soulVoicesDir(engine), name));
       return st.isFile() && st.size > 0;
@@ -1234,11 +1348,12 @@ export function characterVoicesPresent(characterId: string): { supertonic: boole
   return {
     supertonic: ok('supertonic', names.supertonic),
     kokoro: ok('kokoro', names.kokoro),
+    pocket: ok('pocket', names.pocket),
   };
 }
 
 export interface VoiceDownloadFile {
-  kind: 'supertonic' | 'kokoro';
+  kind: VoiceEngine;
   filename: string;
   url: string;
 }
@@ -1256,10 +1371,10 @@ export async function downloadCharacterVoices(
   const names = voiceFileNames(characterId);
   let written = 0;
   for (const f of files) {
-    if (f.kind !== 'supertonic' && f.kind !== 'kokoro') continue;
+    if (f.kind !== 'supertonic' && f.kind !== 'kokoro' && f.kind !== 'pocket') continue;
     // Force the destination name from the trusted id, never the server-supplied
     // filename, so a rogue presign response can't write outside the voices dir.
-    const destName = f.kind === 'supertonic' ? names.supertonic : names.kokoro;
+    const destName = names[f.kind];
     const dir = soulVoicesDir(f.kind);
     fs.mkdirSync(dir, { recursive: true });
     const dest = path.join(dir, destName);

@@ -19,6 +19,11 @@ import * as path from 'node:path';
 const UE_CMD = '/Users/Shared/Epic Games/UE_5.8/Engine/Binaries/Mac/UnrealEditor-Cmd';
 const WORKER_UPROJECT = '/Users/foton/Documents/Unreal Projects/UnclawCharWorker/UnclawCharWorker.uproject';
 const JOB_SCRIPT = '/Users/foton/Documents/Unreal Projects/UnclawCharWorker/Scripts/run_identity_job.py';
+/** Shared, identity-independent vertex table for the DNA-native apply path.
+ *  DEV path like the rest of this file; the packaged app ships it via
+ *  runtimeAssets instead of producing it. */
+const FACE_TABLE_SRC =
+  '/Users/foton/Documents/Unreal Projects/AudioTestProject02_58/RuntimeData/base_face.udvt';
 const P1_DIR = '/Users/foton/Documents/Unclaw-Mac/modal-mh/p1';
 const TAKE_SCRIPT = `${P1_DIR}/iphone_take.py`;
 const TAKE_PYTHON = `${P1_DIR}/venv/bin/python`;
@@ -51,6 +56,10 @@ export interface IdentityInferenceResult {
   dnaPath?: string;
   blobPath?: string;
   baseColorPath?: string;
+  /** UJNT joint sidecar (eye/jaw bind placement) for the DNA-native path. */
+  jointsPath?: string;
+  /** base_face.udvt, staged beside the .dna. */
+  tablePath?: string;
   /** Vision-picked default grooming (hair/brow/lash catalog indices). */
   grooming?: GroomPick;
   error?: string;
@@ -185,7 +194,7 @@ async function pickGrooming(win: BrowserWindow | null, g: GroomArgs): Promise<Gr
 }
 
 /** The sandboxed UE container's Saved dir (macOS dev + packaged both use it). */
-function ueContainerSavedDir(): string {
+export function ueContainerSavedDir(): string {
   return path.join(
     app.getPath('home'),
     'Library/Containers/com.YourCompany.AudioTestProject02/Data/Library',
@@ -266,8 +275,29 @@ async function runUEJobAndStage(
   const blobPath = path.join(stageDir, 'identity.ulmb');
   fs.copyFileSync(dnaSrc, dnaPath);
   fs.copyFileSync(blobSrc, blobPath);
+
+  // DNA-native (v2) companions, both optional so this never breaks the v1 blob
+  // path. The joint sidecar carries eye/jaw placement the .dna cannot express
+  // portably; base_face.udvt is the shared, identity-independent vertex table.
+  // Both are staged BESIDE identity.dna because ResolveIdentityTablePath checks
+  // the .dna's own directory first, so no descriptor field is required for it.
+  let jointsPath: string | undefined;
+  const ujntSrc = path.join(workDir, 'identity.ujnt');
+  if (fs.existsSync(ujntSrc)) {
+    jointsPath = path.join(stageDir, 'identity.ujnt');
+    fs.copyFileSync(ujntSrc, jointsPath);
+  } else {
+    progress(win, 'done', 'no identity.ujnt from the UE job (v1 blob path only)');
+  }
+
+  let tablePath: string | undefined;
+  if (fs.existsSync(FACE_TABLE_SRC)) {
+    tablePath = path.join(stageDir, path.basename(FACE_TABLE_SRC));
+    fs.copyFileSync(FACE_TABLE_SRC, tablePath);
+  }
+
   progress(win, 'done', `artifacts staged at ${stageDir}`);
-  return { ok: true, dnaPath, blobPath };
+  return { ok: true, dnaPath, blobPath, jointsPath, tablePath };
 }
 
 /** Photo-only tier: any flat JPEG/PNG, depth synthesized by the ML stack

@@ -55,6 +55,10 @@ function getSession(): Promise<ort.InferenceSession> {
       executionProviders: ['wasm'],
       graphOptimizationLevel: 'all',
     });
+    // A cached REJECTION would make every later mic toggle re-await the
+    // same failed load ("tap the mic to try again" could never succeed
+    // until an app reload). Clear on failure so the next toggle retries.
+    sessionPromise.catch(() => { sessionPromise = null; });
   }
   return sessionPromise;
 }

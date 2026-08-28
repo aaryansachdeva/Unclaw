@@ -13,6 +13,9 @@ export interface CharacterVoices {
   supertonic: string;
   /** Kokoro custom-voice stem -> data/kokoro/voices/<name>.pt */
   kokoro: string;
+  /** Pocket-TTS clone stem -> data/pocket/refs/<name>.wav (state cached
+   *  as data/pocket/voices/<name>.safetensors on first use). */
+  pocket: string;
 }
 
 export interface CharacterProfile {

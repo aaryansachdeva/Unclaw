@@ -29,7 +29,7 @@ import type { WardrobeSettings, ClothingColor } from '../services/userSettings';
 import { ColorPickerPanel, hexToRgb01, round3 } from './ColorPickerPanel';
 import { LightingDial } from './LightingDial';
 import {
-  ValueSlider, ACCENT_COLORS, CLOTHING_COLORS, BG_COLORS,
+  ValueSlider, ACCENT_COLORS, CLOTHING_COLORS, BG_COLORS, HAIR_COLORS, EYE_COLORS,
   LIGHT_INTENSITY_MIN, LIGHT_INTENSITY_MAX, LIGHT_INTENSITY_DEFAULT,
   BG_GLOW_MIN, BG_GLOW_MAX, BG_GLOW_DEFAULT, BackdropStylePicker,
 } from './CustomizationOverlay';
@@ -69,8 +69,10 @@ const FRAME = 52;
 const FRAME_SELECTED = 1.22;
 
 /** Per-pane bar height. The bar animates between these. */
-function barHeight(pane: Pane): number {
-  if (pane === 'body') return 182;
+function barHeight(pane: Pane, unified = false): number {
+  // Unified exposes eight levers plus a tab bar, so it needs real height; the
+  // preset two-lever pane stays compact.
+  if (pane === 'body') return unified ? 300 : 182;
   // Environment holds light + backdrop (+ style) side by side.
   if (pane === 'environment') return 200;
   // Effects is a reel + a single name/strength row (no blurb).
@@ -83,6 +85,14 @@ interface CustomWardrobeProps {
    *  Selects which wardrobe surface to render: full catalog for custom
    *  builds, the restricted per-character set for the base six. */
   agentId?: string | null;
+  /** Generate ANOTHER skin. Resolves true on success. Unified only. */
+  onRegenSkin?: () => Promise<boolean>;
+  /** Every skin generated for this character, oldest first. */
+  skins?: Array<{ path: string; label: string }>;
+  /** Which skin is currently on the character. */
+  activeSkin?: string | null;
+  /** Switch to a previously generated skin. */
+  onPickSkin?: (path: string) => void;
   initial?: WardrobeSettings | null;
   onEmit: (payload: Record<string, unknown>) => void;
   onSave: (settings: WardrobeSettings) => void;
@@ -104,7 +114,7 @@ interface CustomWardrobeProps {
   onRenameInstance?: (name: string) => void;
 }
 
-export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onEffect, onCloseUpChange, bgMode, onBgMode, instanceName, onRenameInstance }: CustomWardrobeProps) {
+export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onEffect, onCloseUpChange, bgMode, onBgMode, instanceName, onRenameInstance, onRegenSkin, skins, activeSkin, onPickSkin }: CustomWardrobeProps) {
   // The wardrobe surface for THIS character: which categories exist, their
   // items (per-character hair, shared/subset clothing), whether body blends
   // apply. Memoized on agentId so a switch mid-session re-resolves.
@@ -125,12 +135,25 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     if (!panes.includes(pane)) setPane(panes[0] ?? 'hair');
   }, [panes, pane]);
 
+  // Declared above the framing effect on purpose: that effect lists tuneTab in
+  // its dependency array, which is evaluated during render, so a later const
+  // would be a temporal dead zone at runtime even though tsc stays quiet.
+  const [tuneTab, setTuneTab] = useState<'body' | 'face' | 'colour'>('body');
+
   // Tell App whether the active pane is a face-region edit so it can frame the
   // camera close (hair / eyebrow / eyelash) vs pull back to the whole figure
-  // for clothing / body / environment. Fires on mount + every pane change.
+  // for clothing / body / environment.
+  //
+  // The unified Body pane is three different jobs behind one pane, so it cannot
+  // pick a framing from `pane` alone: shaping the BODY wants the whole figure,
+  // while the Face and Colour tabs are edits you can only judge on the face.
+  // Fires on mount, on pane change, and on tab change.
   useEffect(() => {
-    onCloseUpChange?.(pane === 'hair' || pane === 'eyebrow' || pane === 'eyelash');
-  }, [pane, onCloseUpChange]);
+    const faceTab = pane === 'body' && isUnifiedHost(agentId) && tuneTab !== 'body';
+    onCloseUpChange?.(
+      pane === 'hair' || pane === 'eyebrow' || pane === 'eyelash' || faceTab,
+    );
+  }, [pane, tuneTab, agentId, onCloseUpChange]);
 
   const [hair,    setHair]    = useState(() => clampAgentIndex(wardrobe.items.hair,    initial?.hairIndex));
   const [eyebrow, setEyebrow] = useState(() => clampAgentIndex(wardrobe.items.eyebrow, initial?.browIndex));
@@ -148,6 +171,13 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   // Bipolar body axes. One signed lever per axis; the pair is derived at emit.
   const [heightBlend, setHeightBlend] = useState(() => clamp(initial?.heightBlend, -1, 1, 0));
   const [weightBlend, setWeightBlend] = useState(() => clamp(initial?.weightBlend, -1, 1, 0));
+  // Unified characters are ONE body driven by 16 signed axes plus a photo-read
+  // hair and eye colour. Preset characters have none of that, so this whole
+  // surface is gated rather than rendered empty for everyone else.
+  const [axes, setAxes] = useState<Record<string, number>>(() => ({ ...(initial?.blendAxes ?? {}) }));
+  const [hairColor, setHairColor] = useState(() => initial?.hairColor);
+  const [eyeColor, setEyeColor] = useState(() => initial?.eyeColor);
+  const [regenSkin, setRegenSkin] = useState<'idle' | 'busy' | 'failed'>('idle');
 
   const [lightingAngle, setLightingAngle] = useState(() => clampAngle(initial?.lightingAngle ?? 0));
   const [lightIntensity, setLightIntensity] = useState(() => clamp(initial?.lightIntensity, LIGHT_INTENSITY_MIN, LIGHT_INTENSITY_MAX, LIGHT_INTENSITY_DEFAULT));
@@ -297,6 +327,48 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     });
   }, [onEmit]);
 
+  // setBlendsUnified: the full 16-axis snapshot, every time.
+  //
+  // A full snapshot rather than a delta because the UE side applies what it is
+  // given: omit an axis and it reads 0 and silently resets. Same reason the
+  // four-field setBlends above sends all four.
+  const emitAxes = useCallback((next: Record<string, number>) => {
+    const clean: Record<string, number> = {};
+    for (const [k, v] of Object.entries(next)) {
+      if (Number.isFinite(v) && v !== 0) clean[k] = round3(v);
+    }
+    onEmit({ EventType: 'setBlendsUnified', axes: clean });
+  }, [onEmit]);
+
+  const setAxis = useCallback((key: string, value: number) => {
+    setAxes((prev) => {
+      const next = { ...prev, [key]: value };
+      touch('blendAxes');
+      emitAxes(next);
+      return next;
+    });
+  }, [emitAxes]);
+
+  const pickHair = useCallback((i: number) => {
+    const h = HAIR_COLORS[i];
+    const next = { preset: i, melanin: h.melanin, redness: h.redness, dyeHex: h.dyeHex };
+    setHairColor(next);
+    touch('hairColor');
+    onEmit({
+      EventType: 'changeHairColor',
+      melanin: h.melanin,
+      redness: h.redness,
+      // Hair and brows only: real lashes stay dark whatever the hair does.
+      targets: ['hair', 'brows'],
+    });
+  }, [onEmit]);
+
+  const pickEyes = useCallback((iris: string) => {
+    setEyeColor({ iris });
+    touch('eyeColor');
+    onEmit({ EventType: 'changeEyeColor', iris });
+  }, [onEmit]);
+
   const accentRgb = useCallback(
     () => (accentHex ? hexToRgb01(accentHex) : (ACCENT_COLORS[accentIndex] ?? ACCENT_COLORS[0])),
     [accentHex, accentIndex]);
@@ -318,6 +390,9 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     if (touched.has('eyelash')) out.lashIndex   = eyelash;
     if (touched.has('heightBlend')) out.heightBlend = heightBlend;
     if (touched.has('weightBlend')) out.weightBlend = weightBlend;
+    if (touched.has('blendAxes')) out.blendAxes = axes;
+    if (touched.has('hairColor') && hairColor) out.hairColor = hairColor;
+    if (touched.has('eyeColor') && eyeColor) out.eyeColor = eyeColor;
     if (touched.has('lightingAngle'))  out.lightingAngle  = lightingAngle;
     if (touched.has('lightIntensity')) out.lightIntensity = lightIntensity;
     if (touched.has('accent')) {
@@ -341,6 +416,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     }
     onSave(out);
   }, [onSave, initial, top, bottom, shoes, hair, eyebrow, eyelash, heightBlend, weightBlend,
+      axes, hairColor, eyeColor,
       lightingAngle, lightIntensity,
       accentIndex, accentHex, bgIndex, bgHex, bgGlow, clothingColors,
       effectId, effectStrength]);
@@ -408,8 +484,8 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
         // tweens simultaneously with the y-slide, which reads as a jitter as the
         // bar comes up. Height still animates on later pane switches (animate
         // updates while mounted; initial only applies on first mount).
-        initial={{ y: 40, opacity: 0, height: barHeight(pane) }}
-        animate={{ y: 0, opacity: 1, height: barHeight(pane) }}
+        initial={{ y: 40, opacity: 0, height: barHeight(pane, isUnifiedHost(agentId)) }}
+        animate={{ y: 0, opacity: 1, height: barHeight(pane, isUnifiedHost(agentId)) }}
         transition={{ type: 'spring', stiffness: 460, damping: 42 }}
         style={{
           position: 'absolute',
@@ -535,6 +611,140 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
                   )}
                 </>
               ) : pane === 'body' ? (
+                isUnifiedHost(agentId) ? (
+                  // Unified: the full rig. Tabbed rather than a sixteen-lever
+                  // wall, because Body / Face / Colour is how people actually
+                  // think about changing a character, and a single scroll
+                  // trough of identical controls gets read by nobody.
+                  <div style={{
+                    flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column',
+                    gap: 10, padding: '2px 16px 12px',
+                  }}>
+                    <div style={{ display: 'flex', gap: 16, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                      {(['body', 'face', 'colour'] as const).map((t) => (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => setTuneTab(t)}
+                          style={{
+                            position: 'relative', background: 'none', border: 'none',
+                            padding: '0 0 6px', cursor: 'pointer',
+                            fontSize: 10, fontWeight: 600, letterSpacing: '0.14em',
+                            textTransform: 'uppercase',
+                            color: t === tuneTab ? 'var(--text-primary)' : 'var(--text-ghost)',
+                            transition: 'color 180ms ease-out',
+                          }}
+                        >
+                          {t === 'colour' ? 'Colour' : t}
+                          {t === tuneTab && (
+                            <span style={{
+                              position: 'absolute', left: 0, right: 0, bottom: -1,
+                              height: 1, background: 'var(--accent, #c44444)',
+                            }} />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{
+                      flex: 1, minHeight: 0, overflowY: 'auto',
+                      display: 'flex', flexDirection: 'column', gap: 14,
+                      paddingRight: 2,
+                    }}>
+                      {tuneTab === 'colour' ? (
+                        <>
+                          <SwatchRow
+                            label="Hair"
+                            items={HAIR_COLORS.map((h, i) => ({ key: String(i), hex: h.hex, name: h.label }))}
+                            activeKey={hairColor?.preset !== undefined ? String(hairColor.preset) : null}
+                            onPick={(k) => pickHair(Number(k))}
+                          />
+                          <SwatchRow
+                            label="Eyes"
+                            items={EYE_COLORS.map((e) => ({ key: e.iris, hex: e.hex, name: e.label }))}
+                            activeKey={eyeColor?.iris ?? null}
+                            onPick={pickEyes}
+                          />
+                          {/* The skin is a generative result, so it is the one
+                              part worth re-rolling. Re-running the whole chain
+                              for it costs a 3D credit, several minutes and a
+                              headless engine boot; this is seconds. */}
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            <span style={{
+                              fontSize: 10, fontWeight: 600, letterSpacing: '0.14em',
+                              textTransform: 'uppercase', color: 'var(--text-ghost)',
+                            }}>Skin</span>
+                            {(skins?.length ?? 0) > 1 && (
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                                {skins!.map((sk) => {
+                                  const on = sk.path === activeSkin;
+                                  return (
+                                    <button
+                                      key={sk.path}
+                                      type="button"
+                                      onClick={() => onPickSkin?.(sk.path)}
+                                      style={{
+                                        padding: '5px 10px',
+                                        borderRadius: 999,
+                                        background: on ? 'rgba(196,68,68,0.16)' : 'rgba(40,48,65,0.32)',
+                                        border: on
+                                          ? '1px solid rgba(196,68,68,0.55)'
+                                          : '1px solid rgba(255,255,255,0.10)',
+                                        color: on ? 'var(--text-primary)' : 'var(--text-secondary)',
+                                        fontSize: 11,
+                                        fontWeight: 500,
+                                        cursor: 'pointer',
+                                      }}
+                                    >
+                                      {sk.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              disabled={regenSkin === 'busy' || !onRegenSkin}
+                              onClick={async () => {
+                                if (!onRegenSkin) return;
+                                setRegenSkin('busy');
+                                const ok = await onRegenSkin();
+                                setRegenSkin(ok ? 'idle' : 'failed');
+                              }}
+                              style={{
+                                alignSelf: 'flex-start',
+                                padding: '7px 14px',
+                                borderRadius: 999,
+                                background: 'rgba(40, 48, 65, 0.38)',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                color: regenSkin === 'failed' ? 'var(--accent, #c44444)' : 'var(--text-primary)',
+                                fontSize: 11.5,
+                                fontWeight: 500,
+                                cursor: regenSkin === 'busy' ? 'default' : 'pointer',
+                                opacity: regenSkin === 'busy' ? 0.6 : 1,
+                                transition: 'opacity 180ms ease-out',
+                              }}
+                            >
+                              {regenSkin === 'busy' ? 'Painting new skin'
+                                : regenSkin === 'failed' ? 'Failed, try again'
+                                : 'Generate new skin'}
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        (tuneTab === 'body' ? UNIFIED_BODY_AXES : UNIFIED_FACE_AXES).map((a) => (
+                          <Lever
+                            key={a.key}
+                            label={a.label}
+                            plus={a.plus}
+                            minus={a.minus}
+                            value={axes[a.key] ?? 0}
+                            onChange={(v) => setAxis(a.key, v)}
+                          />
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ) : (
                 <div style={{
                   flex: 1, display: 'flex', flexDirection: 'column',
                   alignItems: 'center', justifyContent: 'center',
@@ -555,6 +765,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
                     onChange={(v) => { setWeightBlend(v); touch('weightBlend'); emitBlends(heightBlend, v); }}
                   />
                 </div>
+                )
               ) : pane === 'environment' ? (
                 // Environment = Light | Backdrop, side by side (their own divider).
                 <div style={{
@@ -966,6 +1177,84 @@ function EffectsPane({ effectId, strength, onPick, onStrength }: {
 
 const LEVER_W = 150;
 const DETENT = 0.05;   // snap-to-zero window; the lever has a real center click
+
+/** Unified hosts get the extended rig. Kept as its own test rather than reusing
+ *  isCustomCharacter: grace_custom is a "custom character" but has no blend rig,
+ *  so the two questions are genuinely different. */
+function isUnifiedHost(agentId?: string | null): boolean {
+  return !!agentId && (agentId === 'unified' || agentId.startsWith('unified'));
+}
+
+// The 16 axes, named the way a person would describe the change rather than the
+// way the rig does. Poles are labelled because a bipolar lever with no ends is
+// a mystery: "Jawline" alone does not tell you which way is softer.
+const UNIFIED_BODY_AXES = [
+  { key: 'mascFem',  label: 'Build',     minus: 'Masc',   plus: 'Fem' },
+  { key: 'height',   label: 'Height',    minus: 'Short',  plus: 'Tall' },
+  { key: 'fat',      label: 'Weight',    minus: 'Slim',   plus: 'Full' },
+  { key: 'musc',     label: 'Muscle',    minus: 'Soft',   plus: 'Toned' },
+  { key: 'shoulder', label: 'Shoulders', minus: 'Narrow', plus: 'Broad' },
+  { key: 'chest',    label: 'Chest',     minus: 'Flat',   plus: 'Full' },
+  { key: 'waistHip', label: 'Waist',     minus: 'Straight', plus: 'Curved' },
+  { key: 'neck',     label: 'Neck',      minus: 'Thin',   plus: 'Thick' },
+] as const;
+
+const UNIFIED_FACE_AXES = [
+  { key: 'jawline',   label: 'Jawline',   minus: 'Soft',   plus: 'Sharp' },
+  { key: 'chin',      label: 'Chin',      minus: 'Receded', plus: 'Forward' },
+  { key: 'cheek',     label: 'Cheeks',    minus: 'Hollow', plus: 'Full' },
+  { key: 'nose',      label: 'Nose size', minus: 'Small',  plus: 'Large' },
+  { key: 'noseShape', label: 'Nose shape', minus: 'Narrow', plus: 'Wide' },
+  { key: 'mouthSize', label: 'Mouth',     minus: 'Narrow', plus: 'Wide' },
+  { key: 'lip',       label: 'Lips',      minus: 'Thin',   plus: 'Full' },
+  { key: 'eyeSize',   label: 'Eyes',      minus: 'Small',  plus: 'Large' },
+] as const;
+
+/** Colour row. Same swatch vocabulary as the clothing colours so the surface has
+ *  one way of picking a colour, not three. */
+function SwatchRow({ label, items, activeKey, onPick }: {
+  label: string;
+  items: Array<{ key: string; hex: string; name: string }>;
+  activeKey: string | null;
+  onPick: (key: string) => void;
+}) {
+  const active = items.find((i) => i.key === activeKey);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+        <span style={{
+          fontSize: 10, fontWeight: 600, letterSpacing: '0.14em',
+          textTransform: 'uppercase', color: 'var(--text-ghost)',
+        }}>{label}</span>
+        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+          {active?.name ?? 'As read'}
+        </span>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {items.map((it) => {
+          const on = it.key === activeKey;
+          return (
+            <button
+              key={it.key}
+              type="button"
+              aria-label={it.name}
+              onClick={() => onPick(it.key)}
+              style={{
+                width: 18, height: 18, borderRadius: '50%', padding: 0,
+                background: it.hex,
+                border: on ? '1.5px solid rgba(255,255,255,0.92)' : '1px solid rgba(255,255,255,0.14)',
+                boxShadow: on ? '0 0 0 3px rgba(0,0,0,0.45)' : 'none',
+                transform: on ? 'scale(1.14)' : 'scale(1)',
+                transition: 'transform 160ms cubic-bezier(0.16,1,0.3,1)',
+                cursor: 'pointer',
+              }}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 function Lever({ label, plus, minus, value, onChange }: {
   label: string;

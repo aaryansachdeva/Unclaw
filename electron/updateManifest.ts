@@ -24,10 +24,9 @@
 //      /mac/soul/soul-2026.0526.01.tar.gz)
 //   2. Write a fresh latest.json with the new entry's URL/SHA/size/version
 //      AND a top-level `manifestVersion` bump (cache-bust signal)
-//   3. PUT that latest.json to R2, Cloudflare's cache invalidates because
-//      we also rotate the query-string `?v=<manifestVersion>` that the
-//      updater appends on fetch (belt-and-suspenders to defeat any edge
-//      caching that ignored our cache-control headers)
+//   3. PUT that latest.json to R2. The updater defeats edge caching by
+//      appending `?t=<Date.now()>` on every fetch (updateCoordinator), so
+//      manifestVersion is a human/audit signal, not the cache-buster.
 //
 // ----------------------------------------------------------------------
 // Categories

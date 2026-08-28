@@ -207,7 +207,7 @@ async function fetchRemoteManifest(window: BrowserWindow | null): Promise<Update
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         const followUrl = res.headers.location;
-        https.get(followUrl, (res2) => {
+        const follow = https.get(followUrl, (res2) => {
           if (res2.statusCode !== 200) {
             res2.resume();
             reject(new Error(`HTTP ${res2.statusCode} fetching manifest (after redirect)`));
@@ -218,6 +218,10 @@ async function fetchRemoteManifest(window: BrowserWindow | null): Promise<Update
           res2.on('end', () => resolve(buf));
           res2.on('error', reject);
         }).on('error', reject);
+        // Same timeout the first leg has. Without it a stalled redirect
+        // target left the promise unsettled forever: inFlight stayed true
+        // and the update overlay never dismissed for the whole session.
+        follow.setTimeout(15_000, () => follow.destroy(new Error('manifest fetch timeout (after redirect)')));
         return;
       }
       if (res.statusCode !== 200) {

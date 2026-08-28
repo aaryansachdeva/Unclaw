@@ -538,7 +538,10 @@ export type TtsProviderId =
   | 'elevenlabs'
   | 'kokoro'
   | 'supertonic'
-  | 'qwen3';
+  | 'qwen3'
+  /** Kyutai Pocket-TTS: local 100M CPU-only clone engine; voices are
+   *  per-character reference wavs in soul's data/pocket/refs/. No key. */
+  | 'pocket';
 
 /** Sub-mode when `tts_provider === 'kokoro'`. `recommended` = soul
  *  downloads + runs Kokoro locally; `custom` = user has Kokoro
@@ -724,6 +727,16 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
  *  user instead of trying to dispatch to a backend soul doesn't support. */
 function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
   const merged: ApiKeysProfile = { ...DEFAULT_API_KEYS, ...parsed };
+  const before = JSON.stringify(merged);
+  // A gated-off engine must be migrated OFF, not just hidden from the
+  // dropdown. 1.1.8 shipped Pocket selectable; 1.1.9 gates it again because
+  // the generated audio is bad. Anyone who picked it still has it saved and
+  // would keep hearing the bad voice with no way to see why, since the option
+  // that explains their setting is no longer in the list. Supertonic is the
+  // like-for-like replacement: local, no key, real cloned per-character voices.
+  if (!POCKET_TTS_ENABLED && merged.tts_provider === 'pocket') {
+    merged.tts_provider = 'supertonic';
+  }
   if (merged.llm_provider && !VALID_PROVIDER_IDS.has(merged.llm_provider)) {
     // Stale provider — drop the {provider, model, key} triple together
     // so the user gets prompted to pick from the new catalog.
@@ -731,8 +744,12 @@ function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
     merged.llm_model = null;
     merged.llm_api_key = null;
   }
+  migrationChangedProfile = JSON.stringify(merged) !== before;
   return merged;
 }
+
+/** Set by the most recent migrateApiKeys call. Read immediately after. */
+let migrationChangedProfile = false;
 
 
 /** Read the persisted blob via the Electron preload. Returns the
@@ -744,7 +761,17 @@ export async function fetchApiKeys(): Promise<ApiKeysProfile> {
     const raw = await api.apiKeysGet();
     if (!raw) return { ...DEFAULT_API_KEYS };
     const parsed = JSON.parse(raw) as Partial<ApiKeysProfile>;
-    return migrateApiKeys(parsed);
+    const migrated = migrateApiKeys(parsed);
+    if (migrationChangedProfile) {
+      // Write the migration back. Correcting it only in memory fixes the
+      // renderer, which sends its own copy with every request, and leaves
+      // apiKeys.bin stale for everything that reads the FILE — which is how
+      // soul serves the phone. That is how a gated-off TTS engine kept
+      // speaking on mobile long after it was removed from the desktop.
+      // Fire-and-forget: a failed write just means we migrate again next boot.
+      void saveApiKeys(migrated);
+    }
+    return migrated;
   } catch (err) {
     console.warn('[apiKeys] fetch failed, using defaults', err);
     return { ...DEFAULT_API_KEYS };
@@ -813,6 +840,11 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
   } else if (profile.tts_provider === 'qwen3') {
     // Local, keyless. Installedness is validated by /validate_keys
     // (soul checks the MLX weights on disk), not by a field here.
+  } else if (profile.tts_provider === 'pocket') {
+    // Local, keyless. The model auto-downloads from HF on first synth
+    // and the per-character voice states ship as cached safetensors.
+    // (Missing from this chain when the engine landed 2026-08-16, so
+    // selecting Pocket demanded an ElevenLabs key and blocked Save.)
   } else {
     if (!profile.elevenlabs_api_key) missing.push('ElevenLabs API key');
   }
@@ -883,6 +915,7 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
 // error during onboarding instead of as a 502 on first chat.
 
 import { getSoulBaseUrl } from './soulBase';
+import { POCKET_TTS_ENABLED } from '../features';
 
 export interface KeyValidationOutcome {
   ok: boolean;

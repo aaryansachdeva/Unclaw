@@ -515,6 +515,17 @@ function spawnSoul(window: BrowserWindow): boolean {
     // memory, found via MemReport + vmmap "owned unmapped (graphics)").
     // Boot small; the floor becomes the frontend's real streamed size.
     UNCLAW_UE_RES_AUTO: process.env.UNCLAW_UE_RES_AUTO ?? '0',
+    // Spawn UE via launchd (Mach service ownership) whenever the app runs
+    // in direct-surface mode. The direct IOSurface path REQUIRES the UE
+    // process to be launchd-spawned to claim the bootstrap name; without
+    // this, an app-owned soul spawned UE as a plain child, the XPC
+    // listener died with "Connection invalid", and every app-owned session
+    // silently lost the direct path (found 2026-08-17 when the character
+    // stopped appearing after soul respawns — manual dev launches had
+    // always exported this by hand, masking the gap).
+    ...(process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE
+      ? { UNCLAW_UE_LAUNCHD: process.env.UNCLAW_UE_LAUNCHD ?? '1' }
+      : {}),
     // Flat dir of owned character paks. run_soul.sh stages any *.pak here into
     // the UE sandbox container's Saved/Paks at launch so purchased characters
     // boot-mount before BeginPlay. run_soul guards on the dir existing, so this
@@ -671,7 +682,27 @@ function spawnSoul(window: BrowserWindow): boolean {
   soulProc.stdout?.on('data', onChunk('stdout'));
   soulProc.stderr?.on('data', onChunk('stderr'));
 
+  // Identity capture for the exit handler. restartSoul() SIGTERMs the old
+  // group and spawns a fresh soul after a short grace, but the OLD process
+  // can take seconds to die (its shutdown waits for UE). When its exit
+  // finally fired, this handler used to clobber module state that now
+  // belongs to the NEW child: nulling soulProc (orphaning the new soul from
+  // stopSoul), killing the new boot's health poll, resetting readiness, and
+  // — with intentionalStop already reset — spawning a SECOND soul via the
+  // respawn branch. A late exit from a superseded child must only close its
+  // own log stream and leave the world alone.
+  const thisChild = soulProc;
   soulProc.on('exit', (code, signal) => {
+    if (soulProc !== null && soulProc !== thisChild) {
+      log(window, 'meta',
+        `[unclaw] superseded soul (pid=${thisChild.pid}) exited late `
+        + `(code=${code} signal=${signal}); current soul is unaffected`);
+      if (logFileStream) {
+        try { logFileStream.end(); } catch { /* ok */ }
+        logFileStream = null;
+      }
+      return;
+    }
     log(window, 'meta', `[unclaw] soul exited (code=${code} signal=${signal})`);
     if (logFileStream) {
       try {
@@ -1085,4 +1116,106 @@ export function stopSoul(): void {
   // process group via start_new_session=True so OUR killpg here
   // doesn't reach it). 10s gives the whole chain room to drain.
   setTimeout(() => killGroup('SIGKILL'), 10000);
+}
+
+/**
+ * Closing the window means the user is DONE: soul, the launchd-managed UE
+ * job, coturn, wilbur — everything goes, including a soul that was attached
+ * externally (the dev flow), which stopSoul() deliberately leaves alone.
+ * Added 2026-08-15 after closing the app repeatedly left soul + a
+ * "self-respawning" UE running (soul's supervisor respawns UE, so killing
+ * UE alone looked haunted; soul dies first here).
+ *
+ * The one guard that stays: if ANOTHER Unclaw instance is alive (packaged
+ * app + dev checkout side by side), its processes share every name pattern
+ * with ours, so we only take down our own child tree and the shared launchd
+ * job is left for the sibling. Bounded to ~1.6s so the close feels instant.
+ */
+export async function shutdownEverything(): Promise<void> {
+  stopSoul(); // owned child tree + intentionalStop latch, all platforms
+  if (IS_WINDOWS) return; // launchd/coturn are darwin concepts; taskkill /T covered the tree
+
+  // Every shell-out on the quit path is time-bounded. This function runs
+  // inside before-quit's preventDefault window, so anything that blocks here
+  // blocks the whole quit: the window is gone but the app sits in the Dock
+  // until Force Quit. `timeout` makes execFile SIGTERM the child and call
+  // back, so the promise always settles.
+  const psOutput = await new Promise<string>((resolve) => {
+    execFile('/bin/ps', ['-A', '-o', 'pid=,command='], { timeout: 2500 },
+      (err, stdout) => resolve(err ? '' : stdout));
+  });
+  if (!psOutput) return;
+
+  const foreignInstanceLive = psOutput.split('\n').some((line) => {
+    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m) return false;
+    const pid = parseInt(m[1], 10);
+    const cmd = m[2];
+    return pid !== process.pid &&
+      !cmd.includes('--type=') &&
+      (/Electron\.app\/Contents\/MacOS\/Electron(?:\s|$)/.test(cmd) ||
+        /\.app\/Contents\/MacOS\/Unclaw(?:\s|$)/.test(cmd));
+  });
+  if (foreignInstanceLive) return; // sibling owns lookalike processes; only our tree dies
+
+  // The launchd job is the authoritative kill for UE: it terminates the
+  // process AND unloads the job so nothing can resurrect it. AWAITED:
+  // fire-and-forget here raced app exit and left a loaded-but-dead job
+  // entry behind (harmless but untidy, seen 2026-08-17).
+  // getuid exists on every POSIX Node; the IS_WINDOWS return above is the
+  // runtime guard, the optional call is for the type-checker only.
+  // BOUNDED, and that bound is load-bearing: `launchctl bootout` does not
+  // return until the job is actually gone, and UE can take seconds to release
+  // Metal (or wedge outright). Unbounded, this await was the quit hang —
+  // window closed, app stuck in the Dock forever. On timeout we fall through
+  // to the SIGTERM/SIGKILL sweep below, which kills the same process by pid.
+  const uid = process.getuid?.();
+  if (uid !== undefined) {
+    await new Promise<void>((resolve) => {
+      execFile('/bin/launchctl',
+        ['bootout', `gui/${uid}/com.fotonlabs.unclaw.unreal`],
+        { timeout: 3000 },
+        () => resolve() /* "no such service" when UE is not up, fine */);
+    });
+  }
+
+  // Everything positively identifiable as ours, regardless of who spawned
+  // it. Dev UE bundles (AudioTestProject02*.app binaries) are included; the
+  // editor is NOT matched (UnrealEditor.app binary, project passed as an
+  // argument has no ".app" suffix without a slash after the name).
+  const patterns = [
+    /run_soul\.sh\b/,
+    /\bsoul\.cli\b/,
+    /\bsoul\.server\b/,
+    /\bwilbur\b/,
+    /Unclaw Character\.app/,
+    /AudioTestProject02[^/]*\.app/,
+    /coturn.*unclaw|unclaw.*coturn/i,
+  ];
+  const victims: number[] = [];
+  for (const line of psOutput.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = parseInt(m[1], 10);
+    if (pid === process.pid) continue;
+    if (patterns.some((re) => re.test(m[2]))) victims.push(pid);
+  }
+  for (const pid of victims) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+  }
+  if (victims.length) {
+    // Poll instead of sleeping the full grace period: in the normal case
+    // everything is gone in a couple of hundred ms, and the quit path should
+    // not spend 1.5s waiting to discover that. Only a straggler pays the cap.
+    const deadline = Date.now() + 1500;
+    const alive = () => victims.filter((pid) => {
+      try { process.kill(pid, 0); return true; } catch { return false; }
+    });
+    while (Date.now() < deadline && alive().length) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    for (const pid of alive()) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+    }
+  }
 }

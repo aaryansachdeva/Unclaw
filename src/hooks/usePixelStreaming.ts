@@ -59,24 +59,33 @@ export function usePixelStreaming({
         StartVideoMuted: false,
         HoveringMouse: true,
         WaitForStreamer: true,
-        MatchViewportRes: true,
+        // MatchViewportRes is OFF (2026-08-27): with it on, the SDK's
+        // VideoPlayer fires its stock callback (CSS pixels, no dpr, no
+        // alignment) on its own resize events. We drive resolution entirely
+        // ourselves below (ResizeObserver + 3s reconciler through
+        // applyTargetResolution), and the stock path kept escaping the
+        // override after reconnects, feeding UE unaligned sizes (695x750 in
+        // the 2026-08-27 log) that alternated with ours, one render-target
+        // + encoder rebuild per flip.
+        MatchViewportRes: false,
         // Offerer role is PLATFORM-SPECIFIC — get this wrong and the data
-        // channel ends up half-wired (browser→UE works, UE→browser responses
+        // channel ends up half-wired (browser->UE works, UE->browser responses
         // silently never arrive), which breaks every ack-gated init path
         // (wardrobe / lighting / clothing-color / installedCharacters).
         //
-        // macOS — our PixelStreaming2NativeMac plugin (1.0.8+) is
+        // macOS - our PixelStreaming2NativeMac plugin (1.0.8+) is
         //   browser-as-offerer: UE awaits the browser's offer in OnRemoteOffer
         //   and answers via AddTrack. Without BrowserSendOffer the two sides
         //   wait silently after `subscribe` and the stream never starts (WS
         //   connects, subscribe sent, then only pings; UE makes the peer +
         //   video track but never gets an SDP offer). Hit in 1.0.8 first-ship.
-        // Windows — stock PixelStreaming2 is UE-as-offerer (the default, and
-        //   what the working PC reference uses). UE creates the data channel
-        //   and the browser binds it via ondatachannel, fully bidirectional.
-        //   Forcing BrowserSendOffer here makes the browser create 'cirrus'
-        //   and offer, which stock PS2 (built to be the offerer) does NOT wire
-        //   for its own send direction → UE→browser responses are dropped.
+        // Windows/Linux - stock PixelStreaming2 is UE-as-offerer (the default,
+        //   and what the working PC reference uses). UE creates the data
+        //   channel and the browser binds it via ondatachannel, fully
+        //   bidirectional. Forcing BrowserSendOffer here makes the browser
+        //   create 'cirrus' and offer, which stock PS2 (built to be the
+        //   offerer) does NOT wire for its own send direction -> UE->browser
+        //   responses are dropped.
         BrowserSendOffer: window.electronAPI?.platform === 'darwin',
         ss: signalingUrl,
       },
@@ -168,53 +177,168 @@ export function usePixelStreaming({
     // (720x1280) for the whole session and the browser upscaled ~1.6x — a soft
     // avatar with no error anywhere. Observed 2026-08-04.
     const lastSentRes = { w: -1, h: -1 };
+    // Is the direct IOSurface path carrying the picture? When it is, Unreal's
+    // frames go straight out as surfaces and the encoder sits idle, so the
+    // <video> element stops updating and freezes at whatever size it last
+    // decoded. That makes it useless as evidence of what UE is rendering,
+    // which the closed-loop check below relies on. Tracked here rather than
+    // threaded down as a prop so the hook stays self-contained.
+    let directLive = false;
+    // Who owns Unreal's render resolution right now.
+    //
+    // When a phone holds the stream lease, IT is the viewport that matters —
+    // and it already drives resolution through the very same path we do: its
+    // WebRTC data channel carries `Resolution.Width/Height` to UE's input
+    // handler. So the desktop's job here is simply to stop sending, or the two
+    // fight and UE rebuilds its render target on every flip (the exact
+    // symptom seen 2026-08-11 when the SDK and our own driver disagreed).
+    let leaseRemote = document.documentElement.dataset.unclawLease === 'remote';
+    const applyDirectLive = (connected: boolean) => {
+      // A fresh attach means a fresh Unreal (the XPC listener dies with the
+      // process), which is back at its launch resolution however much we sent
+      // the old one. Drop the dedupe so the next tick re-sends. This is the
+      // direct-path stand-in for the <video>-intrinsic-size check below, which
+      // cannot see anything while the encoder is idle.
+      if (connected && !directLive) { lastSentRes.w = -1; lastSentRes.h = -1; }
+      directLive = connected;
+    };
+    const offDirectStatus = window.electronAPI?.directSurface?.onStatus?.((s) => {
+      applyDirectLive(s.connected);
+    });
+    // Second route via the preload's DOM mirror (see StreamView for why the
+    // bridge callback alone is not trusted): a stuck-false directLive here
+    // re-enables the <video>-intrinsic-size check against a frozen video and
+    // brings back the r.SetRes-every-3s flood.
+    const onDirectStatusEvent = () => {
+      const v = document.documentElement.dataset.unclawDirectLive;
+      if (v !== undefined) applyDirectLive(v === '1');
+      const wasRemote = leaseRemote;
+      leaseRemote = document.documentElement.dataset.unclawLease === 'remote';
+      // Reclaiming: the phone left UE at ITS resolution, so our dedupe is
+      // stale by definition. Drop it so the next tick re-asserts the
+      // desktop's size instead of deciding it already sent this.
+      if (wasRemote && !leaseRemote) { lastSentRes.w = -1; lastSentRes.h = -1; }
+    };
+    onDirectStatusEvent();
+    document.addEventListener('unclaw:direct-status', onDirectStatusEvent);
+    // CSS size in, resolution out, sent only when it actually changed. Both
+    // drivers below funnel through this so the cap, the quantize step and the
+    // dedupe can never drift apart between the WebRTC and direct paths.
+    const applyTargetResolution = (cssW: number, cssH: number) => {
+      // Lease gate, read LIVE from the DOM at send time. The cached
+      // `leaseRemote` flag has a race: on a renderer (re)connect the flag
+      // can still be stale-false when webRtcConnected's 500ms nudge and the
+      // playStream 1/2/3s nudges fire, so the desktop stomped the remote
+      // viewer's resolution with its own (panel asked 832x1600, stream
+      // flipped back to 1168x1536; same mechanism as the phone losing its
+      // resolution mid-call). The DOM mirror is announced on every load and
+      // cannot be stale here.
+      if (document.documentElement.dataset.unclawLease === 'remote') return;
+      const dpr = window.devicePixelRatio || 1;
+      let w = Math.round(cssW * dpr);
+      let h = Math.round(cssH * dpr);
+      const longest = Math.max(w, h);
+      // Cap, then quantize the longest side DOWN to a 128px step (above
+      // 1024). Every distinct resolution UE receives costs one realloc
+      // cycle of the backbuffer + capture + encoder chain, so snapping to
+      // steps makes most window resizes send nothing at all (the dedupe
+      // below eats the repeat). Worst-case cost is a <=127px downscale the
+      // video element upscales away, invisible at stream viewing sizes.
+      // Below 1024 the buffers are small enough that native size is fine.
+      let target = longest;
+      if (longest > MAX_RENDER_DIM) {
+        target = MAX_RENDER_DIM;
+      } else if (longest >= 1024) {
+        target = Math.floor(longest / 128) * 128;
+      }
+      if (target < longest) {
+        const s = target / longest;
+        w = Math.round(w * s);
+        h = Math.round(h * s);
+      }
+      // Align DOWN to a multiple of 16, not 2.
+      //
+      // 4:2:0 chroma only needs even dimensions, but Unreal aligns the render
+      // target to the encoder's 16px macroblock grid. Asking for 492 gets you
+      // 480 back, and the closed-loop check below reads that 12px difference
+      // as "the send was lost": it drops the dedupe, re-sends 492, gets 480,
+      // and loops every 3 seconds forever. Each of those re-sends rebuilds the
+      // backbuffer + capture + encoder chain (measured at ~1 GB of realloc
+      // churn per resize), so this was quietly burning memory bandwidth for
+      // the life of the session. Observed 2026-08-21 as a repeating
+      // "stream is 480x1536 but target is 492x1536" warning.
+      //
+      // Quantising here means we only ever ask for sizes Unreal will honour
+      // exactly, so the loop cannot start. Worst case is 15px of width the
+      // video element scales away, invisible at stream viewing sizes.
+      w -= w % 16;
+      h -= h % 16;
+      // Not laid out yet. Bail WITHOUT recording, so a later fire still gets
+      // its chance — recording a bogus size here is what stranded UE at its
+      // launch resolution.
+      if (w < 64 || h < 64) return;
+      if (w === lastSentRes.w && h === lastSentRes.h) return;
+      lastSentRes.w = w;
+      lastSentRes.h = h;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (ps as any).emitCommand({ 'Resolution.Width': w, 'Resolution.Height': h });
+    };
+    const dprOverrideCallback = (cssW: number, cssH: number) =>
+      applyTargetResolution(cssW, cssH);
     const installDprResolutionOverride = (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vp: any,
     ) => {
-      if (!vp || vp.__unclawDprOverride) return;
-      vp.onMatchViewportResolutionCallback = (cssW: number, cssH: number) => {
-        const dpr = window.devicePixelRatio || 1;
-        let w = Math.round(cssW * dpr);
-        let h = Math.round(cssH * dpr);
-        const longest = Math.max(w, h);
-        // Cap, then quantize the longest side DOWN to a 128px step (above
-        // 1024). Every distinct resolution UE receives costs one realloc
-        // cycle of the backbuffer + capture + encoder chain, so snapping to
-        // steps makes most window resizes send nothing at all (the dedupe
-        // below eats the repeat). Worst-case cost is a <=127px downscale the
-        // video element upscales away, invisible at stream viewing sizes.
-        // Below 1024 the buffers are small enough that native size is fine.
-        let target = longest;
-        if (longest > MAX_RENDER_DIM) {
-          target = MAX_RENDER_DIM;
-        } else if (longest >= 1024) {
-          target = Math.floor(longest / 128) * 128;
-        }
-        if (target < longest) {
-          const s = target / longest;
-          w = Math.round(w * s);
-          h = Math.round(h * s);
-        }
-        w -= w % 2; // even dims: H264 4:2:0 chroma subsampling needs them
-        h -= h % 2;
-        // Not laid out yet. Bail WITHOUT recording, so a later fire still gets
-        // its chance — recording a bogus size here is what stranded UE at its
-        // launch resolution.
-        if (w < 64 || h < 64) return;
-        if (w === lastSentRes.w && h === lastSentRes.h) return;
-        lastSentRes.w = w;
-        lastSentRes.h = h;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (ps as any).emitCommand({ 'Resolution.Width': w, 'Resolution.Height': h });
-      };
-      vp.__unclawDprOverride = true;
+      // Compare by function identity, not a marker flag. The SDK's
+      // WebRtcPlayerController CONSTRUCTOR re-assigns the stock CSS-pixel
+      // callback onto the (reused) videoPlayer, so after any reconnect() the
+      // stock sender was back while the old __unclawDprOverride marker still
+      // said "installed" and this function skipped re-installing. That is the
+      // escape that let UE receive unaligned CSS-pixel resolutions.
+      if (!vp || vp.onMatchViewportResolutionCallback === dprOverrideCallback) return;
+      vp.onMatchViewportResolutionCallback = dprOverrideCallback;
     };
     const forceViewportResolutionUpdate = () => {
+      // A remote viewer owns the viewport; stay out of its way.
+      if (leaseRemote) return;
       try {
+        // Install FIRST, in every mode. The SDK fires its own viewport-res sync
+        // off MatchViewportRes, and its stock callback sends the element's CSS
+        // size with no devicePixelRatio applied. Leaving that in place while we
+        // also drive our own value means UE receives two different resolutions
+        // in alternation (observed 2026-08-11: 1182x1536 from us, 600x780 from
+        // the SDK, flapping), rebuilding its render target on every flip and
+        // leaving the picture broken. The override makes every fire, whoever
+        // starts it, go through applyTargetResolution.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const controller = (ps as any)._webRtcController;
         installDprResolutionOverride(controller?.videoPlayer);
+
+        // Measure the element ourselves. updateVideoStreamSize() sizes from the
+        // <video>, and with the direct path attached the encoder is idle so
+        // that video never receives a frame, never plays and reports nothing —
+        // leaving UE at its launch -ResX/-ResY for the entire session
+        // (observed 2026-08-11: 720x1280 upscaled into a 1182x1536 window, a
+        // visibly soft avatar). The element's own layout box is the honest
+        // source in BOTH modes and needs no WebRTC at all; `visibility: hidden`
+        // still lays out, so the rect is real while the video is hidden
+        // underneath the native layer.
+        //
+        // Deliberately NOT gated on `directLive` any more (2026-08-19). It was,
+        // and the exact 720x1280 strand came back: direct mode went default-on,
+        // and any path where the directLive signal fails to reach this hook —
+        // the bridge callback missing, the DOM mirror not yet stamped, a status
+        // event landing before the listener attaches — silently fell through to
+        // the SDK branch and measured the dead <video>, which reports 0 and
+        // bails without ever sending. The layout box does not care which
+        // transport is carrying pixels, so ask it first and keep the SDK call
+        // only as the fallback for a not-yet-laid-out element.
+        const el = videoParentRef.current;
+        const r = el?.getBoundingClientRect();
+        if (r && r.width >= 64 && r.height >= 64) {
+          applyTargetResolution(r.width, r.height);
+          return;
+        }
         controller?.videoPlayer?.updateVideoStreamSize?.();
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -296,10 +420,204 @@ export function usePixelStreaming({
       (window as any).forceViewportUpdate = forceViewportResolutionUpdate;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (window as any).psDecoderCheck = logDecoderImplementation;
+      // Drive a UE console command from DevTools, e.g.
+      //   psConsole('rhi.dumpresourcememory summary')
+      //   psConsole('memreport -full')
+      //   psConsole('stat streaming')
+      // Output goes to UE's log, so a Development build is required (Shipping
+      // compiles UE_LOG out). UE-side this is gated on
+      // PixelStreaming2.Input.AllowConsoleCommands, which run_soul.sh turns on
+      // for profiling. The point of driving it from here rather than -ExecCmds
+      // is timing: -ExecCmds runs at startup with an empty scene, so its
+      // numbers describe nothing. This fires whenever you call it, with the
+      // character loaded and settled.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).psConsole = (cmd: string) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = ps as any;
+        if (typeof p.emitConsoleCommand === 'function') {
+          p.emitConsoleCommand(cmd);
+        } else {
+          p.emitCommand({ ConsoleCommand: cmd });
+        }
+        // eslint-disable-next-line no-console
+        console.log('[ps] console command sent:', cmd, '(read the result in game.launchd.log)');
+      };
+
     }
 
-    ps.addEventListener('webRtcConnecting', () => setConnectionState('connecting'));
+    // eslint-disable-next-line no-console
+    // Receiver tuning, applied at every point a receiver can (re)appear.
+    //
+    // Latency: ask each video receiver to render frames as soon as decoded,
+    // no jitter buffer. Default Chromium playout delay is 50-200ms (designed
+    // to absorb network jitter); on loopback there's no jitter so the buffer
+    // is pure latency. Reaching the underlying RTCPeerConnection requires
+    // accessing private SDK state, hence the any-cast; the path is stable in
+    // PS5.6 and verified in the lib.
+    //
+    // Mac dual-audio: UE plays its own audio out of the Mac speakers via
+    // CoreAudio at the same time it sends the WebRTC audio track. Disable the
+    // track at the receiver so the renderer is silent and Grace is only heard
+    // once (from UE locally). track.enabled=false makes the WebRTC stack
+    // render silence regardless of any video/audio element's .muted state.
+    //
+    // This used to run ONCE, inside webRtcConnected, and lost the race
+    // whenever the audio track attached after that event (or a renegotiation
+    // minted a new receiver): result, Grace heard twice, slightly offset. So
+    // it now also runs at playStream, and a per-connection 'track' listener
+    // silences any audio track the moment it arrives.
+    const getPc = (): RTCPeerConnection | undefined =>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (ps as any)._webRtcController?.peerConnectionController?.peerConnection;
+    const tunedPcs = new WeakSet<RTCPeerConnection>();
+    const tuneReceivers = (why: string): void => {
+      try {
+        const pc = getPc();
+        if (!pc) return;
+        let audioSilenced = 0;
+        for (const recv of pc.getReceivers()) {
+          if (recv.track?.kind === 'video') {
+            // Bounded buffer target, the tuned middle (2026-08-23).
+            // History: 0 pinned the buffer to ~20ms and rendered every
+            // sender wobble as judder (the "1.1.7 felt smoother" saga);
+            // fully adaptive converged at ~168ms because webrtc's
+            // estimator also reacts to frame-SIZE variation, overshooting
+            // 1.1.7's 127ms. With capture timestamps now stamped on the
+            // render thread (UE 2026.0823.01), a bounded 80ms holds
+            // smoothness at half the adaptive latency. Walk lower only
+            // with the freeze counters watching.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (recv as any).jitterBufferTarget = 80;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (recv as any).playoutDelayHint = 0.08;
+          } else if (recv.track?.kind === 'audio') {
+            recv.track.enabled = false;
+            audioSilenced += 1;
+          }
+        }
+        if (!tunedPcs.has(pc)) {
+          tunedPcs.add(pc);
+          pc.addEventListener('track', (ev: RTCTrackEvent) => {
+            if (ev.track.kind === 'audio') {
+              ev.track.enabled = false;
+              // eslint-disable-next-line no-console
+              console.log('[ps] late audio track silenced');
+            }
+          });
+        }
+        // eslint-disable-next-line no-console
+        console.log(`[ps] receivers tuned (${why}): audio silenced x${audioSilenced}`);
+      } catch (err) {
+        // Don't break the connection if the SDK internals shifted;
+        // the tuning is a nice-to-have, not load-bearing.
+        // eslint-disable-next-line no-console
+        console.warn('[usePixelStreaming] receiver tuning failed:', err);
+      }
+    };
+
+    // Media guard. tuneReceivers sets things up at known lifecycle points,
+    // but state can be re-asserted later (SDK unmute plumbing, a renegotiated
+    // receiver, an element the SDK wires directly), so the invariants are
+    // enforced once a second, LOGGING whenever a fighter is caught so the
+    // culprit names itself. The invariants:
+    //
+    //  * AUDIO is always silent here. UE's local CoreAudio output is the
+    //    desktop's single audible source; the stream's audio track exists for
+    //    remote viewers (the mobile companion).
+    //  * VIDEO follows the stream lease. While a remote viewer holds the
+    //    lease the encoder is alive and this peer receives the same H.264
+    //    stream, which used to keep a hidden <video> decoding and playing at
+    //    full rate behind the frozen frame for the whole call. Disable the
+    //    receiver track and pause the element while remote; restore both on
+    //    reclaim (the WebRTC fallback must work again the moment the lease
+    //    is local).
+    let lastPlaybackQualityBucket = -1;
+    // Sender-vs-receiver freeze triage: the same inbound-rtp counters the
+    // Chrome panel logs, from THIS receiver, every 15s while the stream
+    // video is live. If both receivers freeze in lockstep the stall is
+    // sender-side; if only one does, it's that receiver's environment.
+    let lastFreezeLog = 0;
+    const logInboundStats = async () => {
+      const now = Date.now();
+      if (now - lastFreezeLog < 15000) return;
+      lastFreezeLog = now;
+      try {
+        const pc = getPc();
+        if (!pc) return;
+        const report = await pc.getStats();
+        report.forEach((s: any) => {
+          if (s.type === 'inbound-rtp' && s.kind === 'video') {
+            // eslint-disable-next-line no-console
+            const jb = s.jitterBufferEmittedCount
+              ? Math.round((s.jitterBufferDelay / s.jitterBufferEmittedCount) * 1000)
+              : 0;
+            console.log(`[ps] inbound: fps=${s.framesPerSecond ?? 0} `
+              + `decoded=${s.framesDecoded} dropped=${s.framesDropped} `
+              + `freezes=${s.freezeCount} (${Math.round((s.totalFreezesDuration ?? 0) * 1000)}ms) `
+              + `jb=${jb}ms res=${s.frameWidth}x${s.frameHeight}`);
+          }
+        });
+      } catch { /* diagnostic */ }
+    };
+    const mediaGuard = window.setInterval(() => {
+      try {
+        const leaseIsRemote = document.documentElement.dataset.unclawLease === 'remote';
+        const pc = getPc();
+        if (pc) {
+          for (const recv of pc.getReceivers()) {
+            if (recv.track?.kind === 'audio' && recv.track.enabled) {
+              recv.track.enabled = false;
+              // eslint-disable-next-line no-console
+              console.warn('[ps] audio receiver track was re-enabled; silenced again');
+            } else if (recv.track?.kind === 'video' && recv.track.enabled === leaseIsRemote) {
+              recv.track.enabled = !leaseIsRemote;
+              // eslint-disable-next-line no-console
+              console.log(`[ps] video receiver ${leaseIsRemote ? 'disabled (remote lease)' : 're-enabled (lease reclaimed)'}`);
+            }
+          }
+        }
+        for (const el of Array.from(document.querySelectorAll<HTMLMediaElement>('video, audio'))) {
+          const s = el.srcObject as MediaStream | null;
+          if (!s) continue;
+          // Smoothness ground truth, once a minute while the WebRTC video is
+          // actually playing: how many frames the compositor RECEIVED vs
+          // DROPPED. This is the receiver-side judder counter; UE-side drop
+          // counters live in the encoder stats. Cheap (a struct read).
+          if (el.tagName === 'VIDEO' && !el.paused && (el as HTMLVideoElement).videoWidth > 0) {
+            void logInboundStats();
+            const q = (el as HTMLVideoElement).getVideoPlaybackQuality?.();
+            if (q && q.totalVideoFrames > 0) {
+              const bucket = Math.floor(Date.now() / 60000);
+              if (bucket !== lastPlaybackQualityBucket) {
+                lastPlaybackQualityBucket = bucket;
+                // eslint-disable-next-line no-console
+                console.log(`[ps] playback quality: total=${q.totalVideoFrames} dropped=${q.droppedVideoFrames}`);
+              }
+            }
+          }
+          if (s.getAudioTracks().length > 0 && !el.muted) {
+            el.muted = true;
+            // eslint-disable-next-line no-console
+            console.warn(`[ps] unmuted <${el.tagName.toLowerCase()}> carrying stream audio; muted it`);
+          }
+          if (el.tagName === 'VIDEO' && s.getVideoTracks().length > 0) {
+            if (leaseIsRemote && !el.paused) {
+              el.pause();
+              // eslint-disable-next-line no-console
+              console.log('[ps] stream video paused for remote lease');
+            } else if (!leaseIsRemote && el.paused) {
+              void el.play().catch(() => { /* no frames yet is fine */ });
+            }
+          }
+        }
+      } catch { /* enforcement only; never break the stream */ }
+    }, 1000);
+
+    ps.addEventListener('webRtcConnecting', () => { console.log('[ps] webRtcConnecting'); setConnectionState('connecting'); });
     ps.addEventListener('webRtcConnected', () => {
+      // eslint-disable-next-line no-console
+      console.log('[ps] webRtcConnected');
       setConnectionState('connected');
       // New session: forget the dedupe state so the first resolution send of
       // this connection always goes out on the wire. MUST be -1, not 0 — UE
@@ -317,53 +635,7 @@ export function usePixelStreaming({
       // priming the pipe; the `playStream` triple-fire below carries the
       // real load.
       setTimeout(forceViewportResolutionUpdate, 500);
-      // Localhost optimization: ask the receiver to render frames as soon
-      // as decoded with no jitter buffer. Default Chromium playout delay is
-      // 50-200ms (designed to absorb network jitter); on loopback there's no
-      // jitter so the buffer is pure latency. Reaching the underlying
-      // RTCPeerConnection requires accessing private SDK state, hence the
-      // any-cast — the path is stable in PS5.6 and verified in the lib.
-      try {
-        const pc: RTCPeerConnection | undefined =
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (ps as any)._webRtcController?.peerConnectionController?.peerConnection;
-        if (pc) {
-          for (const recv of pc.getReceivers()) {
-            if (recv.track?.kind === 'video') {
-              // playoutDelayHint is the modern (2022+) standard property.
-              // 0 = "render with minimum delay possible".
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (recv as any).playoutDelayHint = 0;
-              // jitterBufferTarget (Chrome 92+) is the newer companion knob —
-              // explicit target depth in ms. 0 = no buffering. Belt and suspenders
-              // with playoutDelayHint; some Chromium builds honor one but not the
-              // other. Sofia's debug viewer sets both for the same reason.
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (recv as any).jitterBufferTarget = 0;
-            } else if (recv.track?.kind === 'audio') {
-              // Dual-audio fix (BOTH platforms): UE plays its own audio
-              // out of the local speakers (CoreAudio on Mac, WASAPI on
-              // Windows) at the same time it sends the WebRTC audio track.
-              // Disable the inbound track at the receiver so the renderer
-              // is silent and Grace is heard exactly once, from UE locally.
-              // track.enabled=false makes the WebRTC stack render silence
-              // regardless of any video/audio element's .muted state.
-              //
-              // This is the single cross-platform strategy: soul's
-              // _LocalAudioMuteMonitor (which used to mute UE's WASAPI
-              // session on Windows instead) is now disabled by default, so
-              // muting here is the ONLY mute — don't re-enable both or you
-              // get total silence.
-              recv.track.enabled = false;
-            }
-          }
-        }
-      } catch (err) {
-        // Don't break the connection if the SDK internals shifted —
-        // the latency hint is a nice-to-have, not load-bearing.
-        // eslint-disable-next-line no-console
-        console.warn('[usePixelStreaming] playoutDelayHint apply failed:', err);
-      }
+      tuneReceivers('connected');
     });
     // Triple-fire viewport-res on stream start. Each one re-runs the
     // SDK's videoPlayer.updateVideoStreamSize() which sends a Resize
@@ -372,6 +644,7 @@ export function usePixelStreaming({
     // Electron layout is still settling (image first paint, container
     // reflow, etc.). PC reference uses the same 1/2/3-second pattern.
     ps.addEventListener('playStream', () => {
+      tuneReceivers('playStream');
       setTimeout(forceViewportResolutionUpdate, 1000);
       setTimeout(forceViewportResolutionUpdate, 2000);
       setTimeout(forceViewportResolutionUpdate, 3000);
@@ -431,27 +704,87 @@ export function usePixelStreaming({
     // already-applied resolution is a no-op UE-side (r.SetRes with the current
     // value), so a transient mismatch while UE is mid-apply costs nothing, and
     // a genuinely lost send now recovers within one 3s tick instead of never.
+    // One dedupe-wipe per DISTINCT disagreement. If UE cannot honour the
+    // exact target (it clamps or aligns internally), the mismatch is
+    // permanent, and wiping the dedupe every tick re-sent r.SetRes every 3
+    // seconds for the life of the session (2026-08-27 log: identical
+    // 832x1600 at 09:33:45/48/51). Remember the disagreement we already
+    // re-sent for; fire again only when the picture actually changes, and
+    // forget it as soon as sender and stream agree.
+    let lastReconcileSig = '';
     const reconcile = window.setInterval(() => {
+      // DIRECT PATH closed loop (2026-08-20). The dedupe below records what we
+      // SENT before knowing it landed, and emitCommand is fire-and-forget. On
+      // a COLD FIRST LAUNCH Unreal is still starting when the early sends go
+      // out, so they are dropped, the dedupe is already primed, and every
+      // later tick returns early — Unreal renders at its launch 720x1280 for
+      // the whole session and the character looks zoomed in. A manual refresh
+      // "fixed" it only because it reset this state.
+      //
+      // The WebRTC branch below self-heals from the <video> intrinsic size.
+      // Direct mode has no such evidence in the SDK's element (idle encoder),
+      // so the preload publishes the size of the frames it is actually drawing
+      // as `data-unclaw-direct-size`. Disagreement means the send was lost:
+      // drop the dedupe so this same tick re-sends.
+      if (directLive && !leaseRemote) {
+        const published = document.documentElement.dataset.unclawDirectSize;
+        const [aw, ah] = (published ?? '').split('x').map((n) => parseInt(n, 10));
+        if (aw > 0 && ah > 0 && lastSentRes.w > 0
+            && (Math.abs(aw - lastSentRes.w) > 16 || Math.abs(ah - lastSentRes.h) > 16)) {
+          const sig = `d:${aw}x${ah}->${lastSentRes.w}x${lastSentRes.h}`;
+          if (sig !== lastReconcileSig) {
+            lastReconcileSig = sig;
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[ps] direct frames are ${aw}x${ah} but target is `
+              + `${lastSentRes.w}x${lastSentRes.h}: resolution send was lost, re-sending`,
+            );
+            lastSentRes.w = -1;
+            lastSentRes.h = -1;
+          }
+        } else {
+          lastReconcileSig = '';
+        }
+      }
       const video = videoParentRef.current?.querySelector('video');
       if (
-        video && video.videoWidth > 0 && lastSentRes.w > 0
-        && (video.videoWidth !== lastSentRes.w || video.videoHeight !== lastSentRes.h)
+        // Skipped while the direct path is live: the <video> is frozen at its
+        // last decoded size (the encoder is idle), so it disagrees with the
+        // target permanently. Left in, the mismatch below reads as "the send
+        // was lost", wipes the dedupe and re-sends r.SetRes on EVERY tick —
+        // a full backbuffer + capture + encoder realloc every 3 seconds for
+        // the life of the session. Measured 2026-08-11 as a steady resident
+        // climb with the direct path attached.
+        !directLive
+        && video && video.videoWidth > 0 && lastSentRes.w > 0
+        && (Math.abs(video.videoWidth - lastSentRes.w) > 16
+            || Math.abs(video.videoHeight - lastSentRes.h) > 16)
       ) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[ps] stream is ${video.videoWidth}x${video.videoHeight} but target is `
-          + `${lastSentRes.w}x${lastSentRes.h} — resolution send was lost, re-sending`,
-        );
-        lastSentRes.w = -1;
-        lastSentRes.h = -1;
+        const sig = `v:${video.videoWidth}x${video.videoHeight}->${lastSentRes.w}x${lastSentRes.h}`;
+        if (sig !== lastReconcileSig) {
+          lastReconcileSig = sig;
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[ps] stream is ${video.videoWidth}x${video.videoHeight} but target is `
+            + `${lastSentRes.w}x${lastSentRes.h}: resolution send was lost, re-sending`,
+          );
+          lastSentRes.w = -1;
+          lastSentRes.h = -1;
+        }
+      } else if (!directLive) {
+        lastReconcileSig = '';
       }
       forceViewportResolutionUpdate();
     }, 3000);
     ps.addEventListener('webRtcDisconnected', () => {
+      // eslint-disable-next-line no-console
+      console.log('[ps] webRtcDisconnected');
       setConnectionState('connecting');
       scheduleRetry();
     });
     ps.addEventListener('webRtcFailed', () => {
+      // eslint-disable-next-line no-console
+      console.log('[ps] webRtcFailed');
       setConnectionState('connecting');
       scheduleRetry();
     });
@@ -459,7 +792,10 @@ export function usePixelStreaming({
     return () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       if (resizeTimer) clearTimeout(resizeTimer);
+      clearInterval(mediaGuard);
       clearInterval(reconcile);
+      offDirectStatus?.();
+      document.removeEventListener('unclaw:direct-status', onDirectStatusEvent);
       ro.disconnect();
       ps.removeResponseEventListener('unclaw-ack-router');
       // Reject any in-flight ack promises so callers don't hang forever

@@ -1,11 +1,12 @@
 {
   "name": "unclaw",
-  "version": "1.1.5",
+  "version": "1.1.9",
   "description": "Unclaw",
   "main": "dist/electron/main.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "typecheck": "tsc -b tsconfig.node.json tsconfig.web.json --force",
     "preview": "electron-vite preview",
     "start": "electron .",
     "prepare-build": "node scripts/prepare-build.cjs",
@@ -48,6 +49,7 @@
           "pyproject.toml",
           "requirements-mac.txt",
           "requirements-windows.txt",
+          "requirements-linux.txt",
           "soul/**/*",
           "!soul/__pycache__/**",
           "!soul/**/__pycache__/**",
@@ -91,6 +93,12 @@
       "include": null
     },
     "mac": {
+      "extraResources": [
+        {
+          "from": "electron/native/surface_layer/build/Release/surface_layer.node",
+          "to": "surface_layer.node"
+        }
+      ],
       "target": [
         {
           "target": "dmg",
@@ -168,6 +176,7 @@
   },
   "dependencies": {
     "@epicgames-ps/lib-pixelstreamingfrontend-ue5.6": "^0.2.5",
+    "@mediapipe/tasks-vision": "^1.0.1",
     "@types/qrcode": "^1.5.6",
     "electron-updater": "^6.8.3",
     "framer-motion": "^12.38.0",

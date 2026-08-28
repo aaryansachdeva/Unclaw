@@ -23,7 +23,7 @@ const STORE_URL = 'https://store.unclaw.io';
 // — leaving them here would hand them out free. Legacy `grace` stays listed so
 // any pre-migration entitlement/id still reads as owned (it folds onto
 // grace_custom in the roster); `syd_custom` was retired.
-export const BASE_CHARACTER_IDS = ['grace', 'mark', 'grace_custom', 'kevin_custom', 'm_generic'];
+export const BASE_CHARACTER_IDS = ['grace', 'mark', 'grace_custom', 'kevin_custom', 'm_generic', 'unified'];
 export const PAID_CHARACTER_IDS = ['ava', 'goblin', 'chris', 'joi'];
 export const STORE_PRICING: Record<string, number> = { ava: 4.99, goblin: 4.99, chris: 4.99, joi: 4.99 };
 export const BUNDLE_SKU = 'all-access';
@@ -80,7 +80,7 @@ export async function fetchDownloadUrl(token: string, characterId: string): Prom
  *  bucket alongside the pak. `kind` tells the main process which soul voices
  *  dir it belongs in (supertonic -> .json, kokoro -> .safetensors). */
 export interface VoiceFile {
-  kind: 'supertonic' | 'kokoro';
+  kind: 'supertonic' | 'kokoro' | 'pocket';
   filename: string;
   url: string;
 }

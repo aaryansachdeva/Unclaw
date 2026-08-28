@@ -21,7 +21,9 @@
 // `subscribeSoulPorts` will get the new mapping and can refresh its
 // own URL cache.
 
-import type { SoulPorts } from '../env';
+// SoulPorts is a GLOBAL interface declared in src/env.d.ts (a declaration
+// file, not a module — importing from it was a type error the bundler
+// happened to erase). Global interfaces are referenced by bare name.
 
 const FALLBACK_PORTS: SoulPorts = {
   // Legacy defaults. Only hit when the IPC bridge isn't available

@@ -178,7 +178,7 @@ export class StreamingTranscriber {
     // Float32Array.buffer is the right thing to send, typed-array
     // copy isn't necessary because send() schedules from the buffer
     // pointer and the renderer's worklet just allocated this frame.
-    ws.send(samples.buffer);
+    ws.send(samples.buffer as ArrayBuffer);
   }
 
   /** Compute RMS of a frame, smooth with an EMA, and emit a 'level'
@@ -264,7 +264,7 @@ export class StreamingTranscriber {
             // subarray shares the backing buffer; slice to send just our span.
             ws.send(rs.slice().buffer);
           } else {
-            ws.send(data.samples.buffer);
+            ws.send(data.samples.buffer as ArrayBuffer);
           }
         }
       };
@@ -328,8 +328,24 @@ export class StreamingTranscriber {
       });
     }
     return new Promise<string>((resolve, reject) => {
-      this.finalResolver = resolve;
-      this.finalRejecter = reject;
+      // Bounded: if soul accepts the finalize but never answers (backend
+      // hang, dropped message) while the socket stays open, an unbounded
+      // wait wedged continuous voice until the user toggled the mic off.
+      // 8s is generous for a transcription flush; on timeout we resolve
+      // empty, which callers already treat as "nothing was said".
+      const clearingResolve = (text: string) => { clearTimeout(timer); resolve(text); };
+      const clearingReject = (err: Error) => { clearTimeout(timer); reject(err); };
+      const timer = setTimeout(() => {
+        if (this.finalResolver === clearingResolve) {
+          // eslint-disable-next-line no-console
+          console.warn('[stt] finalize timed out after 8s; treating as empty');
+          this.finalResolver = null;
+          this.finalRejecter = null;
+          resolve('');
+        }
+      }, 8000);
+      this.finalResolver = clearingResolve;
+      this.finalRejecter = clearingReject;
       ws.send(JSON.stringify({ type: 'finalize' }));
     });
   }

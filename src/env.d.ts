@@ -204,6 +204,24 @@ interface ElectronAPI {
       ok: boolean; dnaPath?: string; blobPath?: string; baseColorPath?: string;
       grooming?: { gender: 'm' | 'f'; hairIndex: number; browIndex: number; lashIndex: number }; error?: string;
     }>;
+    runH3D: (args: {
+      localId: string; photoBytes: Uint8Array; ext: 'jpg' | 'png';
+      catalogs?: { hairs: { index: number; name: string }[]; brows: { index: number; name: string }[]; lashes: { index: number; name: string }[] };
+    }) => Promise<{
+      ok: boolean; dnaPath?: string; jointsPath?: string; bustPath?: string; cleanImagePath?: string;
+      baseColorPath?: string; normalPath?: string;
+      grooming?: { gender: 'm' | 'f'; build: 'skinny' | 'fit' | 'fat'; hairIndex: number; browIndex: number; lashIndex: number };
+      error?: string;
+    }>;
+    /** Re-roll ONLY the skin texture for an existing character. */
+    regenBasecolor: (args: { localId: string }) => Promise<{
+      ok: boolean; baseColorPath?: string;
+      skins?: Array<{ path: string; label: string }>; error?: string;
+    }>;
+    /** Every skin generated for this character, oldest first. */
+    listBasecolors: (args: { localId: string }) => Promise<{
+      ok: boolean; skins: Array<{ path: string; label: string }>;
+    }>;
     onProgress: (cb: (data: { stage: string; line: string }) => void) => () => void;
   };
   characterStore: {
@@ -220,17 +238,40 @@ interface ElectronAPI {
     listInstalled: () => Promise<{ ids: string[]; stale: string[] }>;
     /** Which of a character's cloned voice files are already on disk. */
     hasVoices: (args: { characterId: string }) => Promise<{
-      ok: boolean; present?: { supertonic: boolean; kokoro: boolean }; complete?: boolean; error?: string;
+      ok: boolean; present?: { supertonic: boolean; kokoro: boolean; pocket: boolean }; complete?: boolean; error?: string;
     }>;
     /** Download + install presigned cloned-voice files into the soul voices dirs. */
     downloadVoices: (args: {
       characterId: string;
-      files: { kind: 'supertonic' | 'kokoro'; filename: string; url: string }[];
+      files: { kind: 'supertonic' | 'kokoro' | 'pocket'; filename: string; url: string }[];
     }) => Promise<{ ok: boolean; written?: number; error?: string }>;
     /** Subscribe to byte progress for a pak download. */
     onPakProgress: (
       cb: (data: { characterId: string; downloaded: number; total: number }) => void,
     ) => () => void;
+  };
+
+  /** Direct IOSurface display status, polled main-side every 2s. `connected`
+   *  false means the WebRTC video is still what the user sees. Absent when the
+   *  native addon was never built, hence the optional member. */
+  directSurface?: {
+    /** '1' native layer, '2' shared-texture canvas, null when off. */
+    mode: '1' | '2' | null;
+    onStatus: (cb: (s: {
+      connected: boolean; frames: number; gaps: number;
+      fps: number; surfaces: number;
+    }) => void) => () => void;
+    /** Stream lease: which surface owns Unreal's frames right now.
+     *  'remote' means a phone (later a VS Code panel) took it and our last
+     *  frame is frozen on screen deliberately. */
+    onLease: (cb: (s: { holder: 'local' | 'remote'; players: string[] }) => void) => () => void;
+    getLease: () => Promise<{ holder: 'local' | 'remote'; players: string[] }>;
+    /** Companion-relayed desktop commands (switch agent from the Chrome panel). */
+    onCompanionCmd?: (cb: (cmd: { seq: number; type: string; id?: string }) => void) => () => void;
+    /** Pin the lease for testing; null follows soul again. */
+    forceLease: (holder: 'local' | 'remote' | null) => Promise<'local' | 'remote'>;
+    /** Hang up on remote viewers and take the stream back. */
+    disconnectRemote: () => Promise<{ ok: boolean; disconnected?: number; error?: string }>;
   };
 
   /** unclaw:// deep link arriving while the app is running (the Polar

@@ -122,7 +122,10 @@ export function Titlebar({
   leftSlot,
 }: TitlebarProps) {
   const reduce = useReducedMotion() ?? false;
-  const [pinned, setPinned] = useState(true);
+  // Always-on-top is opt-in (2026-08-15): the window starts as a normal
+  // window and the pin button raises it when the user actually wants that.
+  // Must match the BrowserWindow's `alwaysOnTop: false` in electron/main.ts.
+  const [pinned, setPinned] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   // "Connect your phone" popover (phone icon in the right capsule).
   const [companionOpen, setCompanionOpen] = useState(false);

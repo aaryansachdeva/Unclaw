@@ -10,7 +10,7 @@
 // graphics restart prompt, BYOK key flow, Esc/click-outside, save bar
 // only-when-dirty. Public props unchanged.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type JSX } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Check, AlertCircle, Loader2, Eye, EyeOff, ExternalLink, X,
@@ -41,6 +41,7 @@ import {
   type TtsProviderId,
 } from '../services/apiKeys';
 import { Dropdown } from './Onboarding/Dropdown';
+import { POCKET_TTS_ENABLED } from '../features';
 import { usePassthroughPrefs } from '../hooks/usePassthroughPrefs';
 import { Slider } from './Onboarding/Slider';
 import { TZ_CATALOG } from './Onboarding/IdentityStep';
@@ -808,7 +809,7 @@ function VoiceFacet({ draft, update }: PaneContext) {
     <Composition
       eyebrow="the voice that speaks replies"
       title={ttsHeadline(draft.tts_provider)}
-      tagline="ElevenLabs renders in the cloud with high realism. Supertonic and Kokoro run on your machine, no key required. Each agent speaks in its own voice unless you override it below."
+      tagline="ElevenLabs renders in the cloud with high realism. Pocket, Supertonic, and Kokoro run on your machine, no key required. Each agent speaks in its own voice unless you override it below."
       sigil={<Voiceprint />}
     >
       <Stack>
@@ -818,6 +819,12 @@ function VoiceFacet({ draft, update }: PaneContext) {
             onChange={(v) => update('tts_provider', v as TtsProviderId)}
             options={[
               { id: 'elevenlabs', label: 'ElevenLabs (cloud, realistic)' },
+              // Pocket is hidden unless POCKET_TTS_ENABLED: a packaged install
+              // has neither torch nor pocket_tts, so offering it would be a
+              // dead option. Same treatment qwen3 already gets.
+              ...(POCKET_TTS_ENABLED
+                ? [{ id: 'pocket', label: 'Pocket (local, cloned voices, fastest)' }]
+                : []),
               { id: 'supertonic', label: 'Supertonic-3 (local, 31 languages, ~5× realtime)' },
               { id: 'kokoro',     label: 'Kokoro (local, open-weight)' },
             ]}
@@ -960,6 +967,7 @@ function PassthroughVoiceControls() {
 function ttsHeadline(p: TtsProviderId): string {
   switch (p) {
     case 'elevenlabs': return 'ElevenLabs.';
+    case 'pocket':     return 'Pocket, local cloned voices.';
     case 'supertonic': return 'Supertonic-3, local.';
     case 'kokoro':     return 'Kokoro, local.';
     case 'qwen3':      return 'Qwen3-TTS (disabled).';

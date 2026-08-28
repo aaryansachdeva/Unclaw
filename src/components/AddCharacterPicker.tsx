@@ -21,10 +21,12 @@ import { ClawsIcon } from './ClawsBalance';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
-/** Photo->custom-character capture flow. NOT ship-ready (local-inference dev
- *  path only): the tile renders as "Coming soon" and the flow is unreachable
- *  until this flips. */
-const CUSTOM_CAPTURE_ENABLED = false;
+/** Photo->custom-character capture flow. The inference chain is local-only and
+ *  Mac-dev-only (identityInference.ts spawns python venvs + a headless UE at
+ *  hardcoded absolute paths), so a packaged build cannot run it: the tile stays
+ *  "Coming soon" there. Live in `npm run dev` so the flow is reachable while it
+ *  is being finished. Flip to a literal `true` only once the work is hosted. */
+const CUSTOM_CAPTURE_ENABLED = import.meta.env.DEV;
 
 /** One character row in the store grid, with its ownership + install state. */
 export interface StoreEntry {
@@ -58,12 +60,15 @@ interface AddCharacterPickerProps {
   customInstances?: { instanceId: string; name: string }[];
   /** Switch to an EXISTING custom instance (vs onPick which adds a new one). */
   onPickInstance?: (instanceId: string) => void;
+  /** False hides the whole photo-identity surface: the "Add custom" tile and
+   *  any saved custom instances. Driven by CUSTOM_CHARACTERS_ENABLED. */
+  allowCustom?: boolean;
 }
 
 export function AddCharacterPicker({
   entries, bundle, roster, agentById, baseInstanceId,
   onPick, onBuy, onDownload, onRename, onRemove, onCancel, onAddCustom,
-  customInstances, onPickInstance,
+  customInstances, onPickInstance, allowCustom = true,
 }: AddCharacterPickerProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -181,7 +186,7 @@ export function AddCharacterPicker({
             onDownload={() => onDownload(e.agent.agentId)}
           />
         ))}
-        {(customInstances ?? []).map((c, i) => (
+        {allowCustom && (customInstances ?? []).map((c, i) => (
           <CustomInstanceCard
             key={c.instanceId}
             name={c.name}
@@ -189,7 +194,9 @@ export function AddCharacterPicker({
             onClick={() => onPickInstance?.(c.instanceId)}
           />
         ))}
-        <AddCustomCard delay={0.12 + (entries.length + (customInstances?.length ?? 0)) * 0.05} onClick={onAddCustom} />
+        {allowCustom && (
+          <AddCustomCard delay={0.12 + (entries.length + (customInstances?.length ?? 0)) * 0.05} onClick={onAddCustom} />
+        )}
       </div>
 
       {/* unlock-all bundle */}
