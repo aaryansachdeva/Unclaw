@@ -1047,10 +1047,12 @@ function VoiceSection({
           value={values.tts_provider}
           onChange={(v) => setTtsProvider(v as TtsProviderId)}
           options={[
-            { id: 'elevenlabs', label: 'ElevenLabs' },
+            // Pocket leads: it is the default engine (local, keyless,
+            // cloned per character). Kokoro and Qwen3 retired 2026-08-27;
+            // saved selections migrate to Pocket in migrateApiKeys.
+            { id: 'pocket',     label: 'Pocket (local, cloned voices)' },
             { id: 'supertonic', label: 'Supertonic-3' },
-            { id: 'kokoro',     label: 'Kokoro' },
-            { id: 'qwen3',      label: 'Qwen3 (local)' },
+            { id: 'elevenlabs', label: 'ElevenLabs' },
           ]}
         />
       </FieldLabel>
@@ -1098,57 +1100,24 @@ function VoiceSection({
         </FieldLabel>
       )}
 
-      {/* Kokoro branch, mode picker + install panel / endpoint
-          input + voice dropdown. */}
-      {values.tts_provider === 'kokoro' && (
-        <>
-          <KokoroModePicker
-            mode={values.kokoro_mode}
-            onChange={setKokoroMode}
-          />
-          {values.kokoro_mode === 'recommended' && (
-            <KokoroInstallPanel
-              status={kokoro}
-              onInstall={handleInstallClick}
-            />
-          )}
-          {values.kokoro_mode === 'custom' && (
-            <FieldLabel
-              text="Kokoro endpoint URL"
-            >
-              <input
-                type="url"
-                value={values.kokoro_endpoint ?? ''}
-                onChange={(e) => setKokoroEndpoint(e.target.value)}
-                placeholder="http://localhost:8880"
-                spellCheck={false}
-                autoComplete="off"
-                style={FIELD_BASE}
-                onFocus={(e) => applyFocus(e.target)}
-                onBlur={(e) => applyBlur(e.target)}
-              />
-            </FieldLabel>
-          )}
-          <FieldLabel text="Voice">
-            <Dropdown
-              value={values.kokoro_voice ?? ''}
-              onChange={setKokoroVoice}
-              placeholder="Pick a voice"
-              options={voiceOptions}
-            />
-          </FieldLabel>
-        </>
-      )}
-
-      {/* Qwen3 branch, install panel (multi-stage) + voice dropdown.
-          No mode picker since v1 is local-only; we may add a custom
-          endpoint variant later (mirrored on Kokoro's pattern). */}
-      {values.tts_provider === 'qwen3' && (
-        <Qwen3Section
-          values={values}
-          onChange={onChange}
-          agentName={agentName}
-        />
+      {/* Pocket branch: nothing to configure. The engine ships with the
+          install, runs locally with no key, and every character keeps its
+          own cloned voice automatically. */}
+      {values.tts_provider === 'pocket' && (
+        <div
+          style={{
+            padding: '10px 12px',
+            background: 'rgba(255, 255, 255, 0.025)',
+            border: '1px solid var(--glass-border)',
+            borderRadius: 10,
+            fontSize: 12.5,
+            color: 'var(--text-secondary)',
+            lineHeight: 1.5,
+          }}
+        >
+          Cloned per character and runs on this Mac. Nothing to set up,
+          no key needed, and it is the fastest voice Unclaw ships.
+        </div>
       )}
     </div>
   );

@@ -743,6 +743,13 @@ function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
   if (!POCKET_TTS_ENABLED && merged.tts_provider === 'pocket') {
     merged.tts_provider = 'supertonic';
   }
+  // Retired engines (2026-08-27): Kokoro and Qwen3 leave the product.
+  // Saved selections migrate to Pocket, the like-for-like local default
+  // (keyless, cloned per-character voices), so nobody keeps a provider
+  // the UI can no longer explain.
+  if (merged.tts_provider === 'kokoro' || merged.tts_provider === 'qwen3') {
+    merged.tts_provider = 'pocket';
+  }
   if (merged.llm_provider && !VALID_PROVIDER_IDS.has(merged.llm_provider)) {
     // Stale provider — drop the {provider, model, key} triple together
     // so the user gets prompted to pick from the new catalog.

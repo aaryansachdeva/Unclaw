@@ -818,15 +818,13 @@ function VoiceFacet({ draft, update }: PaneContext) {
             value={draft.tts_provider}
             onChange={(v) => update('tts_provider', v as TtsProviderId)}
             options={[
-              { id: 'elevenlabs', label: 'ElevenLabs (cloud, realistic)' },
-              // Pocket is hidden unless POCKET_TTS_ENABLED: a packaged install
-              // has neither torch nor pocket_tts, so offering it would be a
-              // dead option. Same treatment qwen3 already gets.
+              // Pocket leads: the default engine. Kokoro and Qwen3 retired
+              // 2026-08-27 (saved selections migrate to Pocket).
               ...(POCKET_TTS_ENABLED
                 ? [{ id: 'pocket', label: 'Pocket (local, cloned voices, fastest)' }]
                 : []),
               { id: 'supertonic', label: 'Supertonic-3 (local, 31 languages, ~5× realtime)' },
-              { id: 'kokoro',     label: 'Kokoro (local, open-weight)' },
+              { id: 'elevenlabs', label: 'ElevenLabs (cloud, realistic)' },
             ]}
             placeholder="Choose an engine"
           />
