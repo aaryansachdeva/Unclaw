@@ -79,5 +79,25 @@ export function useEnvironment() {
     });
   }, []);
 
-  return { environment, setEnvironment };
+  /** Back to stock. Used when the account's config goes away (sign-out,
+   *  a machine changing hands, a boot that finds orphaned local data), so
+   *  the room is never left dressed by the previous session. */
+  const resetEnvironment = useCallback(() => {
+    const next = { ...DEFAULT_ENVIRONMENT };
+    save(next);
+    setEnvironmentState(next);
+  }, []);
+
+  /** Replace the whole environment with one pulled from the account's
+   *  settings blob (sign-in reconcile). Mirrors hydrateStack: the caller
+   *  suppresses the echo back up to the cloud. */
+  const hydrateEnvironment = useCallback((incoming: unknown) => {
+    const next = (incoming && typeof incoming === 'object')
+      ? { ...(incoming as EnvironmentSettings) }
+      : { ...DEFAULT_ENVIRONMENT };
+    save(next);
+    setEnvironmentState(next);
+  }, []);
+
+  return { environment, setEnvironment, resetEnvironment, hydrateEnvironment };
 }
