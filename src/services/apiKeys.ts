@@ -676,7 +676,17 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   llm_model:                null,
   llm_api_key:              null,
   ollama_base_url:          null,
-  tts_provider:             'elevenlabs',
+  // Pocket by default: local, keyless, and per-character voices, so a brand
+  // new user hears the character speak without entering a single API key.
+  // With ElevenLabs as the default the wizard's "Required to finish" gate
+  // demanded a key before onboarding could complete at all (see
+  // ConnectionsStep: the voice requirement is `!!key` for elevenlabs and
+  // `!!tts_provider` for everything else).
+  //
+  // Runs on MLX on macOS and on the official torch package on Windows/Linux;
+  // both are local. migrateApiKeys still rescues anyone whose saved profile
+  // names an engine their platform cannot run.
+  tts_provider:             'pocket',
   elevenlabs_api_key:       null,
   // Grace's cloned voice on ElevenLabs (the persona-canonical voice).
   // Power users can override with their own voice id; existing users
@@ -738,14 +748,14 @@ function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
     merged.tts_provider = 'supertonic';
   }
   // Same rescue for an engine this PLATFORM cannot run, which the flag alone
-  // does not cover. Pocket is Apple MLX and qwen3 needs runtimes that only
-  // ship on macOS, so a profile that arrives from a Mac - through account
-  // sync, or just a copied profile - would otherwise sit on a selection soul
-  // refuses, and the user hears nothing with no way to see why (the option
-  // that would explain it is not in the dropdown on this platform).
+  // does not cover. qwen3's runtimes only ship on macOS, so a profile arriving
+  // from a Mac - through account sync, or just a copied profile - would sit on
+  // a selection soul refuses, and the user would hear nothing with no way to
+  // see why (the option that would explain it is not in their dropdown).
+  // Pocket is NOT in this list: it runs on every platform now.
   const isMac =
     typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
-  if (!isMac && (merged.tts_provider === 'pocket' || merged.tts_provider === 'qwen3')) {
+  if (!isMac && merged.tts_provider === 'qwen3') {
     merged.tts_provider = 'supertonic';
   }
   if (merged.llm_provider && !VALID_PROVIDER_IDS.has(merged.llm_provider)) {

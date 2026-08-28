@@ -824,6 +824,7 @@ function StatusRail({
       ttsProvider === 'kokoro' ? 'Kokoro'
       : ttsProvider === 'supertonic' ? 'Supertonic'
       : ttsProvider === 'qwen3' ? 'Qwen3'
+      : ttsProvider === 'pocket' ? 'Pocket'
       : 'ElevenLabs';
     rows.push(rowFor(voiceLabel, result?.tts ?? result?.elevenlabs));
   }
