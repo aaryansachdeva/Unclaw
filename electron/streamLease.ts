@@ -44,9 +44,30 @@ let lastCmdSeq = 0;
 let soulPort: (() => number | null) | null = null;
 let getWindow: (() => BrowserWindow | null) | null = null;
 
+// Once-a-minute proof-of-life. The poller was previously SILENT unless the
+// lease actually flipped, so "the desktop did not freeze when Chrome
+// connected" had three indistinguishable explanations - the poll never ran,
+// the port never resolved, or soul reported nobody - and the log could not
+// separate them. Reported 2026-08-28; this is what makes the next occurrence
+// diagnosable instead of a guess.
+let pollTicks = 0;
+let loggedNoPort = false;
+
 async function pollOnce(): Promise<void> {
   const port = soulPort?.();
-  if (!port) return;
+  if (!port) {
+    // Null is normal while soul boots; saying so once distinguishes "still
+    // booting" from "never resolved, so the lease can never flip".
+    if (!loggedNoPort) {
+      loggedNoPort = true;
+      console.log('[lease] soul port not resolved yet — lease idle until it is');
+    }
+    return;
+  }
+  if (loggedNoPort) {
+    loggedNoPort = false;
+    console.log(`[lease] soul port resolved (${port}) — polling`);
+  }
   let players: string[] = [];
   try {
     const res = await fetch(`http://127.0.0.1:${port}/pair/status`, {
@@ -82,6 +103,10 @@ async function pollOnce(): Promise<void> {
   }
 
   const want: LeaseHolder = forced ?? (players.length > 0 ? 'remote' : 'local');
+  if (++pollTicks % 60 === 1) {
+    console.log(`[lease] poll: holder=${holder} want=${want} `
+      + `players=[${players.join(', ')}]${forced ? ' (forced)' : ''}`);
+  }
   lastPlayers = players;
   if (want === holder) return;
 

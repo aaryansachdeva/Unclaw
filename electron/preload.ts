@@ -108,8 +108,22 @@ const STREAM_WGSL = `
     : null;
 
   const gamutWanted = (): number => {
-    try { return localStorage.getItem('unclaw-stream-gamut-off') != null ? 0 : 1; }
-    catch { return 1; }
+    try {
+      if (localStorage.getItem('unclaw-stream-gamut-off') != null) return 0;
+      // MUST match StreamView's gate, which is `@media (color-gamut: p3)` in
+      // CSS. That query is the real switch on all three OSes: it is true
+      // exactly when the display is wide-gamut AND Chromium is colour-managing
+      // into it, which is precisely when the cancellation math holds. On a
+      // plain sRGB monitor it is false and the WebRTC filter goes inert.
+      //
+      // This shader had no such gate, so on an sRGB display the direct path
+      // applied the P3->sRGB matrix while WebRTC applied nothing, and the two
+      // renderers showed visibly different colour for the same frame - the
+      // opposite of the "one renderer, one colour" the WebGPU painter exists
+      // to give. Reported 2026-08-28 comparing the desktop against the Chrome
+      // panel side by side.
+      return window.matchMedia('(color-gamut: p3)').matches ? 1 : 0;
+    } catch { return 1; }
   };
 
   async function initGpu(target: HTMLCanvasElement): Promise<GpuBits> {
