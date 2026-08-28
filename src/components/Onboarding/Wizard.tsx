@@ -191,6 +191,12 @@ export function Wizard({
     let cancelled = false;
     void (async () => {
       const loaded = await fetchApiKeys();
+      // First-run drafts start on Pocket regardless of what a leftover
+      // apiKeys.bin says: the default engine should be what a fresh user
+      // actually sees on the voice page (a stale dev/reinstall blob was
+      // surfacing Supertonic there). The user's pick on the page is what
+      // gets saved; profile edits (non-first-run) keep the saved choice.
+      if (firstRun) loaded.tts_provider = 'pocket';
       if (!cancelled) setApiKeys(loaded);
     })();
     return () => {
