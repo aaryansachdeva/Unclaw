@@ -821,7 +821,7 @@ function VoiceFacet({ draft, update }: PaneContext) {
               // Pocket leads: the default engine. Kokoro and Qwen3 retired
               // 2026-08-27 (saved selections migrate to Pocket).
               ...(POCKET_TTS_ENABLED
-                ? [{ id: 'pocket', label: 'Pocket (local, cloned voices, fastest)' }]
+                ? [{ id: 'pocket', label: 'Pocket (Default)' }]
                 : []),
               { id: 'supertonic', label: 'Supertonic-3 (local, 31 languages, ~5× realtime)' },
               { id: 'elevenlabs', label: 'ElevenLabs (cloud, realistic)' },

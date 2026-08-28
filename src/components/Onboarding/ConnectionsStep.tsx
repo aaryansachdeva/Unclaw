@@ -826,7 +826,8 @@ function StatusRail({
   }
   if (scope !== 'llm') {
     const voiceLabel =
-      ttsProvider === 'kokoro' ? 'Kokoro'
+      ttsProvider === 'pocket' ? 'Pocket'
+      : ttsProvider === 'kokoro' ? 'Kokoro'
       : ttsProvider === 'supertonic' ? 'Supertonic'
       : ttsProvider === 'qwen3' ? 'Qwen3'
       : 'ElevenLabs';
@@ -1050,7 +1051,7 @@ function VoiceSection({
             // Pocket leads: it is the default engine (local, keyless,
             // cloned per character). Kokoro and Qwen3 retired 2026-08-27;
             // saved selections migrate to Pocket in migrateApiKeys.
-            { id: 'pocket',     label: 'Pocket (local, cloned voices)' },
+            { id: 'pocket',     label: 'Pocket (Default)' },
             { id: 'supertonic', label: 'Supertonic-3' },
             { id: 'elevenlabs', label: 'ElevenLabs' },
           ]}
