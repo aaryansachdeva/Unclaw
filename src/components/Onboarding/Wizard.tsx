@@ -1013,12 +1013,12 @@ export function Wizard({
                 transition={{ duration: 0.12, ease: EASE_OUT_EXPO }}
                 style={footerSecondaryStyle}
                 onMouseEnter={(e) => {
-                  e.currentTarget.style.borderColor = 'var(--glass-border-focus)';
-                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.07)';
+                  e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.38)';
+                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.17)';
                 }}
                 onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = 'var(--glass-border)';
-                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
+                  e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.24)';
+                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.11)';
                 }}
               >
                 Sign in
@@ -1086,16 +1086,19 @@ const footerLinkStyle: React.CSSProperties = {
 // thing on glass chrome" — we re-use that here so Continue/Finish read
 // as siblings of the send button rather than a one-off red badge.
 // Secondary action: same pill geometry as the primary but glass instead
-// of white, so it reads as a real second choice without competing.
+// of white. Raised well above field-tint level (0.04 read as a disabled
+// ghost next to the solid white primary, and a returning user could not
+// find it): a real lit surface with a defined edge, still plainly
+// subordinate to white. No ember here, the accent stays precious.
 const footerSecondaryStyle: React.CSSProperties = {
-  background: 'rgba(255, 255, 255, 0.04)',
+  background: 'rgba(255, 255, 255, 0.11)',
   color: 'var(--text-primary)',
-  border: '1px solid var(--glass-border)',
+  border: '1px solid rgba(255, 255, 255, 0.24)',
   borderRadius: 10,
   fontSize: 13,
   fontFamily: 'inherit',
-  fontWeight: 500,
-  padding: '8px 14px',
+  fontWeight: 550,
+  padding: '8px 16px',
   cursor: 'pointer',
   letterSpacing: '0.005em',
   flexShrink: 0,
