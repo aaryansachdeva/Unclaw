@@ -20,7 +20,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { StepHeader } from './StepHeader';
-import { FIELD_BASE, applyFocus, applyBlur, FieldLabel, STEP_COL_WIDTH } from './onboardingKit';
+import { FIELD_BASE, applyFocus, applyBlur, FieldLabel } from './onboardingKit';
 import { type IdentityValues } from './IdentityStep';
 import type { InterestsValues } from './InterestsStep';
 
@@ -157,30 +157,34 @@ export function GettingToKnowYou({
     </motion.button>
   );
 
+  // Layout (2026-08-27): this step got short enough that the shared
+  // side-header pattern left a void where taller steps put their fields.
+  // Header runs as a band across the top, the one REQUIRED field (name)
+  // sits alone under it at a deliberate width, and the two optional
+  // texture fields share a row: content fills the panel instead of
+  // huddling in the right half.
   return (
-    <div style={{ display: 'flex', gap: 30, alignItems: 'flex-start' }}>
-      <div style={{ width: STEP_COL_WIDTH, flexShrink: 0, paddingTop: 2 }}>
-        <StepHeader title="Getting to know you" subtitle={subtitle} />
-      </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20, width: 760, maxWidth: '100%' }}>
+      <StepHeader title="Getting to know you" subtitle={subtitle} />
 
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 18 }}>
-        {!hideName && (
-          <FieldLabel text="What should I call you?">
-            <input
-              type="text"
-              autoFocus
-              value={identity.name}
-              onChange={(e) => onIdentityChange({ ...identity, name: e.target.value })}
-              onKeyDown={onNameKey}
-              placeholder="Your name"
-              style={FIELD_BASE}
-              onFocus={(e) => applyFocus(e.target)}
-              onBlur={(e) => applyBlur(e.target)}
-            />
-          </FieldLabel>
-        )}
+      {!hideName && (
+        <FieldLabel text="What should I call you?" style={{ width: 420, maxWidth: '100%' }}>
+          <input
+            type="text"
+            autoFocus
+            value={identity.name}
+            onChange={(e) => onIdentityChange({ ...identity, name: e.target.value })}
+            onKeyDown={onNameKey}
+            placeholder="Your name"
+            style={FIELD_BASE}
+            onFocus={(e) => applyFocus(e.target)}
+            onBlur={(e) => applyBlur(e.target)}
+          />
+        </FieldLabel>
+      )}
 
-        <FieldLabel text="Hobbies">
+      <div style={{ display: 'flex', gap: 26, alignItems: 'flex-start' }}>
+        <FieldLabel text="Hobbies" style={{ flex: 1.25, minWidth: 0 }}>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
             {HOBBIES.map(({ tag, Icon }) =>
               renderChip(tag, Icon, interests.interests.includes(tag)))}
@@ -229,9 +233,13 @@ export function GettingToKnowYou({
           </div>
         </FieldLabel>
 
-        <FieldLabel text="Anything else" count={showCount ? charsLeft : undefined}>
+        <FieldLabel
+          text="Anything else"
+          count={showCount ? charsLeft : undefined}
+          style={{ flex: 1, minWidth: 0 }}
+        >
           <textarea
-            rows={2}
+            rows={5}
             value={interests.notes}
             onChange={(e) => setNotes(e.target.value)}
             placeholder="Favorite shows, current project, allergies, anything."
