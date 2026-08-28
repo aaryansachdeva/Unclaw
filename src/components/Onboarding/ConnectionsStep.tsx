@@ -499,18 +499,24 @@ export function ConnectionsStep({
       ? 'Provider and model for chat. Anything stored is encrypted on this device.'
       : 'Pick a chat provider and a voice. Anything stored is encrypted on this device.';
 
+  // Band layout (2026-08-27), matching the other reworked steps: header
+  // across the top instead of a side column that left a void, and the LLM
+  // page splits into two content columns (chat basics | agentic) so the
+  // freed width absorbs the height that used to scroll.
   return (
-    <div style={{ display: 'flex', gap: 28, alignItems: 'flex-start' }}>
-      <div style={{ width: 180, flexShrink: 0, paddingTop: 2 }}>
-        <StepHeader
-          title={headerTitle}
-          subtitle={headerSubtitle}
-        />
-      </div>
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 18,
+        width: showLlm ? 880 : 760,
+        maxWidth: '100%',
+      }}
+    >
+      <StepHeader title={headerTitle} subtitle={headerSubtitle} wide />
 
       <div
         style={{
-          flex: 1,
           minWidth: 0,
           display: 'flex',
           flexDirection: 'column',
@@ -518,7 +524,8 @@ export function ConnectionsStep({
         }}
       >
         {showLlm && (
-        <>
+        <div style={{ display: 'flex', gap: 28, alignItems: 'flex-start' }}>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
         {/* Provider + Model on one row. Model collapses to the placeholder
             when no provider is selected. */}
         <div style={{ display: 'flex', gap: 12 }}>
@@ -615,6 +622,9 @@ export function ConnectionsStep({
           );
         })()}
 
+        </div>
+
+        <div style={{ flex: 1.15, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <AgenticSection
           values={values}
           onChange={onChange}
@@ -692,7 +702,8 @@ export function ConnectionsStep({
             />
           </>
         )}
-        </>
+        </div>
+        </div>
         )}
 
         {showVoice && (
