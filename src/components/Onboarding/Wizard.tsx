@@ -607,7 +607,19 @@ export function Wizard({
   const skipLabel = 'Skip';
 
   const stepBody = useMemo(() => {
-    if (step === 'welcome') return <WelcomeStep />;
+    if (step === 'welcome') {
+      return (
+        <WelcomeStep
+          onSignIn={() => {
+            // Returning user: straight to login, and don't re-impose the
+            // key gate on Finish; their profile follows the account and
+            // keys (if any) are already on this machine or set up later.
+            skipKeysRef.current = true;
+            setStep('auth');
+          }}
+        />
+      );
+    }
     if (step === 'claws') return <ClawsStep />;
     if (step === 'auth') {
       return (

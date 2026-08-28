@@ -8,7 +8,13 @@
 import { BrandLogo } from './BrandLogo';
 import { TypewriterTitle } from '../Auth/TypewriterTitle';
 
-export function WelcomeStep() {
+interface Props {
+  /** Returning-user shortcut: jump straight to sign-in and skip the
+   *  setup pages (their profile follows the account). */
+  onSignIn?: () => void;
+}
+
+export function WelcomeStep({ onSignIn }: Props) {
   return (
     <div
       style={{
@@ -49,6 +55,28 @@ export function WelcomeStep() {
           A quick minute of setup so I can sound a little more like
           someone you&apos;d actually want to talk to.
         </p>
+        {onSignIn && (
+          <button
+            type="button"
+            onClick={onSignIn}
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              fontFamily: 'inherit',
+              fontSize: 12.5,
+              color: 'var(--text-ghost)',
+              cursor: 'pointer',
+              letterSpacing: '0.005em',
+              textAlign: 'left',
+              transition: 'color 0.15s var(--ease-out-quart)',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text-primary)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-ghost)'; }}
+          >
+            Already have an account? <span style={{ textDecoration: 'underline', textUnderlineOffset: 3 }}>Sign in</span>
+          </button>
+        )}
       </div>
     </div>
   );
