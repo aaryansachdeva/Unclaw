@@ -42,8 +42,9 @@ import {
 } from '../../services/apiKeys';
 import {
   playPreGenAudio, speakLiveLine, PRE_GEN_LINES,
-  type PreGenLine, type OnboardingLine,
+  type PreGenLine,
 } from '../../services/onboardingAudio';
+import { lineFor, type OnboardingBeat } from '../../services/onboardingLines';
 import type { SoulChatResult } from '../../services/soulChat';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
@@ -314,43 +315,64 @@ export function Wizard({
   // lines carry the user's actual name. The pre-gen MP3s remain the
   // fallback when live synthesis fails, so the wizard never goes silent
   // on a soul hiccup.
-  const playLine = (line: OnboardingLine, text?: string) => {
+  // One line at a time, in order. Beats can land close together (naming
+  // yourself, then naming her, is two taps apart) and each dispatch drives
+  // the SAME face and voice, so two overlapping lines meant one stomped
+  // the other: the symptom was her silently skipping the line that
+  // acknowledges the name you just gave her. Every request now queues
+  // behind the previous line's own duration.
+  const speechQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const playLine = (
+    beat: OnboardingBeat,
+    opts?: { survivesUnmount?: boolean },
+  ) => {
     if (mutedRef.current) return;
-    void (async () => {
+    // Composed HERE, not in the queue, so it reflects the names as they
+    // were when the beat fired.
+    const text = lineFor(beat, {
+      userName: identity.name.trim() || undefined,
+      agentName: vibe.agent_name.trim() || undefined,
+    });
+    speechQueueRef.current = speechQueueRef.current.then(async () => {
       let result;
       try {
-        result = text
-          ? await speakLiveLine(line, text)
-          : await playPreGenAudio(line as PreGenLine);
+        result = await speakLiveLine(beat, text);
       } catch (err) {
-        // Only the original four beats have a shipped MP3 to fall back
-        // to; live-only lines (the agent-name acknowledgement) just stay
-        // silent on failure.
-        if (!PRE_GEN_LINES.has(line)) {
-          console.warn(`[onboarding] live "${line}" failed (no fallback)`, err);
-          return;
-        }
-        console.warn(`[onboarding] live "${line}" failed, falling back to pre-gen`, err);
+        // Live synthesis is the path; the shipped MP3s are only a safety
+        // net for the four beats that have one, and they carry the old
+        // fixed wording rather than this line's.
+        const canFallBack = PRE_GEN_LINES.has(beat);
+        console.warn(`[onboarding] live "${beat}" failed`
+                     + `${canFallBack ? ', falling back to pre-gen' : ' (no fallback)'}`, err);
+        if (!canFallBack) return;
         try {
-          result = await playPreGenAudio(line as PreGenLine);
+          result = await playPreGenAudio(beat as PreGenLine);
         } catch (err2) {
-          console.warn(`[onboarding] pre-gen "${line}" failed`, err2);
+          console.warn(`[onboarding] pre-gen "${beat}" failed`, err2);
           return;
         }
       }
-      if (!wizardMountedRef.current) {
-        console.debug(`[onboarding] line "${line}" arrived after `
-                      + 'wizard unmounted — dropping');
+      // The farewell line is dispatched as the wizard tears down, by
+      // design (she talks while the user settles into the workspace), so
+      // it opts out of the guard that stops stray lines playing after the
+      // wizard is gone.
+      if (!wizardMountedRef.current && !opts?.survivesUnmount) {
+        console.debug(`[onboarding] line "${beat}" arrived after `
+                      + 'wizard unmounted, dropping');
         return;
       }
       onChatResult(result);
-    })();
+      // Hold the queue for the length of what is now playing, so the next
+      // beat waits its turn instead of cutting in.
+      const dur = typeof result?.duration === 'number' ? result.duration : 0;
+      if (dur > 0) await new Promise((r) => setTimeout(r, dur * 1000 + 200));
+    }).catch(() => { /* a failed line must not wedge the queue */ });
   };
 
   // Ref so effects defined above handleFinish can call it without
   // re-ordering the component.
   const handleFinishRef = useRef<(() => Promise<void>) | null>(null);
-  const agentNameAckRef = useRef(false);
+  const agentNameAckRef = useRef<string | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -421,7 +443,7 @@ export function Wizard({
     if (welcomeFiredRef.current) return;
     welcomeFiredRef.current = true;
     if (mutedRef.current) return;
-    playLine('welcome', "Welcome to Unclaw. I'm Grace. Let's get you set up.");
+    playLine('welcome');
     // playLine is defined per-render and is intentionally omitted —
     // the ref guard guarantees fire-once regardless of identity churn.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -444,21 +466,20 @@ export function Wizard({
     // session — the next time the user hits Continue (out of Vibe
     // etc.) it doesn't replay because we only check `step` here.
     if (step === 'identity') {
-      const n = identity.name.trim();
-      playLine('nice-to-meet-you',
-        n ? `Nice to meet you, ${n}!` : 'Nice to meet you!');
+      playLine('nice-to-meet-you');
     }
     // Naming the agent gets acknowledged in HER OWN new name: the moment
     // the name becomes real. Skipped when left as the Grace default, and
     // fires once per wizard session.
     if (step === 'vibe') {
       const agentName = vibe.agent_name.trim();
-      if (agentName && agentName.toLowerCase() !== 'grace' && !agentNameAckRef.current) {
-        agentNameAckRef.current = true;
-        playLine('name-liked',
-          `${agentName}? Oh, I like that. That's me now. `
-          + 'And if you ever want to adjust me, or any of your agents, '
-          + 'the agents section has it all.');
+      // Re-fires if they go back and rename her: the acknowledgement is
+      // about the name, so a NEW name deserves one. Guarded per name, not
+      // once per session.
+      if (agentName && agentName.toLowerCase() !== 'grace'
+          && agentNameAckRef.current !== agentName.toLowerCase()) {
+        agentNameAckRef.current = agentName.toLowerCase();
+        playLine('name-liked');
       }
     }
     setStep(stepOrder[stepIdx + 1]);
@@ -536,10 +557,7 @@ export function Wizard({
       // Personalized greeting can come back later via a /chat call
       // once the keys are confirmed working.
       onComplete(saved);
-      const n = identity.name.trim();
-      playLine('excited-to-start',
-        n ? `We're all set, ${n}. I'm so excited to start!`
-          : "We're all set. I'm so excited to start!");
+      playLine('excited-to-start', { survivesUnmount: true });
     } catch (err) {
       setSubmitting(false);
       setError(err instanceof Error ? err.message : 'Save failed');
@@ -683,8 +701,7 @@ export function Wizard({
           onChange={setApiKeys}
           validated={llmValidated}
           onValidatedChange={setLlmValidated}
-          onCheckFailed={() => playLine('keys-wrong',
-            "Hmm, those keys don't look right. Let's take another look.")}
+          onCheckFailed={() => playLine('keys-wrong')}
           agentName={vibe.agent_name}
         />
       );
@@ -696,8 +713,7 @@ export function Wizard({
         onChange={setApiKeys}
         validated={voiceValidated}
         onValidatedChange={setVoiceValidated}
-        onCheckFailed={() => playLine('keys-wrong',
-          "Hmm, those keys don't look right. Let's take another look.")}
+        onCheckFailed={() => playLine('keys-wrong')}
         agentName={vibe.agent_name}
       />
     );

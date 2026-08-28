@@ -75,7 +75,7 @@ export async function speakLiveLine(
   line: OnboardingLine,
   text: string,
 ): Promise<SoulChatResult> {
-  const meta = META[line];
+  const meta = META[line] ?? META['nice-to-meet-you'];
   const res = await fetch(`${getSoulBaseUrl()}/speak`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
