@@ -149,6 +149,12 @@ export function Wizard({
   // Set by the welcome screen's Sign in button; cleared by walking Back to
   // welcome, so the two forks stay honest in both directions.
   const [signInPath, setSignInPath] = useState(false);
+  // "Skip for now" on the key steps, and the returning-user path, waive
+  // the key gate. This is STATE, not a ref: the Finish button's enabled
+  // state depends on it, and a ref mutation does not re-render, which
+  // left Finish permanently greyed out on the last step for anyone who
+  // skipped keys or signed in as a returning user.
+  const [keysWaived, setKeysWaived] = useState(false);
   const stepOrder = firstRun
     ? (signInPath
         ? RETURNING_STEPS
@@ -360,15 +366,15 @@ export function Wizard({
   // ConnectionsStep too.
   const missingKeyFields = missingRequiredKeyFields(apiKeys);
   const hasName = identity.name.trim().length > 0;
-  const canFinish = hasName
-    && missingKeyFields.length === 0
-    && keysValidated;
-  // Welcome step has no validation gate; identity needs a name; the
-  // rest are always advance-able EXCEPT connections (the last step),
-  // where Continue/Finish is blocked until the keys are filled in.
-  // LLM page advances unconditionally; the voice page (the LAST step)
-  // is the one that gates Continue/Finish on verification — that's
-  // where the verify panel lives.
+  // Keys are a hard gate UNLESS explicitly waived (Skip for now, or the
+  // returning-user path whose setup already lives on the account).
+  const keysReady = keysWaived || (missingKeyFields.length === 0 && keysValidated);
+  const canFinish = hasName && keysReady;
+  // Welcome has no gate; identity needs a name; login needs a session.
+  // The voice page hosts the verify panel, so it holds the key gate: not
+  // because it is last any more (login and Claws follow it) but because
+  // that is where the user can act on it, and Skip for now sits right
+  // there as the explicit waiver.
   const canAdvance = step === 'welcome'
     ? true
     : step === 'auth'
@@ -376,7 +382,7 @@ export function Wizard({
     : step === 'identity'
     ? hasName
     : step === 'voice'
-    ? canFinish
+    ? keysReady
     : true;
 
   // Auth sits at the END of the flow now. Signing in mid-list (should the
@@ -466,7 +472,7 @@ export function Wizard({
     // again (and the dots go back to describing it).
     if (prev === 'welcome') {
       setSignInPath(false);
-      skipKeysRef.current = false;
+      setKeysWaived(false);
     }
     setStep(prev);
   };
@@ -483,8 +489,13 @@ export function Wizard({
       if (hasName) void handleFinish();
       return;
     }
-    if (isLastStep) void handleFinish();
-    else setStep(stepOrder[stepIdx + 1]);
+    if (isLastStep) { void handleFinish(); return; }
+    // Escaping past a key step means the same thing as pressing "Skip for
+    // now": waive the gate. Without this the user sails past the verify
+    // panel and finds Finish greyed out on the last step with no way back
+    // to the thing blocking it.
+    if (step === 'llm' || step === 'voice') setKeysWaived(true);
+    setStep(stepOrder[stepIdx + 1]);
   };
 
   // Save the profile + whatever BYOK keys are present, then complete. Shared by
@@ -554,7 +565,7 @@ export function Wizard({
     }
     // The user explicitly skipped key setup on the LLM/voice pages;
     // don't re-impose the key gate here.
-    if (skipKeysRef.current) {
+    if (keysWaived) {
       await finishOnboarding();
       return;
     }
@@ -587,7 +598,6 @@ export function Wizard({
   // "Skip for now" on the LLM / voice steps: finish onboarding WITHOUT the key
   // gate. Whatever keys the user did enter are still saved; the rest they set up
   // later in Settings (the apiKeysNotice nudges them). Name is still required.
-  const skipKeysRef = useRef(false);
   const handleSkipSetup = () => {
     if (!hasName) {
       setStep('identity');
@@ -598,7 +608,7 @@ export function Wizard({
     // not. Remember the skip so handleFinish doesn't re-impose the key
     // gate, and continue forward instead of finishing on the spot: to
     // login first if it's still owed, else straight to Claws.
-    skipKeysRef.current = true;
+    setKeysWaived(true);
     const next = !hasSession && stepOrder.indexOf('auth') >= 0 ? 'auth'
       : stepOrder.indexOf('claws') >= 0 ? 'claws' : null;
     if (next) setStep(next as StepKey);
@@ -640,7 +650,7 @@ export function Wizard({
             // Returning user: switch to the short path and step into it.
             // Key gate waived, their profile follows the account.
             setSignInPath(true);
-            skipKeysRef.current = true;
+            setKeysWaived(true);
             setStep('auth');
           }}
         />
