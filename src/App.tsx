@@ -2800,13 +2800,33 @@ function AppMain() {
     } catch { /* ignore */ }
     setTimeout(() => setUeSessionEpoch((e) => e + 1), 150);
     await signOut(authToken ?? null);
+
+    // Drop the ACCOUNT-SCOPED local data with the session. Clearing React
+    // state alone left soul holding the signed-out account's settings blob
+    // (profile, roster, wardrobe) and the chat memory in localStorage, so a
+    // logged-out app kept wearing the previous user's character setup, and
+    // a guest on this machine inherited a stranger's profile.
+    //
+    // LOCAL only: the cloud copy is untouched, so signing back in restores
+    // everything through reconcileForAccount (which treats cloud as
+    // authoritative). BYOK keys stay too: they are device-scoped, not
+    // account-scoped, and the owner-change path already scrubs them when a
+    // DIFFERENT account claims the machine. Same reason the local-owner
+    // marker survives: it is what lets that path tell "different account"
+    // from "unknown", and wiping it here would silently hand the next
+    // account the previous one's keys.
+    try { await deleteSettings(); }
+    catch (err) { console.warn('[signout] local settings clear failed', err); }
+    clearLocalChatHistory();
+    resetStack();
+
     setAuthToken(null);
     setAuthUser(null);
     setProfile(undefined);
     setWizardMode(null);
     // Allow a fresh sync if the user signs back in this session.
     profileSyncedRef.current = false;
-  }, [authToken, pixelStreaming]);
+  }, [authToken, pixelStreaming, resetStack]);
 
   // Account reset, wipes every local + cloud surface and drops the
   // app back to the SignInScreen (or first-run wizard for guests).
