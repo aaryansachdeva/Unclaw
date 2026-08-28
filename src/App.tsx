@@ -556,7 +556,7 @@ function AppMain() {
   // Global environment — backdrop + key light + post effect (persists across
   // agents, NOT per-instance). See src/hooks/useEnvironment.ts. Applied on every
   // switch + whenever it changes.
-  const { environment, setEnvironment } = useEnvironment();
+  const { environment, setEnvironment, resetEnvironment, hydrateEnvironment } = useEnvironment();
   // Passthrough speech prefs (talkativeness + mute). Device-local + mirrored
   // to soul so the external agent honors them. See usePassthroughPrefs.
   const { prefs: passthroughPrefs, setVerbosity: setPassthroughVerbosity, toggleMuted: togglePassthroughMuted } = usePassthroughPrefs();
@@ -894,6 +894,22 @@ function AppMain() {
     if (!token || !prof) return;
     void saveSettingsEverywhere({ ...prof, roster: agentStack }, token);
   }, [agentStack]);
+  // The environment (backdrop + key light + effect) follows the account the
+  // same way the roster does. Same three guards: skip the first run (that is
+  // just the localStorage hydration), skip an echo of a cloud restore, and
+  // only sync for a signed-in, onboarded account.
+  const envRef = useRef(environment);
+  envRef.current = environment;
+  const suppressEnvPushRef = useRef(false);
+  const envPushPrimedRef = useRef(false);
+  useEffect(() => {
+    if (!envPushPrimedRef.current) { envPushPrimedRef.current = true; return; }
+    if (suppressEnvPushRef.current) { suppressEnvPushRef.current = false; return; }
+    const token = authTokenRef.current;
+    const prof = profileRef.current;
+    if (!token || !prof) return;
+    void saveSettingsEverywhere({ ...prof, environment }, token);
+  }, [environment]);
   // Wizard visibility + mode. 'first' = no profile yet, can't be cancelled.
   // 'edit' = user reopened to tweak; cancel returns to chat.
   // null = wizard closed.
@@ -2762,6 +2778,31 @@ function AppMain() {
         if (!stored) {
           setAuthToken(null);
           setAuthUser(null);
+          // Self-heal. No stored session, but if an account previously
+          // owned this machine's data then a sign-out (or a crash between
+          // the two) left the account-scoped copies behind, and the app
+          // would boot wearing the last user's character setup. Purge them
+          // here so it cannot survive a restart either.
+          //
+          // Keyed on the STORED TOKEN being absent, never on the network
+          // user-fetch failing: a signed-in user who is merely offline must
+          // not be mistaken for a signed-out one and have their local data
+          // deleted. The cloud copy is untouched regardless, so signing
+          // back in restores everything.
+          const priorOwner = await (async () => {
+            try {
+              const durable = await window.electronAPI?.getLocalOwner?.();
+              if (durable) return durable;
+            } catch { /* fall through */ }
+            try { return localStorage.getItem(LOCAL_ACCOUNT_KEY); } catch { return null; }
+          })();
+          if (priorOwner) {
+            try { await deleteSettings(); }
+            catch (err) { console.warn('[auth] stale local settings purge failed', err); }
+            clearLocalChatHistory();
+            resetStack();
+            resetEnvironment();
+          }
           return;
         }
         const user = await fetchCurrentUser(stored);
@@ -2781,7 +2822,7 @@ function AppMain() {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [resetStack, resetEnvironment]);
 
   const handleSignedIn = useCallback((session: AuthSession) => {
     setAuthToken(session.token);
@@ -2800,13 +2841,34 @@ function AppMain() {
     } catch { /* ignore */ }
     setTimeout(() => setUeSessionEpoch((e) => e + 1), 150);
     await signOut(authToken ?? null);
+
+    // Drop the ACCOUNT-SCOPED local data with the session. Clearing React
+    // state alone left soul holding the signed-out account's settings blob
+    // (profile, roster, wardrobe) and the chat memory in localStorage, so a
+    // logged-out app kept wearing the previous user's character setup, and
+    // a guest on this machine inherited a stranger's profile.
+    //
+    // LOCAL only: the cloud copy is untouched, so signing back in restores
+    // everything through reconcileForAccount (which treats cloud as
+    // authoritative). BYOK keys stay too: they are device-scoped, not
+    // account-scoped, and the owner-change path already scrubs them when a
+    // DIFFERENT account claims the machine. Same reason the local-owner
+    // marker survives: it is what lets that path tell "different account"
+    // from "unknown", and wiping it here would silently hand the next
+    // account the previous one's keys.
+    try { await deleteSettings(); }
+    catch (err) { console.warn('[signout] local settings clear failed', err); }
+    clearLocalChatHistory();
+    resetStack();
+    resetEnvironment();
+
     setAuthToken(null);
     setAuthUser(null);
     setProfile(undefined);
     setWizardMode(null);
     // Allow a fresh sync if the user signs back in this session.
     profileSyncedRef.current = false;
-  }, [authToken, pixelStreaming]);
+  }, [authToken, pixelStreaming, resetStack, resetEnvironment]);
 
   // Account reset, wipes every local + cloud surface and drops the
   // app back to the SignInScreen (or first-run wizard for guests).
@@ -3726,6 +3788,17 @@ function AppMain() {
           resetStack();
         }
 
+        // Same rule for the room: cloud wins when it has one, and a machine
+        // changing hands drops back to stock rather than keeping the previous
+        // owner's lighting. The apply effect pushes whatever lands here to UE.
+        if (p?.environment) {
+          suppressEnvPushRef.current = true;
+          hydrateEnvironment(p.environment);
+        } else if (ownerChanged) {
+          suppressEnvPushRef.current = true;
+          resetEnvironment();
+        }
+
         // Record ownership in BOTH the durable main-process store (authoritative)
         // and localStorage (legacy mirror) so the marker can't desync from the
         // keys it guards.
@@ -3736,8 +3809,11 @@ function AppMain() {
         // profile predates roster-sync (an account onboarded before the roster
         // was folded into the blob). Best-effort, version-less; cheap no-op
         // for fresh accounts (just base Grace).
-        if (p && !p.roster && authToken) {
-          void saveSettingsEverywhere({ ...p, roster: stackRef.current }, authToken);
+        if (p && (!p.roster || !p.environment) && authToken) {
+          void saveSettingsEverywhere(
+            { ...p, roster: stackRef.current, environment: envRef.current },
+            authToken,
+          );
         }
 
         // Restore chat history for the signed-in account (cloud wins, like the

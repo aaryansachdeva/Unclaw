@@ -676,16 +676,15 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   llm_model:                null,
   llm_api_key:              null,
   ollama_base_url:          null,
-  // Pocket by default: local, keyless, and per-character voices, so a brand
-  // new user hears the character speak without entering a single API key.
-  // With ElevenLabs as the default the wizard's "Required to finish" gate
-  // demanded a key before onboarding could complete at all (see
-  // ConnectionsStep: the voice requirement is `!!key` for elevenlabs and
-  // `!!tts_provider` for everything else).
+  // Pocket as of 2026-08-27: local, keyless, per-character clones, weights
+  // ship with the install via runtimeAssets. Saved profiles keep their own
+  // choice (spread-with-defaults only fills absent fields).
   //
-  // Runs on MLX on macOS and on the official torch package on Windows/Linux;
-  // both are local. migrateApiKeys still rescues anyone whose saved profile
-  // names an engine their platform cannot run.
+  // The "REVISIT for Windows/Linux" this comment used to carry is DONE
+  // (2026-08-28): pocket_runtime is MLX and Apple-silicon only, but
+  // pocket_torch_runtime runs the same model on the official torch package,
+  // which Windows and Linux already ship for lipsync. providers/tts/pocket
+  // picks by platform, so Pocket is a valid default everywhere.
   tts_provider:             'pocket',
   elevenlabs_api_key:       null,
   // Grace's cloned voice on ElevenLabs (the persona-canonical voice).
@@ -747,21 +746,10 @@ function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
   if (!POCKET_TTS_ENABLED && merged.tts_provider === 'pocket') {
     merged.tts_provider = 'supertonic';
   }
-  // Same rescue for an engine this PLATFORM cannot run, which the flag alone
-  // does not cover. qwen3's runtimes only ship on macOS, so a profile arriving
-  // from a Mac - through account sync, or just a copied profile - would sit on
-  // a selection soul refuses, and the user would hear nothing with no way to
-  // see why (the option that would explain it is not in their dropdown).
-  // Pocket is NOT in this list: it runs on every platform now.
-  const isMac =
-    typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
-  if (!isMac && merged.tts_provider === 'qwen3') {
-    merged.tts_provider = 'supertonic';
-  }
-  // Kokoro and Qwen3 were retired from the pickers on 2026-08-28. A saved
-  // profile still naming one would sit on a setting the user can no longer
-  // see or change, so move it to the default engine. Same reasoning as the
-  // Pocket rescue above: an invisible selection is worse than a moved one.
+  // Retired engines (2026-08-27): Kokoro and Qwen3 leave the product.
+  // Saved selections migrate to Pocket, the like-for-like local default
+  // (keyless, cloned per-character voices), so nobody keeps a provider
+  // the UI can no longer explain.
   if (merged.tts_provider === 'kokoro' || merged.tts_provider === 'qwen3') {
     merged.tts_provider = 'pocket';
   }

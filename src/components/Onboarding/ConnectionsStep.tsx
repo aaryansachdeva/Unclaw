@@ -18,7 +18,7 @@ import {
   Eye, EyeOff, Search, ExternalLink, Zap,
   AlertCircle, CheckCircle2, Loader2, Download,
 } from 'lucide-react';
-import { StepHeader } from './StepHeader';
+import { StepShell } from './onboardingKit';
 import { Dropdown } from './Dropdown';
 import {
   CliProviderStatusCard,
@@ -500,17 +500,9 @@ export function ConnectionsStep({
       : 'Pick a chat provider and a voice. Anything stored is encrypted on this device.';
 
   return (
-    <div style={{ display: 'flex', gap: 28, alignItems: 'flex-start' }}>
-      <div style={{ width: 180, flexShrink: 0, paddingTop: 2 }}>
-        <StepHeader
-          title={headerTitle}
-          subtitle={headerSubtitle}
-        />
-      </div>
-
+    <StepShell title={headerTitle} subtitle={headerSubtitle}>
       <div
         style={{
-          flex: 1,
           minWidth: 0,
           display: 'flex',
           flexDirection: 'column',
@@ -762,7 +754,7 @@ export function ConnectionsStep({
           />
         ))}
       </div>
-    </div>
+    </StepShell>
   );
 }
 
@@ -821,10 +813,10 @@ function StatusRail({
   }
   if (scope !== 'llm') {
     const voiceLabel =
-      ttsProvider === 'kokoro' ? 'Kokoro'
+      ttsProvider === 'pocket' ? 'Pocket'
+      : ttsProvider === 'kokoro' ? 'Kokoro'
       : ttsProvider === 'supertonic' ? 'Supertonic'
       : ttsProvider === 'qwen3' ? 'Qwen3'
-      : ttsProvider === 'pocket' ? 'Pocket'
       : 'ElevenLabs';
     rows.push(rowFor(voiceLabel, result?.tts ?? result?.elevenlabs));
   }
@@ -1042,15 +1034,13 @@ function VoiceSection({
         <Dropdown
           value={values.tts_provider}
           onChange={(v) => setTtsProvider(v as TtsProviderId)}
-          // Pocket first: it is the default engine, local and keyless, so the
-          // wizard can be finished without pasting a key at all. Kokoro and
-          // Qwen3 are RETIRED from the picker (2026-08-28) - the branches below
-          // stay for anyone whose saved profile still names them, and
-          // migrateApiKeys moves them to Pocket on next load.
           options={[
-            { id: 'pocket',     label: 'Pocket (local, no key)' },
-            { id: 'elevenlabs', label: 'ElevenLabs' },
+            // Pocket leads: it is the default engine (local, keyless,
+            // cloned per character). Kokoro and Qwen3 retired 2026-08-27;
+            // saved selections migrate to Pocket in migrateApiKeys.
+            { id: 'pocket',     label: 'Pocket (Default)' },
             { id: 'supertonic', label: 'Supertonic-3' },
+            { id: 'elevenlabs', label: 'ElevenLabs' },
           ]}
         />
       </FieldLabel>
@@ -1069,23 +1059,6 @@ function VoiceSection({
             autoComplete="off"
           />
         </FieldLabel>
-      )}
-
-      {/* Pocket branch. Nothing to configure: it is local and keyless, and
-          the voice is per-character (resolved by soul from the character's
-          stem), so there is no global voice column to offer here the way
-          Supertonic and ElevenLabs have. The line exists so selecting Pocket
-          does not look like a dead option with no panel. */}
-      {values.tts_provider === 'pocket' && (
-        <div style={{
-          fontSize: 12.5,
-          lineHeight: 1.5,
-          color: 'var(--text-secondary)',
-          padding: '2px 0',
-        }}>
-          Runs on your machine. No key, nothing to set up &mdash; each character
-          speaks in its own voice.
-        </div>
       )}
 
       {/* Supertonic branch: built-in voices + Grace clone (auto-fetched
@@ -1115,57 +1088,24 @@ function VoiceSection({
         </FieldLabel>
       )}
 
-      {/* Kokoro branch, mode picker + install panel / endpoint
-          input + voice dropdown. */}
-      {values.tts_provider === 'kokoro' && (
-        <>
-          <KokoroModePicker
-            mode={values.kokoro_mode}
-            onChange={setKokoroMode}
-          />
-          {values.kokoro_mode === 'recommended' && (
-            <KokoroInstallPanel
-              status={kokoro}
-              onInstall={handleInstallClick}
-            />
-          )}
-          {values.kokoro_mode === 'custom' && (
-            <FieldLabel
-              text="Kokoro endpoint URL"
-            >
-              <input
-                type="url"
-                value={values.kokoro_endpoint ?? ''}
-                onChange={(e) => setKokoroEndpoint(e.target.value)}
-                placeholder="http://localhost:8880"
-                spellCheck={false}
-                autoComplete="off"
-                style={FIELD_BASE}
-                onFocus={(e) => applyFocus(e.target)}
-                onBlur={(e) => applyBlur(e.target)}
-              />
-            </FieldLabel>
-          )}
-          <FieldLabel text="Voice">
-            <Dropdown
-              value={values.kokoro_voice ?? ''}
-              onChange={setKokoroVoice}
-              placeholder="Pick a voice"
-              options={voiceOptions}
-            />
-          </FieldLabel>
-        </>
-      )}
-
-      {/* Qwen3 branch, install panel (multi-stage) + voice dropdown.
-          No mode picker since v1 is local-only; we may add a custom
-          endpoint variant later (mirrored on Kokoro's pattern). */}
-      {values.tts_provider === 'qwen3' && (
-        <Qwen3Section
-          values={values}
-          onChange={onChange}
-          agentName={agentName}
-        />
+      {/* Pocket branch: nothing to configure. The engine ships with the
+          install, runs locally with no key, and every character keeps its
+          own cloned voice automatically. */}
+      {values.tts_provider === 'pocket' && (
+        <div
+          style={{
+            padding: '10px 12px',
+            background: 'rgba(255, 255, 255, 0.025)',
+            border: '1px solid var(--glass-border)',
+            borderRadius: 10,
+            fontSize: 12.5,
+            color: 'var(--text-secondary)',
+            lineHeight: 1.5,
+          }}
+        >
+          Cloned per character and runs on this Mac. Nothing to set up,
+          no key needed, and it is the fastest voice Unclaw ships.
+        </div>
       )}
     </div>
   );

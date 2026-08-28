@@ -42,7 +42,6 @@ import {
 } from '../services/apiKeys';
 import { Dropdown } from './Onboarding/Dropdown';
 import { POCKET_TTS_ENABLED } from '../features';
-
 import { usePassthroughPrefs } from '../hooks/usePassthroughPrefs';
 import { Slider } from './Onboarding/Slider';
 import { TZ_CATALOG } from './Onboarding/IdentityStep';
@@ -819,15 +818,13 @@ function VoiceFacet({ draft, update }: PaneContext) {
             value={draft.tts_provider}
             onChange={(v) => update('tts_provider', v as TtsProviderId)}
             options={[
-              { id: 'elevenlabs', label: 'ElevenLabs (cloud, realistic)' },
-              // Pocket is hidden unless POCKET_TTS_ENABLED. It runs on every
-              // platform now - MLX on macOS, the official torch package on
-              // Windows and Linux, which already ship torch for lipsync. Only
-              // qwen3 stays Mac-only.
+              // Pocket leads: the default engine. Kokoro and Qwen3 retired
+              // 2026-08-27 (saved selections migrate to Pocket).
               ...(POCKET_TTS_ENABLED
-                ? [{ id: 'pocket', label: 'Pocket (local, cloned voices, fastest)' }]
+                ? [{ id: 'pocket', label: 'Pocket (Default)' }]
                 : []),
               { id: 'supertonic', label: 'Supertonic-3 (local, 31 languages, ~5× realtime)' },
+              { id: 'elevenlabs', label: 'ElevenLabs (cloud, realistic)' },
             ]}
             placeholder="Choose an engine"
           />

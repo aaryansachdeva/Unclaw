@@ -27,12 +27,25 @@ export type PreGenLine =
   | 'keys-wrong'
   | 'excited-to-start';
 
+/** Lines that only exist as live Pocket synthesis: no shipped MP3 to
+ *  fall back to. They fail silent when soul is unreachable. */
+export type LiveOnlyLine = 'name-liked';
+
+export type OnboardingLine = PreGenLine | LiveOnlyLine;
+
+export const PRE_GEN_LINES: ReadonlySet<string> =
+  new Set(['welcome', 'nice-to-meet-you', 'keys-wrong', 'excited-to-start']);
+
 /** Per-clip mood + behavior for the Text2Face pass. The mood prompt
  *  goes into soul's T2F so the face matches the line; the behavior
  *  enum picks the blink/gaze/posture preset on top of that. Mood
  *  phrasing is intentionally short — Text2Face was trained to render
  *  one clean feeling, not a stack of adjectives. */
-const META: Record<PreGenLine, { mood: string; behavior: string }> = {
+const META: Record<OnboardingLine, { mood: string; behavior: string }> = {
+  'name-liked': {
+    mood: 'delighted smile',
+    behavior: 'engaged',
+  },
   'welcome': {
     mood: 'slight smile',
     behavior: 'engaged',
@@ -50,6 +63,34 @@ const META: Record<PreGenLine, { mood: string; behavior: string }> = {
     behavior: 'excited',
   },
 };
+
+/** Live onboarding line via soul's /speak: verbatim text, rendered with
+ *  the LOCAL Pocket engine and Grace's cloned voice. This is what makes
+ *  personalized lines ("Nice to meet you, Aryan") possible before any
+ *  BYOK key exists: Pocket is keyless and its weights ship with the
+ *  install, so live synthesis works from the very first wizard step.
+ *  The pre-gen MP3s below remain as the fallback when soul or the voice
+ *  engine is unavailable. */
+export async function speakLiveLine(
+  line: OnboardingLine,
+  text: string,
+): Promise<SoulChatResult> {
+  const meta = META[line];
+  const res = await fetch(`${getSoulBaseUrl()}/speak`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: text,
+      mood: meta.mood,
+      behavior: meta.behavior,
+      tts_provider: 'pocket',
+      voice_id: 'grace',
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) throw new Error(`speak ${res.status}`);
+  return (await res.json()) as SoulChatResult;
+}
 
 /** Read an MP3 blob into a base64 string (no data-URL prefix), suitable
  *  for soul's `audio_base64` field. FileReader is used so big files

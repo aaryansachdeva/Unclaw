@@ -21,7 +21,7 @@ import { VibeStep } from './VibeStep';
 import { type InterestsValues } from './InterestsStep';
 import { GettingToKnowYou } from './GettingToKnowYou';
 import { WelcomeStep } from './WelcomeStep';
-import { BrandLogo } from './BrandLogo';
+import { StepShell } from './onboardingKit';
 import { ClawsStep } from './ClawsStep';
 import { ConnectionsStep } from './ConnectionsStep';
 import { AuthPanel } from '../Auth/AuthPanel';
@@ -40,7 +40,10 @@ import {
   DEFAULT_API_KEYS,
   type ApiKeysProfile,
 } from '../../services/apiKeys';
-import { playPreGenAudio, type PreGenLine } from '../../services/onboardingAudio';
+import {
+  playPreGenAudio, speakLiveLine, PRE_GEN_LINES,
+  type PreGenLine, type OnboardingLine,
+} from '../../services/onboardingAudio';
 import type { SoulChatResult } from '../../services/soulChat';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
@@ -88,12 +91,21 @@ interface WizardProps {
 }
 
 type StepKey = 'welcome' | 'auth' | 'claws' | 'identity' | 'vibe' | 'llm' | 'voice';
-// First-run for a NOT-yet-signed-in user: lead with the stream, welcome, fold
-// login in as a step, then introduce Claws (the in-app currency) before setup.
-const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'auth', 'claws', 'identity', 'vibe', 'llm', 'voice'];
+// First-run for a NOT-yet-signed-in user (reordered 2026-08-27): the wizard
+// leads with the PERSON, not the account. Pocket runs locally with no key
+// and its weights ship with the install, so nothing early needs auth: name
+// and profile come first, then setup, then login, and Claws lands AFTER
+// the account exists (the balance it describes is real by then). Finish
+// lives on the Claws step.
+const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'identity', 'vibe', 'llm', 'voice', 'auth', 'claws'];
 // First-run when ALREADY signed in (e.g. fresh device, profile not synced):
-// skip welcome + auth, but still introduce Claws before profile setup.
-const FIRST_RUN_STEPS_AUTHED: StepKey[] = ['claws', 'identity', 'vibe', 'llm', 'voice'];
+// same person-first order, minus welcome + auth; Claws intro still shown.
+const FIRST_RUN_STEPS_AUTHED: StepKey[] = ['identity', 'vibe', 'llm', 'voice', 'claws'];
+// Returning user who picked "Sign in" on the welcome screen. A real path,
+// not a jump into the middle of the long one: Back walks it correctly and
+// the progress dots describe the three steps actually ahead (they used to
+// promise seven and strand Back on the voice page).
+const RETURNING_STEPS: StepKey[] = ['welcome', 'auth', 'claws'];
 const EDIT_STEPS: StepKey[] = ['identity', 'vibe', 'llm', 'voice'];
 
 /** localStorage key for the onboarding-mute preference. Persisted so a
@@ -134,8 +146,19 @@ export function Wizard({
   // first-run (e.g. a fresh device whose profile hasn't synced), skip the
   // welcome + login steps and go straight to profile setup. Captured once.
   const signedInAtMountRef = useRef(hasSession);
+  // Set by the welcome screen's Sign in button; cleared by walking Back to
+  // welcome, so the two forks stay honest in both directions.
+  const [signInPath, setSignInPath] = useState(false);
+  // "Skip for now" on the key steps, and the returning-user path, waive
+  // the key gate. This is STATE, not a ref: the Finish button's enabled
+  // state depends on it, and a ref mutation does not re-render, which
+  // left Finish permanently greyed out on the last step for anyone who
+  // skipped keys or signed in as a returning user.
+  const [keysWaived, setKeysWaived] = useState(false);
   const stepOrder = firstRun
-    ? (signedInAtMountRef.current ? FIRST_RUN_STEPS_AUTHED : FIRST_RUN_STEPS)
+    ? (signInPath
+        ? RETURNING_STEPS
+        : signedInAtMountRef.current ? FIRST_RUN_STEPS_AUTHED : FIRST_RUN_STEPS)
     : EDIT_STEPS;
   const [step, setStep] = useState<StepKey>(stepOrder[0]);
 
@@ -184,6 +207,12 @@ export function Wizard({
     let cancelled = false;
     void (async () => {
       const loaded = await fetchApiKeys();
+      // First-run drafts start on Pocket regardless of what a leftover
+      // apiKeys.bin says: the default engine should be what a fresh user
+      // actually sees on the voice page (a stale dev/reinstall blob was
+      // surfacing Supertonic there). The user's pick on the page is what
+      // gets saved; profile edits (non-first-run) keep the saved choice.
+      if (firstRun) loaded.tts_provider = 'pocket';
       if (!cancelled) setApiKeys(loaded);
     })();
     return () => {
@@ -280,22 +309,48 @@ export function Wizard({
   // Mount-state guard around onChatResult ensures we don't play
   // onboarding audio outside the wizard if the user closes it while
   // a request is in flight.
-  const playLine = (line: PreGenLine) => {
+  // Live-first (2026-08-27): each beat is synthesized on the spot with the
+  // local Pocket engine (keyless, ships with the install), which lets the
+  // lines carry the user's actual name. The pre-gen MP3s remain the
+  // fallback when live synthesis fails, so the wizard never goes silent
+  // on a soul hiccup.
+  const playLine = (line: OnboardingLine, text?: string) => {
     if (mutedRef.current) return;
     void (async () => {
+      let result;
       try {
-        const result = await playPreGenAudio(line);
-        if (!wizardMountedRef.current) {
-          console.debug(`[onboarding] pre-gen "${line}" arrived after `
-                        + 'wizard unmounted — dropping');
+        result = text
+          ? await speakLiveLine(line, text)
+          : await playPreGenAudio(line as PreGenLine);
+      } catch (err) {
+        // Only the original four beats have a shipped MP3 to fall back
+        // to; live-only lines (the agent-name acknowledgement) just stay
+        // silent on failure.
+        if (!PRE_GEN_LINES.has(line)) {
+          console.warn(`[onboarding] live "${line}" failed (no fallback)`, err);
           return;
         }
-        onChatResult(result);
-      } catch (err) {
-        console.warn(`[onboarding] pre-gen "${line}" failed`, err);
+        console.warn(`[onboarding] live "${line}" failed, falling back to pre-gen`, err);
+        try {
+          result = await playPreGenAudio(line as PreGenLine);
+        } catch (err2) {
+          console.warn(`[onboarding] pre-gen "${line}" failed`, err2);
+          return;
+        }
       }
+      if (!wizardMountedRef.current) {
+        console.debug(`[onboarding] line "${line}" arrived after `
+                      + 'wizard unmounted — dropping');
+        return;
+      }
+      onChatResult(result);
     })();
   };
+
+  // Ref so effects defined above handleFinish can call it without
+  // re-ordering the component.
+  const handleFinishRef = useRef<(() => Promise<void>) | null>(null);
+  const agentNameAckRef = useRef(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -311,15 +366,15 @@ export function Wizard({
   // ConnectionsStep too.
   const missingKeyFields = missingRequiredKeyFields(apiKeys);
   const hasName = identity.name.trim().length > 0;
-  const canFinish = hasName
-    && missingKeyFields.length === 0
-    && keysValidated;
-  // Welcome step has no validation gate; identity needs a name; the
-  // rest are always advance-able EXCEPT connections (the last step),
-  // where Continue/Finish is blocked until the keys are filled in.
-  // LLM page advances unconditionally; the voice page (the LAST step)
-  // is the one that gates Continue/Finish on verification — that's
-  // where the verify panel lives.
+  // Keys are a hard gate UNLESS explicitly waived (Skip for now, or the
+  // returning-user path whose setup already lives on the account).
+  const keysReady = keysWaived || (missingKeyFields.length === 0 && keysValidated);
+  const canFinish = hasName && keysReady;
+  // Welcome has no gate; identity needs a name; login needs a session.
+  // The voice page hosts the verify panel, so it holds the key gate: not
+  // because it is last any more (login and Claws follow it) but because
+  // that is where the user can act on it, and Skip for now sits right
+  // there as the explicit waiver.
   const canAdvance = step === 'welcome'
     ? true
     : step === 'auth'
@@ -327,24 +382,35 @@ export function Wizard({
     : step === 'identity'
     ? hasName
     : step === 'voice'
-    ? canFinish
+    ? keysReady
     : true;
 
-  // Auto-advance off the auth step the moment the user signs in, so login
-  // feels like a seamless beat rather than "now press Continue".
+  // Auth sits at the END of the flow now. Signing in mid-list (should the
+  // order ever change back) still auto-advances; signing in on the LAST
+  // step presses Finish for the user, once, so login lands as the final
+  // seamless beat instead of "now press Finish". handleFinish still owns
+  // the gates (name, keys, verify) and routes back if something is missing.
+  const autoFinishedRef = useRef(false);
   useEffect(() => {
-    if (step === 'auth' && hasSession) {
-      const idx = stepOrder.indexOf('auth');
-      if (idx >= 0 && idx < stepOrder.length - 1) setStep(stepOrder[idx + 1]);
+    if (step !== 'auth' || !hasSession) return;
+    const idx = stepOrder.indexOf('auth');
+    if (idx >= 0 && idx < stepOrder.length - 1) {
+      setStep(stepOrder[idx + 1]);
+      return;
+    }
+    if (!autoFinishedRef.current) {
+      autoFinishedRef.current = true;
+      void handleFinishRef.current?.();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, hasSession]);
 
   // Welcome line plays EXACTLY ONCE per wizard mount, on first-run.
-  // Uses the pre-gen MP3 (Grace voice, baked at build time) instead of
-  // a live TTS round-trip — fires BEFORE the user has set BYOK up, so
-  // there's no key available to synthesize with. The ref guard makes
-  // it unconditional-once even if React re-runs the effect.
+  // Live Pocket synthesis (2026-08-27): the engine is keyless and its
+  // weights ship with the install, so a live line works before any BYOK
+  // exists; the pre-gen MP3 remains the fallback inside playLine. The
+  // ref guard makes it unconditional-once even if React re-runs the
+  // effect.
   const welcomeFiredRef = useRef(false);
   useEffect(() => {
     if (!firstRun) return;
@@ -355,7 +421,7 @@ export function Wizard({
     if (welcomeFiredRef.current) return;
     welcomeFiredRef.current = true;
     if (mutedRef.current) return;
-    playLine('welcome');
+    playLine('welcome', "Welcome to Unclaw. I'm Grace. Let's get you set up.");
     // playLine is defined per-render and is intentionally omitted —
     // the ref guard guarantees fire-once regardless of identity churn.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -377,12 +443,38 @@ export function Wizard({
     // for Grace to acknowledge the introduction. Fires once per
     // session — the next time the user hits Continue (out of Vibe
     // etc.) it doesn't replay because we only check `step` here.
-    if (step === 'identity') playLine('nice-to-meet-you');
+    if (step === 'identity') {
+      const n = identity.name.trim();
+      playLine('nice-to-meet-you',
+        n ? `Nice to meet you, ${n}!` : 'Nice to meet you!');
+    }
+    // Naming the agent gets acknowledged in HER OWN new name: the moment
+    // the name becomes real. Skipped when left as the Grace default, and
+    // fires once per wizard session.
+    if (step === 'vibe') {
+      const agentName = vibe.agent_name.trim();
+      if (agentName && agentName.toLowerCase() !== 'grace' && !agentNameAckRef.current) {
+        agentNameAckRef.current = true;
+        playLine('name-liked',
+          `${agentName}? Oh, I like that. That's me now. `
+          + 'And if you ever want to adjust me, or any of your agents, '
+          + 'the agents section has it all.');
+      }
+    }
     setStep(stepOrder[stepIdx + 1]);
   };
 
   const handleBack = () => {
-    if (stepIdx > 0) setStep(stepOrder[stepIdx - 1]);
+    if (stepIdx <= 0) return;
+    const prev = stepOrder[stepIdx - 1];
+    // Landing back on welcome means the user is reconsidering the fork:
+    // drop the returning-user path so Get started offers the full flow
+    // again (and the dots go back to describing it).
+    if (prev === 'welcome') {
+      setSignInPath(false);
+      setKeysWaived(false);
+    }
+    setStep(prev);
   };
 
   const handleSkip = () => {
@@ -397,8 +489,13 @@ export function Wizard({
       if (hasName) void handleFinish();
       return;
     }
-    if (isLastStep) void handleFinish();
-    else setStep(stepOrder[stepIdx + 1]);
+    if (isLastStep) { void handleFinish(); return; }
+    // Escaping past a key step means the same thing as pressing "Skip for
+    // now": waive the gate. Without this the user sails past the verify
+    // panel and finds Finish greyed out on the last step with no way back
+    // to the thing blocking it.
+    if (step === 'llm' || step === 'voice') setKeysWaived(true);
+    setStep(stepOrder[stepIdx + 1]);
   };
 
   // Save the profile + whatever BYOK keys are present, then complete. Shared by
@@ -439,7 +536,10 @@ export function Wizard({
       // Personalized greeting can come back later via a /chat call
       // once the keys are confirmed working.
       onComplete(saved);
-      playLine('excited-to-start');
+      const n = identity.name.trim();
+      playLine('excited-to-start',
+        n ? `We're all set, ${n}. I'm so excited to start!`
+          : "We're all set. I'm so excited to start!");
     } catch (err) {
       setSubmitting(false);
       setError(err instanceof Error ? err.message : 'Save failed');
@@ -448,8 +548,25 @@ export function Wizard({
 
   const handleFinish = async () => {
     if (!hasName) {
+      // The short path has no identity step; a returning account with no
+      // name on it needs the full flow to supply one.
+      setSignInPath(false);
       setStep('identity');
       setError('Please enter your name.');
+      return;
+    }
+    // Auth moved to the END of the flow (2026-08-27), so Finish can now be
+    // reached by shortcuts (identity skip, Cmd+Enter) before the user has
+    // ever seen the login step. First-run still requires an account.
+    if (!hasSession && stepOrder.includes('auth')) {
+      setStep('auth');
+      setError('Last step: sign in to finish.');
+      return;
+    }
+    // The user explicitly skipped key setup on the LLM/voice pages;
+    // don't re-impose the key gate here.
+    if (keysWaived) {
+      await finishOnboarding();
       return;
     }
     if (missingKeyFields.length > 0) {
@@ -476,6 +593,7 @@ export function Wizard({
     }
     await finishOnboarding();
   };
+  handleFinishRef.current = handleFinish;
 
   // "Skip for now" on the LLM / voice steps: finish onboarding WITHOUT the key
   // gate. Whatever keys the user did enter are still saved; the rest they set up
@@ -486,7 +604,15 @@ export function Wizard({
       setError('Please enter your name.');
       return;
     }
-    void finishOnboarding();
+    // Keys are skippable; the rest of the flow (sign-in, Claws intro) is
+    // not. Remember the skip so handleFinish doesn't re-impose the key
+    // gate, and continue forward instead of finishing on the spot: to
+    // login first if it's still owed, else straight to Claws.
+    setKeysWaived(true);
+    const next = !hasSession && stepOrder.indexOf('auth') >= 0 ? 'auth'
+      : stepOrder.indexOf('claws') >= 0 ? 'claws' : null;
+    if (next) setStep(next as StepKey);
+    else void finishOnboarding();
   };
 
   const onWizardKey = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -517,30 +643,17 @@ export function Wizard({
     if (step === 'claws') return <ClawsStep />;
     if (step === 'auth') {
       return (
-        // Two-column sign-in: brand mark on the left, the auth form on
-        // the right — same visual language as the welcome ("Get started")
-        // step so the two surfaces read as one continuous moment.
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 44,
-            padding: '14px 0 10px',
-          }}
+        // The brand mark already had its moment on the welcome screen;
+        // repeating it here made this surface read as a different app.
+        // Copy adapts to the fork the user actually took.
+        <StepShell
+          title={signInPath ? 'Welcome back.' : 'Create your account.'}
+          subtitle={signInPath
+            ? 'Sign in and your characters, setup, and history come with you.'
+            : 'Saves your setup and syncs it across your devices.'}
         >
-          <BrandLogo size={168} />
-          <div style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div>
-              <h2 style={{ fontSize: 17, fontWeight: 600, color: 'var(--text-primary)', margin: '0 0 4px' }}>
-                Create your account
-              </h2>
-              <p style={{ fontSize: 12.5, color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45 }}>
-                Sign in to save your setup and sync it across devices.
-              </p>
-            </div>
-            <AuthPanel onSignedIn={(s) => onSignedIn?.(s)} />
-          </div>
-        </div>
+          <AuthPanel onSignedIn={(s) => onSignedIn?.(s)} />
+        </StepShell>
       );
     }
     if (step === 'identity') {
@@ -570,7 +683,8 @@ export function Wizard({
           onChange={setApiKeys}
           validated={llmValidated}
           onValidatedChange={setLlmValidated}
-          onCheckFailed={() => playLine('keys-wrong')}
+          onCheckFailed={() => playLine('keys-wrong',
+            "Hmm, those keys don't look right. Let's take another look.")}
           agentName={vibe.agent_name}
         />
       );
@@ -582,12 +696,13 @@ export function Wizard({
         onChange={setApiKeys}
         validated={voiceValidated}
         onValidatedChange={setVoiceValidated}
-        onCheckFailed={() => playLine('keys-wrong')}
+        onCheckFailed={() => playLine('keys-wrong',
+          "Hmm, those keys don't look right. Let's take another look.")}
         agentName={vibe.agent_name}
       />
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, identity, vibe, interests, apiKeys, llmValidated, voiceValidated]);
+  }, [step, signInPath, identity, vibe, interests, apiKeys, llmValidated, voiceValidated]);
 
   return (
     <motion.div
@@ -815,7 +930,9 @@ export function Wizard({
           {/* Progress dots — current step is a wider pill with a subtle
               accent glow; past steps are small filled circles; future
               steps are small ghost circles. The width transitions on
-              step change so the active marker visibly slides forward. */}
+              step change so the active marker visibly slides forward.
+              Hidden on welcome: nothing has started yet, and that row
+              belongs to the Get started / Sign in fork. */}
           <div
             style={{
               display: 'flex',
@@ -825,7 +942,7 @@ export function Wizard({
               alignItems: 'center',
             }}
           >
-            {stepOrder.map((k, i) => {
+            {step === 'welcome' ? null : stepOrder.map((k, i) => {
               const isCurrent = i === stepIdx;
               const isPast = i < stepIdx;
               return (
@@ -878,7 +995,49 @@ export function Wizard({
             </button>
           )}
 
-          {!isLastStep ? (
+          {/* Welcome fork. The dots are hidden on this step, so both
+              buttons sit in the action row without crowding anything. */}
+          {step === 'welcome' ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+              <motion.button
+                type="button"
+                onClick={() => {
+                  // Returning user: switch to the short path and step into
+                  // it. Key gate waived, their setup follows the account.
+                  setSignInPath(true);
+                  setKeysWaived(true);
+                  setStep('auth');
+                }}
+                whileHover={{ y: -1 }}
+                whileTap={{ y: 0, scale: 0.98 }}
+                transition={{ duration: 0.12, ease: EASE_OUT_EXPO }}
+                style={footerSecondaryStyle}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.38)';
+                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.17)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.24)';
+                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.11)';
+                }}
+              >
+                Sign in
+              </motion.button>
+              <motion.button
+                type="button"
+                onClick={() => {
+                  setSignInPath(false);
+                  handleAdvance();
+                }}
+                whileHover={{ y: -1 }}
+                whileTap={{ y: 0, scale: 0.98 }}
+                transition={{ duration: 0.12, ease: EASE_OUT_EXPO }}
+                style={footerPrimaryStyle(true)}
+              >
+                Get started →
+              </motion.button>
+            </div>
+          ) : !isLastStep ? (
             <motion.button
               type="button"
               onClick={handleAdvance}
@@ -888,7 +1047,7 @@ export function Wizard({
               transition={{ duration: 0.12, ease: EASE_OUT_EXPO }}
               style={footerPrimaryStyle(canAdvance && !submitting)}
             >
-              {step === 'welcome' ? 'Get started →' : 'Continue →'}
+              Continue →
             </motion.button>
           ) : (
             <motion.button
@@ -926,6 +1085,26 @@ const footerLinkStyle: React.CSSProperties = {
 // soft drop shadow. The strongest CTA shape in UnClaw is "white round
 // thing on glass chrome" — we re-use that here so Continue/Finish read
 // as siblings of the send button rather than a one-off red badge.
+// Secondary action: same pill geometry as the primary but glass instead
+// of white. Raised well above field-tint level (0.04 read as a disabled
+// ghost next to the solid white primary, and a returning user could not
+// find it): a real lit surface with a defined edge, still plainly
+// subordinate to white. No ember here, the accent stays precious.
+const footerSecondaryStyle: React.CSSProperties = {
+  background: 'rgba(255, 255, 255, 0.11)',
+  color: 'var(--text-primary)',
+  border: '1px solid rgba(255, 255, 255, 0.24)',
+  borderRadius: 10,
+  fontSize: 13,
+  fontFamily: 'inherit',
+  fontWeight: 550,
+  padding: '8px 16px',
+  cursor: 'pointer',
+  letterSpacing: '0.005em',
+  flexShrink: 0,
+  transition: 'background 0.15s var(--ease-out-quart), border-color 0.15s var(--ease-out-quart)',
+};
+
 const footerPrimaryStyle = (enabled: boolean): React.CSSProperties => ({
   background: '#ffffff',
   color: 'rgba(20, 20, 20, 0.88)',

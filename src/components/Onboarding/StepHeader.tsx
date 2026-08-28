@@ -43,7 +43,6 @@ export function StepHeader({ title, subtitle }: Props) {
               margin: 0,
               letterSpacing: '-0.003em',
               lineHeight: 1.5,
-              maxWidth: 240,
             }}
           >
             {subtitle}

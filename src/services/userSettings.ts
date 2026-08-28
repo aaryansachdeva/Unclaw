@@ -21,6 +21,7 @@
 // previously consumed `UserProfile` should switch to `UserSettings`.
 
 import type { SoulChatResult } from './soulChat';
+import type { EnvironmentSettings } from '../hooks/useEnvironment';
 import type { AgentInstance } from '../hooks/useAgentStack';
 
 import { getSoulBaseUrl } from './soulBase';
@@ -74,6 +75,12 @@ export interface UserSettings {
    *  into the LLM prompt — `_user_settings_summary` only renders the known
    *  profile fields, so this stays prompt-invisible. */
   roster?: AgentInstance[] | null;
+  /** The global room: backdrop, key light, post effect. Historically a
+   *  device-local store outside this blob, which meant a signed-out app
+   *  kept the last account's lighting while its clothes reset, and a
+   *  returning user's room did not follow them to a new machine. It is
+   *  part of the account's config like everything else except API keys. */
+  environment?: EnvironmentSettings | null;
   /** Allow any future top-level setting without a Pydantic edit. */
   [k: string]: unknown;
 }
