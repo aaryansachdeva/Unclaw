@@ -146,8 +146,19 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
   // about a minute while the source surfaces stayed perfect (mode 1 sampler
   // proved that). Steady state here is: zero imports, zero transfers, one
   // tiny IPC ping per frame telling the renderer which surface just updated.
+  // Two pools' worth. The publisher's ring is 4 slots, and a RESIZE makes it
+  // rebuild and mint fresh ids, so `held` is not bounded by the pool size the
+  // way the macOS note assumes ("settles at exactly 4 and stops growing") -
+  // that holds only if nothing ever resizes. Measured on Windows 2026-08-28:
+  // three resizes during boot took it to 8 held imports, each pinning a
+  // GPU-process mailbox, and nothing ever released them until detach.
+  //
+  // Keeping one spare generation means frames still in flight against the OLD
+  // pool draw correctly while the new one takes over; anything older than that
+  // cannot be referenced again, because the publisher never reuses an id.
+  const kMaxHeld = 8;
   const importedIds = new Set<number>();
-  const held: { release: () => void }[] = [];
+  const held: { id: number; ref: { release: () => void } }[] = [];
 
   const ok = a.startFrames(service, (f) => {
     if (win.isDestroyed()) return;
@@ -176,7 +187,13 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
         });
         // Held for the connection's lifetime: the renderer keeps its
         // reference too, and release happens for both on stop().
-        held.push(imported);
+        held.push({ id: f.surfaceId, ref: imported });
+        while (held.length > kMaxHeld) {
+          const old = held.shift();
+          if (!old) break;
+          importedIds.delete(old.id);
+          try { old.ref.release(); } catch { /* already gone */ }
+        }
         sharedTexture
           .sendSharedTexture({
             frame: win.webContents.mainFrame,
@@ -196,7 +213,7 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
             // The failed import never reached the renderer; drop our
             // reference too, or repeated failures for one surface grow
             // `held` unboundedly, each entry pinning a GPU-process mailbox.
-            const i = held.indexOf(imported);
+            const i = held.findIndex((h) => h.ref === imported);
             if (i >= 0) held.splice(i, 1);
             try { imported.release(); } catch { /* already gone */ }
           });
@@ -218,7 +235,7 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
       try {
         if (!win.isDestroyed()) win.webContents.send('direct-surface:reset');
       } catch { /* window mid-teardown */ }
-      for (const h of held) { try { h.release(); } catch { /* gone */ } }
+      for (const h of held) { try { h.ref.release(); } catch { /* gone */ } }
       held.length = 0;
       importedIds.clear();
     };
