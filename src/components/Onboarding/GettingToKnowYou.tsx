@@ -165,7 +165,7 @@ export function GettingToKnowYou({
   // huddling in the right half.
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20, width: 760, maxWidth: '100%' }}>
-      <StepHeader title="Getting to know you" subtitle={subtitle} />
+      <StepHeader title="Getting to know you" subtitle={subtitle} wide />
 
       {!hideName && (
         <FieldLabel text="What should I call you?" style={{ width: 420, maxWidth: '100%' }}>
