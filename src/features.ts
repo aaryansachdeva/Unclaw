@@ -29,7 +29,14 @@ export const CUSTOM_CHARACTERS_ENABLED = false
  *  runtimeAssets, the entitlement-gated per-character embeddings, the store
  *  Worker route. Flipping this back to `true` re-exposes all of it.
  *
- *  Before flipping it: listen to the output next to Supertonic. The suspects
- *  are the MLX conversion itself (try the bf16 vs quantized variants) and our
- *  per-sentence state copy, which resets the flow cache each sentence. */
-export const POCKET_TTS_ENABLED = false
+ *  ON again 2026-08-27. The "busted audio" was neither the MLX conversion
+ *  nor the weights: soul's per-sentence state handling shared the flow
+ *  cache's per-layer KV objects across sentences (dict() is a shallow
+ *  copy), so every sentence after the first was voice-conditioned on the
+ *  previous ones' generated latents and collapsed into re-babbled
+ *  fragments. Fixed in soul 9b4ef50 by slicing the cache back to the
+ *  recorded prompt length before each sentence; measured with a Whisper
+ *  round-trip at 75.9% -> 0.0% WER on grace and chris. Re-enabled for an
+ *  in-app ears test; making Pocket the DEFAULT provider is a separate,
+ *  later decision after that test. */
+export const POCKET_TTS_ENABLED = true
