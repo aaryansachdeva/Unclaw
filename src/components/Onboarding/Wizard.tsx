@@ -607,19 +607,7 @@ export function Wizard({
   const skipLabel = 'Skip';
 
   const stepBody = useMemo(() => {
-    if (step === 'welcome') {
-      return (
-        <WelcomeStep
-          onSignIn={() => {
-            // Returning user: straight to login, and don't re-impose the
-            // key gate on Finish; their profile follows the account and
-            // keys (if any) are already on this machine or set up later.
-            skipKeysRef.current = true;
-            setStep('auth');
-          }}
-        />
-      );
-    }
+    if (step === 'welcome') return <WelcomeStep />;
     if (step === 'claws') return <ClawsStep />;
     if (step === 'auth') {
       return (
@@ -986,6 +974,35 @@ export function Wizard({
             </button>
           )}
 
+          {/* Welcome fork: two real buttons, so a returning user is not
+              hunting for a text link. Sign in jumps straight to login and
+              waives the key gate (their profile follows the account);
+              Get started runs the full first-run flow. */}
+          {step === 'welcome' && (
+            <motion.button
+              type="button"
+              onClick={() => {
+                skipKeysRef.current = true;
+                setStep('auth');
+              }}
+              disabled={submitting}
+              whileHover={!submitting ? { y: -1 } : undefined}
+              whileTap={!submitting ? { y: 0, scale: 0.98 } : undefined}
+              transition={{ duration: 0.12, ease: EASE_OUT_EXPO }}
+              style={footerSecondaryStyle}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = 'var(--glass-border-focus)';
+                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.07)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = 'var(--glass-border)';
+                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
+              }}
+            >
+              Sign in
+            </motion.button>
+          )}
+
           {!isLastStep ? (
             <motion.button
               type="button"
@@ -1034,6 +1051,25 @@ const footerLinkStyle: React.CSSProperties = {
 // soft drop shadow. The strongest CTA shape in UnClaw is "white round
 // thing on glass chrome" — we re-use that here so Continue/Finish read
 // as siblings of the send button rather than a one-off red badge.
+// Secondary action, same pill geometry as the primary but glass instead
+// of white: reads as a real choice next to Get started without competing
+// with it for the eye.
+const footerSecondaryStyle: React.CSSProperties = {
+  background: 'rgba(255, 255, 255, 0.04)',
+  color: 'var(--text-primary)',
+  border: '1px solid var(--glass-border)',
+  borderRadius: 10,
+  fontSize: 13,
+  fontFamily: 'inherit',
+  fontWeight: 500,
+  padding: '8px 14px',
+  marginRight: 8,
+  cursor: 'pointer',
+  letterSpacing: '0.005em',
+  flexShrink: 0,
+  transition: 'background 0.15s var(--ease-out-quart), border-color 0.15s var(--ease-out-quart)',
+};
+
 const footerPrimaryStyle = (enabled: boolean): React.CSSProperties => ({
   background: '#ffffff',
   color: 'rgba(20, 20, 20, 0.88)',
