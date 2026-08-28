@@ -54,7 +54,17 @@ app.commandLine.appendSwitch('force-gpu-mem-available-mb', '512');
 // degrades on its own if the engine has no publisher (older UE bundle) or the
 // native addon is missing: directSurface logs "no publisher — WebRTC still in
 // use" and the stream continues over WebRTC.
-if (process.platform === 'darwin' && !process.env.UNCLAW_DIRECT_SURFACE) {
+//
+// All three platforms now have a publisher (PixelStreaming2NativeMac on macOS,
+// PixelStreaming2DirectWin on Windows, the dmabuf path on Linux), so the
+// default is on everywhere. Mode 1 is macOS-only; directSurface.mode() already
+// normalises a '1' to '2' off-darwin rather than silently meaning "off".
+//
+// Turning it on by default is safe precisely BECAUSE every failure is a
+// fallback and not a break: no addon -> load() returns null; no publisher ->
+// the transport never connects and `connected` stays false; either way the
+// renderer keeps the WebRTC video and logs one line saying so.
+if (!process.env.UNCLAW_DIRECT_SURFACE) {
   process.env.UNCLAW_DIRECT_SURFACE = '2';
 }
 
