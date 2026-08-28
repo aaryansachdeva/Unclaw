@@ -758,6 +758,13 @@ function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
   if (!isMac && merged.tts_provider === 'qwen3') {
     merged.tts_provider = 'supertonic';
   }
+  // Kokoro and Qwen3 were retired from the pickers on 2026-08-28. A saved
+  // profile still naming one would sit on a setting the user can no longer
+  // see or change, so move it to the default engine. Same reasoning as the
+  // Pocket rescue above: an invisible selection is worse than a moved one.
+  if (merged.tts_provider === 'kokoro' || merged.tts_provider === 'qwen3') {
+    merged.tts_provider = 'pocket';
+  }
   if (merged.llm_provider && !VALID_PROVIDER_IDS.has(merged.llm_provider)) {
     // Stale provider — drop the {provider, model, key} triple together
     // so the user gets prompted to pick from the new catalog.

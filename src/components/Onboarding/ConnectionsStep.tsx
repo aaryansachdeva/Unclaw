@@ -1042,11 +1042,15 @@ function VoiceSection({
         <Dropdown
           value={values.tts_provider}
           onChange={(v) => setTtsProvider(v as TtsProviderId)}
+          // Pocket first: it is the default engine, local and keyless, so the
+          // wizard can be finished without pasting a key at all. Kokoro and
+          // Qwen3 are RETIRED from the picker (2026-08-28) - the branches below
+          // stay for anyone whose saved profile still names them, and
+          // migrateApiKeys moves them to Pocket on next load.
           options={[
+            { id: 'pocket',     label: 'Pocket (local, no key)' },
             { id: 'elevenlabs', label: 'ElevenLabs' },
             { id: 'supertonic', label: 'Supertonic-3' },
-            { id: 'kokoro',     label: 'Kokoro' },
-            { id: 'qwen3',      label: 'Qwen3 (local)' },
           ]}
         />
       </FieldLabel>
@@ -1065,6 +1069,23 @@ function VoiceSection({
             autoComplete="off"
           />
         </FieldLabel>
+      )}
+
+      {/* Pocket branch. Nothing to configure: it is local and keyless, and
+          the voice is per-character (resolved by soul from the character's
+          stem), so there is no global voice column to offer here the way
+          Supertonic and ElevenLabs have. The line exists so selecting Pocket
+          does not look like a dead option with no panel. */}
+      {values.tts_provider === 'pocket' && (
+        <div style={{
+          fontSize: 12.5,
+          lineHeight: 1.5,
+          color: 'var(--text-secondary)',
+          padding: '2px 0',
+        }}>
+          Runs on your machine. No key, nothing to set up &mdash; each character
+          speaks in its own voice.
+        </div>
       )}
 
       {/* Supertonic branch: built-in voices + Grace clone (auto-fetched
