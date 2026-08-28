@@ -2762,6 +2762,30 @@ function AppMain() {
         if (!stored) {
           setAuthToken(null);
           setAuthUser(null);
+          // Self-heal. No stored session, but if an account previously
+          // owned this machine's data then a sign-out (or a crash between
+          // the two) left the account-scoped copies behind, and the app
+          // would boot wearing the last user's character setup. Purge them
+          // here so it cannot survive a restart either.
+          //
+          // Keyed on the STORED TOKEN being absent, never on the network
+          // user-fetch failing: a signed-in user who is merely offline must
+          // not be mistaken for a signed-out one and have their local data
+          // deleted. The cloud copy is untouched regardless, so signing
+          // back in restores everything.
+          const priorOwner = await (async () => {
+            try {
+              const durable = await window.electronAPI?.getLocalOwner?.();
+              if (durable) return durable;
+            } catch { /* fall through */ }
+            try { return localStorage.getItem(LOCAL_ACCOUNT_KEY); } catch { return null; }
+          })();
+          if (priorOwner) {
+            try { await deleteSettings(); }
+            catch (err) { console.warn('[auth] stale local settings purge failed', err); }
+            clearLocalChatHistory();
+            resetStack();
+          }
           return;
         }
         const user = await fetchCurrentUser(stored);
@@ -2781,7 +2805,7 @@ function AppMain() {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [resetStack]);
 
   const handleSignedIn = useCallback((session: AuthSession) => {
     setAuthToken(session.token);

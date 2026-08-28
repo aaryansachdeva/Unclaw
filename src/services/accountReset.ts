@@ -33,6 +33,11 @@ const APP_LOCALSTORAGE_PREFIXES = ['unclaw.chat.'];
 const APP_LOCALSTORAGE_KEYS = [
   'unclaw.chatPaneWidth',
   'unclaw.guestMode',
+  // The roster (characters, their names, wardrobe, identity) follows the
+  // ACCOUNT, so a full reset has to take it with everything else. App also
+  // calls resetStack() to clear the in-memory copy the hook read at mount;
+  // clearing the store here keeps this service correct on its own.
+  'unclaw.agentStack.v2',
 ];
 
 function clearAppLocalStorage(): void {
