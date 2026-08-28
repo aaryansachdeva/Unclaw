@@ -1,22 +1,28 @@
 // Combined onboarding step: the personal facts Grace uses to sound like
-// she knows you. City / timezone (the basics) above a hairline, then the
-// optional texture: hobbies, sleep schedule, a free-text note. Everything
-// past the name is optional, said once in the subtitle so the fields stay
-// clean.
+// she knows you. Name, then the optional texture: hobbies and a free-text
+// note. Everything past the name is optional, said once in the subtitle so
+// the fields stay clean.
+//
+// City and timezone left the UI 2026-08-27: the timezone is auto-detected
+// from the system (the wizard seeds it via detectTimezone()) and asking a
+// human to confirm what the OS already knows was noise. Sleep schedule
+// left with them. The profile fields survive for anyone who set them.
 //
 // Styling tracks DESIGN.md via the shared onboarding kit: frosted-slate
 // field tints, quiet eyebrow labels, ember only on the selected state, a
 // subtle press spring (motion conveys state), no em dashes.
 
-import { useMemo, KeyboardEvent } from 'react';
+import { useState, KeyboardEvent } from 'react';
 import { motion } from 'framer-motion';
-import { Sunrise, Moon, SunMoon } from 'lucide-react';
+import {
+  Code2, Music, Trophy, Palette, Gamepad2, BookOpen,
+  Dumbbell, PenTool, ChefHat, Plane, Plus, Sparkles,
+  type LucideIcon,
+} from 'lucide-react';
 import { StepHeader } from './StepHeader';
-import { Dropdown } from './Dropdown';
 import { FIELD_BASE, applyFocus, applyBlur, FieldLabel, STEP_COL_WIDTH } from './onboardingKit';
-import { TZ_CATALOG, type IdentityValues } from './IdentityStep';
+import { type IdentityValues } from './IdentityStep';
 import type { InterestsValues } from './InterestsStep';
-import type { UserSchedule } from '../../services/userSettings';
 
 interface Props {
   identity: IdentityValues;
@@ -28,23 +34,24 @@ interface Props {
   hideName?: boolean;
 }
 
-const HOBBIES = [
-  'code', 'music', 'sports', 'art', 'gaming',
-  'reading', 'fitness', 'design', 'cooking', 'travel',
+// Preset hobbies, each with a quiet stroke icon so the chips read as a
+// set rather than a bag of words. Custom tags (added below) get Sparkles.
+const HOBBIES: Array<{ tag: string; Icon: LucideIcon }> = [
+  { tag: 'code',    Icon: Code2 },
+  { tag: 'music',   Icon: Music },
+  { tag: 'sports',  Icon: Trophy },
+  { tag: 'art',     Icon: Palette },
+  { tag: 'gaming',  Icon: Gamepad2 },
+  { tag: 'reading', Icon: BookOpen },
+  { tag: 'fitness', Icon: Dumbbell },
+  { tag: 'design',  Icon: PenTool },
+  { tag: 'cooking', Icon: ChefHat },
+  { tag: 'travel',  Icon: Plane },
 ];
-
-const SCHEDULE_OPTIONS: Array<{ key: UserSchedule; label: string; Icon: typeof Sunrise }> = [
-  { key: 'early_bird', label: 'Early bird', Icon: Sunrise },
-  { key: 'night_owl',  label: 'Night owl',  Icon: Moon },
-  { key: 'mixed',      label: 'Mixed',      Icon: SunMoon },
-];
+const PRESET_TAGS = new Set(HOBBIES.map((h) => h.tag));
 
 const NOTES_LIMIT = 500;
-
-function fallbackLabel(tz: string): string {
-  const segs = tz.split('/');
-  return segs[segs.length - 1].replace(/_/g, ' ') || tz;
-}
+const CUSTOM_TAG_LIMIT = 24;
 
 export function GettingToKnowYou({
   identity,
@@ -54,13 +61,8 @@ export function GettingToKnowYou({
   onAdvance,
   hideName,
 }: Props) {
-  const tzOptions = useMemo(() => {
-    const opts = TZ_CATALOG.map((e) => ({ id: e.id, label: e.label }));
-    if (identity.timezone && !TZ_CATALOG.some((e) => e.id === identity.timezone)) {
-      opts.unshift({ id: identity.timezone, label: fallbackLabel(identity.timezone) });
-    }
-    return opts;
-  }, [identity.timezone]);
+  const [addingHobby, setAddingHobby] = useState(false);
+  const [hobbyDraft, setHobbyDraft] = useState('');
 
   const onNameKey = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && identity.name.trim()) {
@@ -79,15 +81,81 @@ export function GettingToKnowYou({
     });
   };
 
+  const commitHobbyDraft = () => {
+    const tag = hobbyDraft.trim().slice(0, CUSTOM_TAG_LIMIT);
+    setHobbyDraft('');
+    setAddingHobby(false);
+    if (!tag || interests.interests.includes(tag)) return;
+    onInterestsChange({ ...interests, interests: [...interests.interests, tag] });
+  };
+
   const setNotes = (next: string) =>
     onInterestsChange({ ...interests, notes: next.slice(0, NOTES_LIMIT) });
 
   const charsLeft = NOTES_LIMIT - interests.notes.length;
   const showCount = interests.notes.length > NOTES_LIMIT - 60;
 
+  // Custom tags the user typed themselves; rendered after the presets and
+  // removed entirely when toggled off (they only exist because chosen).
+  const customTags = interests.interests.filter((t) => !PRESET_TAGS.has(t));
+
   const subtitle = hideName && identity.name
     ? `A few optional details, ${identity.name}, so I sound like I know you.`
     : 'A few optional details so I sound like I know you.';
+
+  const chipBase = (active: boolean): React.CSSProperties => ({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 7,
+    padding: '7px 13px',
+    borderRadius: 999,
+    border: `1px solid ${active ? 'rgba(196, 68, 68, 0.55)' : 'var(--glass-border)'}`,
+    background: active ? 'var(--accent-dim)' : 'rgba(255, 255, 255, 0.04)',
+    color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+    fontSize: 12,
+    fontWeight: active ? 600 : 470,
+    fontFamily: 'inherit',
+    cursor: 'pointer',
+    letterSpacing: '-0.005em',
+    boxShadow: active ? '0 0 0 3px rgba(196, 68, 68, 0.08)' : 'none',
+    transition: 'background 0.15s var(--ease-out-quart), border-color 0.15s var(--ease-out-quart), color 0.15s var(--ease-out-quart)',
+  });
+
+  const chipHover = {
+    onMouseEnter: (e: React.MouseEvent<HTMLButtonElement>) => {
+      if (e.currentTarget.dataset.active === '1') return;
+      e.currentTarget.style.borderColor = 'var(--glass-border-focus)';
+      e.currentTarget.style.color = 'var(--text-primary)';
+      e.currentTarget.style.background = 'rgba(255, 255, 255, 0.07)';
+    },
+    onMouseLeave: (e: React.MouseEvent<HTMLButtonElement>) => {
+      if (e.currentTarget.dataset.active === '1') return;
+      e.currentTarget.style.borderColor = 'var(--glass-border)';
+      e.currentTarget.style.color = 'var(--text-secondary)';
+      e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
+    },
+  };
+
+  const renderChip = (tag: string, Icon: LucideIcon, active: boolean) => (
+    <motion.button
+      key={tag}
+      type="button"
+      data-active={active ? '1' : '0'}
+      whileTap={{ scale: 0.95 }}
+      transition={{ type: 'spring', stiffness: 600, damping: 30 }}
+      onClick={() => toggleHobby(tag)}
+      style={chipBase(active)}
+      {...chipHover}
+    >
+      <Icon
+        size={13}
+        strokeWidth={1.8}
+        color={active ? 'var(--accent, #c44444)' : 'currentColor'}
+        style={{ opacity: active ? 1 : 0.75, flexShrink: 0 }}
+      />
+      <span>{tag}</span>
+    </motion.button>
+  );
 
   return (
     <div style={{ display: 'flex', gap: 30, alignItems: 'flex-start' }}>
@@ -112,130 +180,52 @@ export function GettingToKnowYou({
           </FieldLabel>
         )}
 
-        <div style={{ display: 'flex', gap: 12 }}>
-          <FieldLabel text="City" style={{ flex: 1 }}>
-            <input
-              type="text"
-              value={identity.city}
-              onChange={(e) => onIdentityChange({ ...identity, city: e.target.value })}
-              placeholder="San Francisco"
-              style={FIELD_BASE}
-              onFocus={(e) => applyFocus(e.target)}
-              onBlur={(e) => applyBlur(e.target)}
-            />
-          </FieldLabel>
-          <FieldLabel text="Timezone" style={{ flex: 1.4 }}>
-            <Dropdown
-              value={identity.timezone}
-              onChange={(v) => onIdentityChange({ ...identity, timezone: v })}
-              options={tzOptions}
-              menuMaxHeight={300}
-            />
-          </FieldLabel>
-        </div>
-
-        {/* Hairline groups the basics (who / where) from the optional
-            personality texture below. One divider, not a card. */}
-        <div style={{ height: 1, background: 'var(--border-subtle)', margin: '2px 0 0' }} />
-
         <FieldLabel text="Hobbies">
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
-            {HOBBIES.map((tag) => {
-              const active = interests.interests.includes(tag);
-              return (
-                <motion.button
-                  key={tag}
-                  type="button"
-                  whileTap={{ scale: 0.95 }}
-                  transition={{ type: 'spring', stiffness: 600, damping: 30 }}
-                  onClick={() => toggleHobby(tag)}
-                  style={{
-                    padding: '7px 15px',
-                    borderRadius: 999,
-                    border: `1px solid ${active ? 'rgba(196, 68, 68, 0.5)' : 'var(--glass-border)'}`,
-                    background: active ? 'var(--accent-dim)' : 'rgba(255, 255, 255, 0.03)',
-                    color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    fontSize: 12.5,
-                    fontWeight: active ? 600 : 450,
-                    fontFamily: 'inherit',
-                    cursor: 'pointer',
-                    letterSpacing: '-0.005em',
-                    boxShadow: active ? '0 0 0 3px rgba(196, 68, 68, 0.08)' : 'none',
-                    transition: 'background 0.15s var(--ease-out-quart), border-color 0.15s var(--ease-out-quart), color 0.15s var(--ease-out-quart)',
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!active) {
-                      e.currentTarget.style.borderColor = 'var(--glass-border-focus)';
-                      e.currentTarget.style.color = 'var(--text-primary)';
-                      e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!active) {
-                      e.currentTarget.style.borderColor = 'var(--glass-border)';
-                      e.currentTarget.style.color = 'var(--text-secondary)';
-                      e.currentTarget.style.background = 'rgba(255, 255, 255, 0.03)';
-                    }
-                  }}
-                >
-                  {tag}
-                </motion.button>
-              );
-            })}
-          </div>
-        </FieldLabel>
-
-        <FieldLabel text="Sleep schedule">
-          <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
-            {SCHEDULE_OPTIONS.map(({ key, label, Icon }) => {
-              const active = interests.schedule === key;
-              return (
-                <motion.button
-                  key={key}
-                  type="button"
-                  whileTap={{ scale: 0.97 }}
-                  transition={{ type: 'spring', stiffness: 600, damping: 30 }}
-                  onClick={() => onInterestsChange({ ...interests, schedule: active ? '' : key })}
-                  style={{
-                    flex: 1,
-                    padding: '11px 8px',
-                    borderRadius: 12,
-                    border: `1px solid ${active ? 'rgba(196, 68, 68, 0.5)' : 'var(--glass-border)'}`,
-                    background: active ? 'var(--accent-dim)' : 'rgba(255, 255, 255, 0.025)',
-                    color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    fontSize: 12.5,
-                    fontWeight: active ? 600 : 450,
-                    fontFamily: 'inherit',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: 7,
-                    boxShadow: active ? '0 0 0 3px rgba(196, 68, 68, 0.08)' : 'none',
-                    transition: 'background 0.18s var(--ease-out-quart), border-color 0.18s var(--ease-out-quart), color 0.18s var(--ease-out-quart)',
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!active) {
-                      e.currentTarget.style.borderColor = 'var(--glass-border-focus)';
-                      e.currentTarget.style.color = 'var(--text-primary)';
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!active) {
-                      e.currentTarget.style.borderColor = 'var(--glass-border)';
-                      e.currentTarget.style.color = 'var(--text-secondary)';
-                    }
-                  }}
-                >
-                  <Icon
-                    size={18}
-                    strokeWidth={1.7}
-                    color={active ? 'var(--accent, #c44444)' : 'currentColor'}
-                  />
-                  <span>{label}</span>
-                </motion.button>
-              );
-            })}
+            {HOBBIES.map(({ tag, Icon }) =>
+              renderChip(tag, Icon, interests.interests.includes(tag)))}
+            {customTags.map((tag) => renderChip(tag, Sparkles, true))}
+            {addingHobby ? (
+              <input
+                type="text"
+                autoFocus
+                value={hobbyDraft}
+                maxLength={CUSTOM_TAG_LIMIT}
+                onChange={(e) => setHobbyDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); commitHobbyDraft(); }
+                  if (e.key === 'Escape') { setHobbyDraft(''); setAddingHobby(false); }
+                }}
+                onBlur={commitHobbyDraft}
+                placeholder="your thing"
+                style={{
+                  width: 110,
+                  padding: '7px 13px',
+                  borderRadius: 999,
+                  border: '1px solid var(--glass-border-focus)',
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  color: 'var(--text-primary)',
+                  fontSize: 12,
+                  fontFamily: 'inherit',
+                  letterSpacing: '-0.005em',
+                  outline: 'none',
+                }}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setAddingHobby(true)}
+                style={{
+                  ...chipBase(false),
+                  background: 'transparent',
+                  color: 'var(--text-ghost)',
+                }}
+                {...chipHover}
+              >
+                <Plus size={13} strokeWidth={1.8} style={{ flexShrink: 0 }} />
+                <span>add your own</span>
+              </button>
+            )}
           </div>
         </FieldLabel>
 
