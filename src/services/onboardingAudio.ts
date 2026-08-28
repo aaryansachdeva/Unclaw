@@ -51,6 +51,34 @@ const META: Record<PreGenLine, { mood: string; behavior: string }> = {
   },
 };
 
+/** Live onboarding line via soul's /speak: verbatim text, rendered with
+ *  the LOCAL Pocket engine and Grace's cloned voice. This is what makes
+ *  personalized lines ("Nice to meet you, Aryan") possible before any
+ *  BYOK key exists: Pocket is keyless and its weights ship with the
+ *  install, so live synthesis works from the very first wizard step.
+ *  The pre-gen MP3s below remain as the fallback when soul or the voice
+ *  engine is unavailable. */
+export async function speakLiveLine(
+  line: PreGenLine,
+  text: string,
+): Promise<SoulChatResult> {
+  const meta = META[line];
+  const res = await fetch(`${getSoulBaseUrl()}/speak`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: text,
+      mood: meta.mood,
+      behavior: meta.behavior,
+      tts_provider: 'pocket',
+      voice_id: 'grace',
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) throw new Error(`speak ${res.status}`);
+  return (await res.json()) as SoulChatResult;
+}
+
 /** Read an MP3 blob into a base64 string (no data-URL prefix), suitable
  *  for soul's `audio_base64` field. FileReader is used so big files
  *  don't blow the call-stack via String.fromCharCode spread. */

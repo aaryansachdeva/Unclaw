@@ -40,7 +40,7 @@ import {
   DEFAULT_API_KEYS,
   type ApiKeysProfile,
 } from '../../services/apiKeys';
-import { playPreGenAudio, type PreGenLine } from '../../services/onboardingAudio';
+import { playPreGenAudio, speakLiveLine, type PreGenLine } from '../../services/onboardingAudio';
 import type { SoulChatResult } from '../../services/soulChat';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
@@ -88,12 +88,15 @@ interface WizardProps {
 }
 
 type StepKey = 'welcome' | 'auth' | 'claws' | 'identity' | 'vibe' | 'llm' | 'voice';
-// First-run for a NOT-yet-signed-in user: lead with the stream, welcome, fold
-// login in as a step, then introduce Claws (the in-app currency) before setup.
-const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'auth', 'claws', 'identity', 'vibe', 'llm', 'voice'];
+// First-run for a NOT-yet-signed-in user (reordered 2026-08-27): the wizard
+// leads with the PERSON, not the account. Pocket runs locally with no key
+// and its weights ship with the install, so nothing early needs auth: name
+// and profile come first, then setup, then Claws as the pitch for the
+// account, and login is the final beat before Finish.
+const FIRST_RUN_STEPS: StepKey[] = ['welcome', 'identity', 'vibe', 'llm', 'voice', 'claws', 'auth'];
 // First-run when ALREADY signed in (e.g. fresh device, profile not synced):
-// skip welcome + auth, but still introduce Claws before profile setup.
-const FIRST_RUN_STEPS_AUTHED: StepKey[] = ['claws', 'identity', 'vibe', 'llm', 'voice'];
+// same person-first order, minus welcome + auth; Claws intro still shown.
+const FIRST_RUN_STEPS_AUTHED: StepKey[] = ['identity', 'vibe', 'llm', 'voice', 'claws'];
 const EDIT_STEPS: StepKey[] = ['identity', 'vibe', 'llm', 'voice'];
 
 /** localStorage key for the onboarding-mute preference. Persisted so a
@@ -280,22 +283,40 @@ export function Wizard({
   // Mount-state guard around onChatResult ensures we don't play
   // onboarding audio outside the wizard if the user closes it while
   // a request is in flight.
-  const playLine = (line: PreGenLine) => {
+  // Live-first (2026-08-27): each beat is synthesized on the spot with the
+  // local Pocket engine (keyless, ships with the install), which lets the
+  // lines carry the user's actual name. The pre-gen MP3s remain the
+  // fallback when live synthesis fails, so the wizard never goes silent
+  // on a soul hiccup.
+  const playLine = (line: PreGenLine, text?: string) => {
     if (mutedRef.current) return;
     void (async () => {
+      let result;
       try {
-        const result = await playPreGenAudio(line);
-        if (!wizardMountedRef.current) {
-          console.debug(`[onboarding] pre-gen "${line}" arrived after `
-                        + 'wizard unmounted — dropping');
+        result = text
+          ? await speakLiveLine(line, text)
+          : await playPreGenAudio(line);
+      } catch (err) {
+        console.warn(`[onboarding] live "${line}" failed, falling back to pre-gen`, err);
+        try {
+          result = await playPreGenAudio(line);
+        } catch (err2) {
+          console.warn(`[onboarding] pre-gen "${line}" failed`, err2);
           return;
         }
-        onChatResult(result);
-      } catch (err) {
-        console.warn(`[onboarding] pre-gen "${line}" failed`, err);
       }
+      if (!wizardMountedRef.current) {
+        console.debug(`[onboarding] line "${line}" arrived after `
+                      + 'wizard unmounted — dropping');
+        return;
+      }
+      onChatResult(result);
     })();
   };
+
+  // Ref so effects defined above handleFinish can call it without
+  // re-ordering the component.
+  const handleFinishRef = useRef<(() => Promise<void>) | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -330,21 +351,32 @@ export function Wizard({
     ? canFinish
     : true;
 
-  // Auto-advance off the auth step the moment the user signs in, so login
-  // feels like a seamless beat rather than "now press Continue".
+  // Auth sits at the END of the flow now. Signing in mid-list (should the
+  // order ever change back) still auto-advances; signing in on the LAST
+  // step presses Finish for the user, once, so login lands as the final
+  // seamless beat instead of "now press Finish". handleFinish still owns
+  // the gates (name, keys, verify) and routes back if something is missing.
+  const autoFinishedRef = useRef(false);
   useEffect(() => {
-    if (step === 'auth' && hasSession) {
-      const idx = stepOrder.indexOf('auth');
-      if (idx >= 0 && idx < stepOrder.length - 1) setStep(stepOrder[idx + 1]);
+    if (step !== 'auth' || !hasSession) return;
+    const idx = stepOrder.indexOf('auth');
+    if (idx >= 0 && idx < stepOrder.length - 1) {
+      setStep(stepOrder[idx + 1]);
+      return;
+    }
+    if (!autoFinishedRef.current) {
+      autoFinishedRef.current = true;
+      void handleFinishRef.current?.();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, hasSession]);
 
   // Welcome line plays EXACTLY ONCE per wizard mount, on first-run.
-  // Uses the pre-gen MP3 (Grace voice, baked at build time) instead of
-  // a live TTS round-trip — fires BEFORE the user has set BYOK up, so
-  // there's no key available to synthesize with. The ref guard makes
-  // it unconditional-once even if React re-runs the effect.
+  // Live Pocket synthesis (2026-08-27): the engine is keyless and its
+  // weights ship with the install, so a live line works before any BYOK
+  // exists; the pre-gen MP3 remains the fallback inside playLine. The
+  // ref guard makes it unconditional-once even if React re-runs the
+  // effect.
   const welcomeFiredRef = useRef(false);
   useEffect(() => {
     if (!firstRun) return;
@@ -355,7 +387,7 @@ export function Wizard({
     if (welcomeFiredRef.current) return;
     welcomeFiredRef.current = true;
     if (mutedRef.current) return;
-    playLine('welcome');
+    playLine('welcome', "Welcome to Unclaw. I'm Grace. Let's get you set up.");
     // playLine is defined per-render and is intentionally omitted —
     // the ref guard guarantees fire-once regardless of identity churn.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -377,7 +409,11 @@ export function Wizard({
     // for Grace to acknowledge the introduction. Fires once per
     // session — the next time the user hits Continue (out of Vibe
     // etc.) it doesn't replay because we only check `step` here.
-    if (step === 'identity') playLine('nice-to-meet-you');
+    if (step === 'identity') {
+      const n = identity.name.trim();
+      playLine('nice-to-meet-you',
+        n ? `Nice to meet you, ${n}!` : 'Nice to meet you!');
+    }
     setStep(stepOrder[stepIdx + 1]);
   };
 
@@ -439,7 +475,10 @@ export function Wizard({
       // Personalized greeting can come back later via a /chat call
       // once the keys are confirmed working.
       onComplete(saved);
-      playLine('excited-to-start');
+      const n = identity.name.trim();
+      playLine('excited-to-start',
+        n ? `We're all set, ${n}. I'm so excited to start!`
+          : "We're all set. I'm so excited to start!");
     } catch (err) {
       setSubmitting(false);
       setError(err instanceof Error ? err.message : 'Save failed');
@@ -450,6 +489,20 @@ export function Wizard({
     if (!hasName) {
       setStep('identity');
       setError('Please enter your name.');
+      return;
+    }
+    // Auth moved to the END of the flow (2026-08-27), so Finish can now be
+    // reached by shortcuts (identity skip, Cmd+Enter) before the user has
+    // ever seen the login step. First-run still requires an account.
+    if (!hasSession && stepOrder.includes('auth')) {
+      setStep('auth');
+      setError('Last step: sign in to finish.');
+      return;
+    }
+    // The user explicitly skipped key setup on the LLM/voice pages;
+    // don't re-impose the key gate here.
+    if (skipKeysRef.current) {
+      await finishOnboarding();
       return;
     }
     if (missingKeyFields.length > 0) {
@@ -476,17 +529,26 @@ export function Wizard({
     }
     await finishOnboarding();
   };
+  handleFinishRef.current = handleFinish;
 
   // "Skip for now" on the LLM / voice steps: finish onboarding WITHOUT the key
   // gate. Whatever keys the user did enter are still saved; the rest they set up
   // later in Settings (the apiKeysNotice nudges them). Name is still required.
+  const skipKeysRef = useRef(false);
   const handleSkipSetup = () => {
     if (!hasName) {
       setStep('identity');
       setError('Please enter your name.');
       return;
     }
-    void finishOnboarding();
+    // Keys are skippable; the rest of the flow (Claws intro, sign-in) is
+    // not. Remember the skip so handleFinish doesn't re-impose the key
+    // gate, and continue forward instead of finishing on the spot.
+    skipKeysRef.current = true;
+    const next = stepOrder.indexOf('claws') >= 0 ? 'claws'
+      : stepOrder.indexOf('auth') >= 0 ? 'auth' : null;
+    if (next) setStep(next as StepKey);
+    else void finishOnboarding();
   };
 
   const onWizardKey = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -570,7 +632,8 @@ export function Wizard({
           onChange={setApiKeys}
           validated={llmValidated}
           onValidatedChange={setLlmValidated}
-          onCheckFailed={() => playLine('keys-wrong')}
+          onCheckFailed={() => playLine('keys-wrong',
+            "Hmm, those keys don't look right. Let's take another look.")}
           agentName={vibe.agent_name}
         />
       );
@@ -582,7 +645,8 @@ export function Wizard({
         onChange={setApiKeys}
         validated={voiceValidated}
         onValidatedChange={setVoiceValidated}
-        onCheckFailed={() => playLine('keys-wrong')}
+        onCheckFailed={() => playLine('keys-wrong',
+          "Hmm, those keys don't look right. Let's take another look.")}
         agentName={vibe.agent_name}
       />
     );
