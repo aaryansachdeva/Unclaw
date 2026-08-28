@@ -40,7 +40,10 @@ import {
   DEFAULT_API_KEYS,
   type ApiKeysProfile,
 } from '../../services/apiKeys';
-import { playPreGenAudio, speakLiveLine, type PreGenLine } from '../../services/onboardingAudio';
+import {
+  playPreGenAudio, speakLiveLine, PRE_GEN_LINES,
+  type PreGenLine, type OnboardingLine,
+} from '../../services/onboardingAudio';
 import type { SoulChatResult } from '../../services/soulChat';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
@@ -288,18 +291,25 @@ export function Wizard({
   // lines carry the user's actual name. The pre-gen MP3s remain the
   // fallback when live synthesis fails, so the wizard never goes silent
   // on a soul hiccup.
-  const playLine = (line: PreGenLine, text?: string) => {
+  const playLine = (line: OnboardingLine, text?: string) => {
     if (mutedRef.current) return;
     void (async () => {
       let result;
       try {
         result = text
           ? await speakLiveLine(line, text)
-          : await playPreGenAudio(line);
+          : await playPreGenAudio(line as PreGenLine);
       } catch (err) {
+        // Only the original four beats have a shipped MP3 to fall back
+        // to; live-only lines (the agent-name acknowledgement) just stay
+        // silent on failure.
+        if (!PRE_GEN_LINES.has(line)) {
+          console.warn(`[onboarding] live "${line}" failed (no fallback)`, err);
+          return;
+        }
         console.warn(`[onboarding] live "${line}" failed, falling back to pre-gen`, err);
         try {
-          result = await playPreGenAudio(line);
+          result = await playPreGenAudio(line as PreGenLine);
         } catch (err2) {
           console.warn(`[onboarding] pre-gen "${line}" failed`, err2);
           return;
@@ -317,6 +327,7 @@ export function Wizard({
   // Ref so effects defined above handleFinish can call it without
   // re-ordering the component.
   const handleFinishRef = useRef<(() => Promise<void>) | null>(null);
+  const agentNameAckRef = useRef(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -413,6 +424,19 @@ export function Wizard({
       const n = identity.name.trim();
       playLine('nice-to-meet-you',
         n ? `Nice to meet you, ${n}!` : 'Nice to meet you!');
+    }
+    // Naming the agent gets acknowledged in HER OWN new name: the moment
+    // the name becomes real. Skipped when left as the Grace default, and
+    // fires once per wizard session.
+    if (step === 'vibe') {
+      const agentName = vibe.agent_name.trim();
+      if (agentName && agentName.toLowerCase() !== 'grace' && !agentNameAckRef.current) {
+        agentNameAckRef.current = true;
+        playLine('name-liked',
+          `${agentName}? Oh, I like that. That's me now. `
+          + 'And if you ever want to adjust me, or any of your agents, '
+          + 'the agents section has it all.');
+      }
     }
     setStep(stepOrder[stepIdx + 1]);
   };

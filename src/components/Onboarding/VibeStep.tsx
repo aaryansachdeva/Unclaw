@@ -6,7 +6,7 @@
 
 import { Slider } from './Slider';
 import { StepHeader } from './StepHeader';
-import { FIELD_BASE, applyFocus, applyBlur, FieldLabel, STEP_COL_WIDTH } from './onboardingKit';
+import { FIELD_BASE, applyFocus, applyBlur, FieldLabel } from './onboardingKit';
 import { vibeWord } from '../../services/userSettings';
 
 export interface VibeValues {
@@ -28,25 +28,20 @@ export function VibeStep({ values, onChange }: Props) {
   const set = <K extends keyof VibeValues>(key: K, v: VibeValues[K]) =>
     onChange({ ...values, [key]: v });
 
-  return (
-    <div style={{ display: 'flex', gap: 30, alignItems: 'flex-start' }}>
-      <div style={{ width: STEP_COL_WIDTH, flexShrink: 0, paddingTop: 2 }}>
-        <StepHeader
-          title="Set the vibe."
-          subtitle="How Grace talks to you. Change it anytime."
-        />
-      </div>
+  const displayName = values.agent_name.trim() || 'Grace';
 
-      <div
-        style={{
-          flex: 1,
-          minWidth: 0,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 18,
-        }}
-      >
-        <FieldLabel text="Name your assistant">
+  // Band layout (2026-08-27), matching Getting to know you: header across
+  // the top, the name field at a deliberate width, sliders filling the
+  // panel. The old side column left a void on a step this short.
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20, width: 760, maxWidth: '100%' }}>
+      <StepHeader
+        title="Set the vibe."
+        subtitle={`How ${displayName} talks to you. Change it anytime.`}
+        wide
+      />
+
+      <FieldLabel text="Name your assistant" style={{ width: 420, maxWidth: '100%' }}>
           <input
             type="text"
             value={values.agent_name}
@@ -58,17 +53,17 @@ export function VibeStep({ values, onChange }: Props) {
           />
         </FieldLabel>
 
-        {/* Hairline groups the name from the personality sliders. */}
-        <div style={{ height: 1, background: 'var(--border-subtle)', margin: '2px 0 0' }} />
+      {/* Hairline groups the name from the personality sliders. */}
+      <div style={{ height: 1, background: 'var(--border-subtle)', margin: '2px 0 0' }} />
 
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
-            rowGap: 16,
-            columnGap: 28,
-          }}
-        >
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          rowGap: 16,
+          columnGap: 36,
+        }}
+      >
           <Slider
             value={values.formality}
             onChange={(v) => set('formality', v)}
@@ -101,7 +96,6 @@ export function VibeStep({ values, onChange }: Props) {
             caption="Verbosity"
             word={vibeWord('verbosity', values.verbosity)}
           />
-        </div>
       </div>
     </div>
   );
