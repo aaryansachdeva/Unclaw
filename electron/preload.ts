@@ -207,6 +207,7 @@ const STREAM_WGSL = `
   async function pump(): Promise<void> {
     try {
       let lastT = 0;
+      let loggedColor = false;
       while (running && reader) {
         const { value, done } = await reader.read();
         if (done || !running) { value?.close(); break; }
@@ -215,6 +216,23 @@ const STREAM_WGSL = `
           console.log(`[rtc-gpu] hitch: ${Math.round(nowT - lastT)}ms between frames`);
         }
         lastT = nowT;
+        // One-shot colour report, matching the Chrome panel's. The DIRECT path
+        // shows raw BGRA while this path shows H.264 (4:2:0 YUV), so a colour
+        // difference between the desktop and the panel is a YUV->RGB question,
+        // not a gamut one - and Chrome picks that matrix from the stream's VUI
+        // signalling, GUESSING (601 vs 709, limited vs full) when the encoder
+        // does not signal it. Printing both sides makes the comparison a
+        // measurement instead of an eyeball.
+        if (!loggedColor) {
+          loggedColor = true;
+          const cs = (value as VideoFrame).colorSpace ?? ({} as VideoColorSpace);
+          console.log('[rtc-gpu] decoded colorSpace: ' + JSON.stringify({
+            primaries: cs.primaries, transfer: cs.transfer,
+            matrix: cs.matrix, fullRange: cs.fullRange,
+            format: (value as VideoFrame).format,
+            size: `${(value as VideoFrame).codedWidth}x${(value as VideoFrame).codedHeight}`,
+          }));
+        }
         try { paint(value); } finally { value.close(); }
       }
     } catch (e) {
