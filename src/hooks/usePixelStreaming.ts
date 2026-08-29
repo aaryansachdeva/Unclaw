@@ -141,30 +141,8 @@ export function usePixelStreaming({
       }, retryDelay);
     };
 
-    // Force MatchViewportRes — the SDK's auto-trigger from the
-    // `MatchViewportRes: true` setting is unreliable on Electron/Mac
-    // paint timing (the video element may not have its final device-
-    // pixel size when the SDK first fires the sync). Manually re-fire
-    // at `webRtcConnected` and `playStream` (×3, layered) to cover the
-    // layout-settle window. Mirrors the proven PC reference pattern in
-    // ProjectGraceTests/PS_Next_Claude. Drop the manual fires once the
-    // auto-trigger proves reliable across Mac/Electron paint timing.
-    // Render at PHYSICAL device pixels, not CSS pixels. The SDK's
-    // updateVideoStreamSize() feeds the video element's *logical* size
-    // (clientWidth/clientHeight) into onMatchViewportResolutionCallback, so on
-    // a Retina display UE renders at half the pane's real pixel count and the
-    // browser upscales 2x — a soft avatar. Override the callback to scale by
-    // devicePixelRatio (capped + rounded to even dims for H264 4:2:0) before
-    // emitting the Resolution command. Wire format is identical to the SDK's
-    // own path: emitCommand() -> streamMessageController 'Command' handler,
-    // same as onMatchViewportResolutionCallback's default body.
-    // Cap the longest rendered side. Everything downstream scales with pixel
-    // area: UE's scene-texture chain, the capture/I420/NV12 conversions, and
-    // the HW encoder. Uncapped Retina (dpr 2) testing measured ~6.5 GB resident
-    // at launch and ~1 GB of realloc churn per window resize. 1600 (vs 1920)
-    // trims ~30% more off every output-sized buffer in the whole pipeline;
-    // memory > sharpness call made 2026-07-19.
-    const MAX_RENDER_DIM = 1600;
+
+const MAX_RENDER_DIM = 1600;
     // Last dims actually sent to UE. Identical re-sends are skipped (layout
     // jitter + the layered connect-time fires produce duplicates); reset on
     // each webRtcConnected so a fresh session always gets one real send even
