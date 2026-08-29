@@ -1885,28 +1885,35 @@ app.on('before-quit', (event) => {
 // Stream lease: exactly one renderer owns Unreal's frames. Started here so it
 // outlives any single window; it reads the soul port per tick, so a soul
 // restart on a fresh dynamic port needs no re-arming.
-if (process.platform === 'darwin') {
-  // Dev-only scriptable toggle: `kill -USR2 <electron pid>` flips the lease
-  // remote/back so the whole handoff (freeze, overlay, encoder switchover,
-  // media guard, reclaim) can be exercised from a shell with no phone and no
-  // devtools. Same path as __unclawStream.lease().
-  if (!app.isPackaged) {
-    process.on('SIGUSR2', () => {
-      const next = streamLease.current() === 'remote' ? null : 'remote';
-      console.log(`[lease] SIGUSR2 — forcing ${next ?? 'follow-soul (local)'}`);
-      void streamLease.force(next);
-    });
-  }
-  streamLease.start(
-    () => getSoulPorts()?.http ?? null,
-    () => mainWindow,
-    (holder, players) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('stream-lease:changed', { holder, players });
-      }
-    },
-  );
+// Dev-only scriptable toggle: `kill -USR2 <electron pid>` flips the lease
+// remote/back so the whole handoff (freeze, overlay, encoder switchover,
+// media guard, reclaim) can be exercised from a shell with no phone and no
+// devtools. Same path as __unclawStream.lease(). POSIX-only: there is no
+// SIGUSR2 on Windows, and process.on('SIGUSR2') there throws.
+if (process.platform !== 'win32' && !app.isPackaged) {
+  process.on('SIGUSR2', () => {
+    const next = streamLease.current() === 'remote' ? null : 'remote';
+    console.log(`[lease] SIGUSR2 — forcing ${next ?? 'follow-soul (local)'}`);
+    void streamLease.force(next);
+  });
 }
+
+// NOT platform-gated. This used to sit inside an `if (platform === 'darwin')`
+// block whose only real subject was the SIGUSR2 handler above, so the lease
+// never started on Windows or Linux at all: the desktop kept rendering when a
+// phone or the Chrome panel took the stream, because nothing was polling
+// /pair/status to notice. soul was reporting the viewer correctly the whole
+// time. Found 2026-08-28 by the poll diagnostics staying completely silent -
+// not even the "port not resolved" line, which fires on the first tick.
+streamLease.start(
+  () => getSoulPorts()?.http ?? null,
+  () => mainWindow,
+  (holder, players) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('stream-lease:changed', { holder, players });
+    }
+  },
+);
 
 app.on('activate', () => {
   // Never resurrect the window mid-quit: clicking the Dock icon during the
