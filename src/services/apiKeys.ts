@@ -665,6 +665,22 @@ export interface ApiKeysProfile {
    *
    *  See soul/unreal_runtime.py:_GRAPHICS_PRESETS for the table. */
   graphics_quality: GraphicsQuality;
+  /** DLSS 5 Neural Rendering on/off.
+   *
+   *  Unlike graphics_quality this needs NO restart - it is a live flip of
+   *  r.NGX.DLSS.Enable, sent over the Pixel Streaming data channel through our
+   *  own narrow command handler (never PixelStreaming2.AllowConsoleCommands,
+   *  which would hand any connected client an arbitrary GEngine->Exec).
+   *
+   *  The setting is persisted because UE turns DLSS ON at PostEngineInit on
+   *  every launch, so an "off" choice has to be re-applied by the app when the
+   *  stream connects rather than remembered engine-side.
+   *
+   *  It is only MEANINGFUL on a machine where the user has installed the
+   *  DXGI-layer tooling themselves; UE tells the app whether that is the case
+   *  (EventType unclawNeuralRenderingState) and the control stays hidden
+   *  otherwise, because a switch that cannot do anything is worse than none. */
+  dlss5_enabled: boolean;
 }
 
 /** UE-side graphics preset. See ApiKeysProfile.graphics_quality. */
@@ -727,6 +743,9 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   chat_thinking_effort:     'none',
   agentic_thinking_effort:  'medium',
   graphics_quality:         'low',
+  // On by default: UE enables DLSS at startup anyway, so this matches the
+  // renderer's own default and an unset profile does not fight it.
+  dlss5_enabled:            true,
 };
 
 

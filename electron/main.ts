@@ -19,7 +19,7 @@ import path from 'path';
 import fs from 'fs';
 import { spawnSync } from 'child_process';
 import { LOGO_BASE64 } from './oauthLogo';
-import { startSoul, stopSoul, restartSoul, shutdownEverything, getSoulSnapshot, getSoulPorts, writeSoulKeysBridge, clearSoulKeysBridge } from './soulSupervisor';
+import { startSoul, stopSoul, restartSoul, shutdownEverything, getSoulSnapshot, getSoulPorts, writeSoulKeysBridge, clearSoulKeysBridge, getRuntimeDir, getSoulDataDir } from './soulSupervisor';
 import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPaksStageDir, downloadCharacterVoices, characterVoicesPresent, installedPakVersions, quarantineStalePaks } from './setupCoordinator';
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
@@ -651,6 +651,45 @@ function createTray() {
 // IPC handlers for window controls from renderer
 // Force the stream lease for testing the handoff without a second device.
 // Renderer surface: __unclawStream.lease('remote' | 'local' | null)
+// Can DLSS 5 Neural Rendering actually run on this machine?
+//
+// Same rule the UE plugin uses: the user's own ReShade proxy (dxgi.dll) plus
+// at least one ReShade addon, sitting next to the character executable. We ship
+// none of those, so their absence is the normal case and the Settings control
+// stays hidden rather than offering a switch that cannot do anything.
+//
+// A file check rather than asking UE, because PS2's UE->frontend Response
+// channel does not currently deliver to this app (UE sends, addressed to the
+// right player id; the frontend listener never fires). UE still logs its own
+// readback, which is what support should read.
+ipcMain.handle('dlss5:tooling-present', (): boolean => {
+  try {
+    if (process.platform !== 'win32') return false;
+    // run_soul.ps1 writes the executable it actually launched; that is the only
+    // reliable source, because a dev run points somewhere other than the
+    // packaged runtime. Fall back to the packaged layout when it is absent.
+    let exeDir: string | null = null;
+    try {
+      const marker = path.join(getSoulDataDir(), 'ue_exe.txt');
+      if (fs.existsSync(marker)) {
+        // Strip the BOM: Windows PowerShell 5.1's Set-Content -Encoding utf8
+        // always writes one, and it survives trim() straight into path.dirname.
+        const exe = fs.readFileSync(marker, 'utf8').replace(/^﻿/, '').trim();
+        if (exe) exeDir = path.dirname(exe);
+      }
+    } catch { /* fall through to the packaged guess */ }
+    if (!exeDir) exeDir = path.join(getRuntimeDir(), 'unreal');
+    const binDir = path.join(exeDir, 'AudioTestProject02', 'Binaries', 'Win64');
+    const hasProxy = fs.existsSync(path.join(binDir, 'dxgi.dll'));
+    const hasAddon = hasProxy
+      && fs.readdirSync(binDir).some((f) => f.toLowerCase().endsWith('.addon64'));
+    console.log(`[dlss5] tooling check: ${binDir} dxgi=${hasProxy} addon=${hasAddon}`);
+    return hasAddon;
+  } catch {
+    return false;
+  }
+});
+
 ipcMain.handle('stream-lease:force', async (_e, holder: 'local' | 'remote' | null) => {
   return streamLease.force(holder);
 });

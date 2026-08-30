@@ -65,6 +65,12 @@ interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
   onSaved?: (next: ApiKeysProfile) => void;
+  /** Whether UE reported that DLSS 5 Neural Rendering can actually run here,
+   *  i.e. the user has put their own ReShade + addon + NVIDIA runtime next to
+   *  the character executable. Only this process can see that, so UE tells us
+   *  (EventType unclawNeuralRenderingState) and we hide the control otherwise
+   *  - a switch that cannot do anything is worse than no switch. */
+  dlss5Available?: boolean;
 }
 
 type SaveState =
@@ -125,6 +131,8 @@ interface PaneContext {
   thinkingCapsByModel: Record<string, ThinkingCapability>;
   isProbingKey: boolean;
   graphicsChanged: boolean;
+  /** See SettingsPanelProps.dlss5Available. */
+  dlss5Available: boolean;
   /** Latest /validate_keys outcome, surfaced to facets that need to
    *  render keyless status (Claude Code subscription install + auth). */
   validation: KeyValidationResult | null;
@@ -139,7 +147,7 @@ interface PaneContext {
 // Root
 // =============================================================================
 
-export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
+export function SettingsPanel({ open, onClose, onSaved, dlss5Available }: SettingsPanelProps) {
   const [draft, setDraft] = useState<ApiKeysProfile>(DEFAULT_API_KEYS);
   const [original, setOriginal] = useState<ApiKeysProfile>(DEFAULT_API_KEYS);
   const [loading, setLoading] = useState(true);
@@ -397,7 +405,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
 
   const ctx: PaneContext = {
     draft, update, setProvider, liveModelsByProvider, thinkingCapsByModel,
-    isProbingKey, graphicsChanged,
+    isProbingKey, graphicsChanged, dlss5Available: dlss5Available ?? false,
     validation, profile: profileDraft, updateProfile,
   };
 
@@ -1121,7 +1129,7 @@ function AgenticFacet({ draft, update, validation, isProbingKey, liveModelsByPro
 // GRAPHICS, render quality preset
 // =============================================================================
 
-function GraphicsFacet({ draft, update, graphicsChanged }: PaneContext) {
+function GraphicsFacet({ draft, update, graphicsChanged, dlss5Available }: PaneContext) {
   const tiers: { id: GraphicsQuality; label: string; copy: string; rings: number }[] = [
     { id: 'low',    label: 'Low',    copy: '50% backbuffer. Stays cool on a laptop.',         rings: 2 },
     { id: 'medium', label: 'Medium', copy: '75% backbuffer. Richer subsurface scattering.',   rings: 3 },
@@ -1148,7 +1156,112 @@ function GraphicsFacet({ draft, update, graphicsChanged }: PaneContext) {
           Restart Unclaw to apply.
         </div>
       )}
+      {/* Neural rendering. Hidden unless UE reports the runtime is installed,
+          because on every other machine this switch would do nothing at all.
+          Deliberately NOT part of the preset tiles above and deliberately not
+          wired to `graphicsChanged`: the preset needs a restart, this takes
+          effect the moment it is saved. */}
+      {dlss5Available && (
+        <NeuralRenderingRow
+          value={draft.dlss5_enabled}
+          onChange={(v) => update('dlss5_enabled', v)}
+        />
+      )}
     </Composition>
+  );
+}
+
+// A secondary switch under the preset tiles: quieter than a tile row, because
+// it is one boolean and not a choice between three renderings.
+function NeuralRenderingRow({
+  value, onChange,
+}: {
+  value: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div style={{
+      marginTop: 26,
+      paddingTop: 22,
+      borderTop: '1px solid var(--glass-border)',
+    }}>
+      <div style={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        justifyContent: 'space-between',
+        gap: 20,
+      }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{
+            fontSize: 10.5,
+            letterSpacing: '0.14em',
+            textTransform: 'uppercase',
+            color: 'var(--text-secondary)',
+            marginBottom: 8,
+          }}>
+            Neural rendering
+          </div>
+          <div style={{
+            fontSize: 13.5,
+            fontWeight: 600,
+            letterSpacing: '-0.01em',
+            marginBottom: 6,
+          }}>
+            DLSS 5
+          </div>
+          <div style={{
+            fontSize: 11.5,
+            color: 'var(--text-secondary)',
+            lineHeight: 1.5,
+            maxWidth: 420,
+          }}>
+            Refines skin, hair and fabric while the frame is still rendering, so
+            the desktop, the browser panel and your phone all see the same
+            picture. Runs on the DLSS 5 runtime you installed yourself.
+          </div>
+        </div>
+        <div style={{
+          display: 'flex',
+          flexShrink: 0,
+          gap: 4,
+          padding: 4,
+          borderRadius: 999,
+          background: 'rgba(255, 255, 255, 0.025)',
+          border: '1px solid var(--glass-border)',
+        }}>
+          {[
+            { on: false, label: 'Off' },
+            { on: true,  label: 'On'  },
+          ].map((opt) => {
+            const isActive = value === opt.on;
+            return (
+              <button
+                key={opt.label}
+                type="button"
+                onClick={() => onChange(opt.on)}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 999,
+                  border: `1px solid ${isActive ? 'rgba(196, 68, 68, 0.34)' : 'transparent'}`,
+                  background: isActive ? 'rgba(196, 68, 68, 0.10)' : 'transparent',
+                  color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  fontFamily: 'inherit',
+                  fontSize: 12,
+                  fontWeight: isActive ? 600 : 500,
+                  letterSpacing: '-0.005em',
+                  cursor: 'pointer',
+                  transition: 'background var(--duration-base) var(--ease-out-quart), '
+                    + 'border-color var(--duration-base) var(--ease-out-quart), '
+                    + 'color var(--duration-base) var(--ease-out-quart)',
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -443,6 +443,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
    *  sniff navigator.userAgent/platform. 'darwin' | 'win32' | 'linux'. */
   platform: process.platform,
 
+  /** True when the user has installed the DXGI-layer tooling that DLSS 5
+   *  Neural Rendering needs (a ReShade proxy dxgi.dll plus an addon), next to
+   *  the character executable. We ship none of it, so false is the normal
+   *  answer and the Settings control stays hidden rather than offering a
+   *  switch that cannot do anything.
+   *
+   *  Top level on purpose: it is nothing to do with the direct-surface path. */
+  dlss5ToolingPresent: (): Promise<boolean> =>
+    ipcRenderer.invoke('dlss5:tooling-present'),
+
   // Window controls.
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close'),

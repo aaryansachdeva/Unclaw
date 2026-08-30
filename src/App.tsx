@@ -535,6 +535,102 @@ function AppMain() {
   // r.NGX.DLSS.Enable in UE, which is the real switch - the NR pass is a
   // hook on DLSS evaluation and cannot run without it.
   const [neuralRendering, setNeuralRendering] = useState(true);
+  // DLSS 5 Neural Rendering.
+  //
+  // `wanted` is the user's saved choice; `available` is whether this machine
+  // can actually do it, which depends on the user having installed ReShade +
+  // the addon + the NVIDIA runtime themselves. The renderer cannot see any of
+  // that, so the main process checks the files (same rule the UE plugin uses)
+  // and the Settings control stays hidden until it says yes.
+  const [dlss5Wanted, setDlss5Wanted] = useState(true);
+  const [dlss5Available, setDlss5Available] = useState(false);
+  // Ask the main process whether the user installed the tooling. UE knows the
+  // same thing and announces it, but PS2's UE->frontend Response channel does
+  // not currently deliver to this app (see the listener below), so the file
+  // check is what actually drives the UI.
+  useEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const api = (window as any).electronAPI;
+    if (!api?.dlss5ToolingPresent) {
+      // eslint-disable-next-line no-console
+      console.log('[dlss5] electronAPI.dlss5ToolingPresent missing — control hidden');
+      return;
+    }
+    void api.dlss5ToolingPresent()
+      .then((present: boolean) => {
+        setDlss5Available(!!present);
+        // eslint-disable-next-line no-console
+        console.log(`[dlss5] tooling present (main process check): ${!!present}`);
+      })
+      .catch((err: unknown) => {
+        // Absent is the safe default, but say why - a silent catch here is how
+        // a control goes missing with no way to tell whether that was correct.
+        // eslint-disable-next-line no-console
+        console.warn('[dlss5] tooling check failed:', err);
+      });
+  }, []);
+
+  // UE also answers every command with the truth: whether the feature is
+  // possible, and what r.NGX.DLSS.Enable actually holds after the write (the
+  // CVar can reject a lower-priority write in silence, so the readback matters
+  // more than the click).
+  //
+  // NOT LOAD-BEARING TODAY. PS2's UE->frontend Response channel does not
+  // deliver to this app: UE was made to address the message to the exact player
+  // id it had just received a command from ("state -> player '1' via 1
+  // streamer(s)") and this listener never fired once across four runs. Every
+  // other UE->app ack in this file rides the same channel, so that is worth its
+  // own look. Until then availability comes from the main-process file check
+  // above, and this listener is the upgrade path that costs nothing to leave
+  // in - UE's own log line is what support should read meanwhile.
+  useEffect(() => {
+    if (!pixelStreaming) return;
+    const onResponse = (raw: string) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { return; }
+      if (!parsed || typeof parsed !== 'object') return;
+      const msg = parsed as { EventType?: unknown; available?: unknown; enabled?: unknown };
+      if (msg.EventType !== 'unclawNeuralRenderingState') return;
+      // UE is authoritative when it can be heard; today it cannot, so this
+      // only ever confirms what the file check already found.
+      setDlss5Available(!!msg.available);
+      setNeuralRendering(!!msg.enabled);
+      // eslint-disable-next-line no-console
+      console.log(`[dlss5] available=${!!msg.available} enabled=${!!msg.enabled}`);
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const psAny = pixelStreaming as any;
+    psAny.addResponseEventListener?.('unclaw-dlss5-state', onResponse);
+    return () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (pixelStreaming as any).removeResponseEventListener?.('unclaw-dlss5-state');
+    };
+  }, [pixelStreaming]);
+
+  // Push the saved choice at UE once the stream is up. UE enables DLSS at
+  // PostEngineInit on every launch, so an "off" choice is not remembered
+  // engine-side and has to be re-applied by the app each session. Sending it
+  // also makes UE answer with the resulting state, which is how a client that
+  // connected after the first announce learns whether the feature exists.
+  useEffect(() => {
+    if (!pixelStreaming || connectionState !== 'connected') return;
+    const send = () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (pixelStreaming as any).emitCommand?.({
+        UnclawNeuralRendering: dlss5Wanted ? '1' : '0',
+      });
+    };
+    // Layered, because both ends of this race are real: UE registers the
+    // command handler on a 1s ticker once a streamer exists, so a send at
+    // connect can land before there is anything to receive it; and UE's own
+    // first announce can go out before this listener attaches. Re-sending is
+    // free - setting a CVar to the value it already holds is a no-op - and
+    // every send is answered with the true state, which is what actually
+    // populates the Settings control. Same shape as the resolution nudges.
+    send();
+    const timers = [800, 2000, 4000].map((ms) => window.setTimeout(send, ms));
+    return () => timers.forEach(window.clearTimeout);
+  }, [pixelStreaming, connectionState, dlss5Wanted]);
 
   // Wardrobe descriptor emitter, narrow wrapper around the PS emit
   // so callers don't import PS types. Each payload is timestamped to
@@ -649,6 +745,9 @@ function AppMain() {
       const keys = await fetchApiKeys();
       setActiveLlmModel(keys.llm_model);
       setAgenticEnabled(!!keys.agentic_enabled);
+      // Absent on profiles saved before this field existed; treat that as ON,
+      // which is what UE does at startup anyway.
+      setDlss5Wanted(keys.dlss5_enabled !== false);
     } catch (err) {
       console.warn('[apiKeys] failed to read active llm_model', err);
     }
@@ -4546,6 +4645,7 @@ function AppMain() {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         onSaved={() => void refreshActiveLlmModel()}
+        dlss5Available={dlss5Available}
       />
 
       {/* Greeting + ambient widgets. Gated only on a connected stream
