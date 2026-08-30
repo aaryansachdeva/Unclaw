@@ -562,6 +562,10 @@ function AppMain() {
   const { prefs: passthroughPrefs, setVerbosity: setPassthroughVerbosity, toggleMuted: togglePassthroughMuted } = usePassthroughPrefs();
   // Selected carousel slot: a roster instance id, or ADD_SLOT for the picker.
   const [selectedInstanceId, setSelectedInstanceId] = useState<string>(BASE_INSTANCE_ID);
+  // Read by the sign-in reconcile, which runs from an effect whose closure
+  // predates any selection the user makes while it is in flight.
+  const selectedInstanceIdRef = useRef(selectedInstanceId);
+  selectedInstanceIdRef.current = selectedInstanceId;
   const [addPickerOpen, setAddPickerOpen] = useState(false);
   // Photo-capture flow (QR -> Unclaw Scan -> custom character), layered over
   // the picker. Deliberately NOT gated on isConnected: losing the stream
@@ -3797,6 +3801,32 @@ function AppMain() {
         } else if (ownerChanged) {
           suppressEnvPushRef.current = true;
           resetEnvironment();
+        }
+
+        // RE-DRIVE THE LIVE CHARACTER. Restoring the roster changes the saved
+        // look of a character that is ALREADY on screen, and hydrating React
+        // state does not touch UE: it spawned before sign-in wearing the
+        // defaults, and it keeps wearing them. That is the "I have to refresh
+        // after signing in for the clothes to be right" bug; a reload worked
+        // only because the whole apply pipeline re-runs at mount, by which
+        // point the roster is correct.
+        //
+        // No characterReady fires here (nothing respawned), so this mirrors
+        // the on-target reconcile's re-assert order: identity, body, colors,
+        // then the outfit. The environment re-applies through its own effect
+        // when hydrateEnvironment lands above.
+        const restoredRoster = (p?.roster && Array.isArray(p.roster)) ? p.roster : null;
+        if (restoredRoster && restoredRoster.length > 0) {
+          const wantId = selectedInstanceIdRef.current;
+          const live = restoredRoster.find((i) => i?.id === wantId)
+            ?? restoredRoster.find((i) => i?.id === BASE_INSTANCE_ID)
+            ?? restoredRoster[0];
+          if (live) {
+            emitApplyIdentityRef.current?.(live);
+            emitBodyBlendsRef.current?.(live);
+            emitAppearanceColorsRef.current?.(live.wardrobe);
+            void applyInstanceWardrobeRef.current?.(live.wardrobe, live.agentId);
+          }
         }
 
         // Record ownership in BOTH the durable main-process store (authoritative)
