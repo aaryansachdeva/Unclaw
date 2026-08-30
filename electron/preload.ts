@@ -27,6 +27,31 @@ const DIRECT_MODE: '1' | '2' | null = !DIRECT_ENABLED
     ? '2'
     : (DIRECT_FLAG === '2' ? '2' : '1');
 
+// The P3->sRGB gamut gate, shared by BOTH renderers.
+//
+// This logic lived in two places and drifted. The WebRTC painter learned the
+// `color-gamut: p3` test on 2026-08-28; the direct canvas kept a hardcoded 1.
+// So on a plain sRGB display the desktop applied the matrix while the Chrome
+// panel applied nothing - the same frame, two different colours, which is the
+// exact mismatch the shared shader exists to prevent. Reported live the same
+// evening ("chrome colors were still broken") AFTER the H.264 colour tag had
+// been verified working, because this was never a YUV problem at all.
+//
+// One function now, so the two cannot drift again.
+//
+// The media query is the real switch on all three OSes: it is true exactly
+// when the display is wide-gamut AND Chromium is colour-managing into it,
+// which is precisely when the cancellation math holds. It also matches
+// StreamView's CSS gate and the Chrome panel's painterGamutWanted(), so every
+// surface agrees by construction rather than by convention.
+const streamGamutWanted = (): number => {
+  try {
+    if (localStorage.getItem('unclaw-stream-gamut-off') != null) return 0;
+    return window.matchMedia('(color-gamut: p3)').matches ? 1 : 0;
+  } catch { return 1; }
+};
+
+
 // ---------------------------------------------------------------------------
 // The one stream shader. Fullscreen triangle sampling an external texture,
 // with the P3->sRGB gamut match behind a uniform (see the direct-mode block
@@ -107,24 +132,8 @@ const STREAM_WGSL = `
     ? new ResizeObserver(() => { if (bits) bits.needsReconfigure = true; })
     : null;
 
-  const gamutWanted = (): number => {
-    try {
-      if (localStorage.getItem('unclaw-stream-gamut-off') != null) return 0;
-      // MUST match StreamView's gate, which is `@media (color-gamut: p3)` in
-      // CSS. That query is the real switch on all three OSes: it is true
-      // exactly when the display is wide-gamut AND Chromium is colour-managing
-      // into it, which is precisely when the cancellation math holds. On a
-      // plain sRGB monitor it is false and the WebRTC filter goes inert.
-      //
-      // This shader had no such gate, so on an sRGB display the direct path
-      // applied the P3->sRGB matrix while WebRTC applied nothing, and the two
-      // renderers showed visibly different colour for the same frame - the
-      // opposite of the "one renderer, one colour" the WebGPU painter exists
-      // to give. Reported 2026-08-28 comparing the desktop against the Chrome
-      // panel side by side.
-      return window.matchMedia('(color-gamut: p3)').matches ? 1 : 0;
-    } catch { return 1; }
-  };
+  // Shared with the direct canvas - see streamGamutWanted() above.
+  const gamutWanted = (): number => streamGamutWanted();
 
   async function initGpu(target: HTMLCanvasElement): Promise<GpuBits> {
     const g = (navigator as any).gpu;
@@ -1015,6 +1024,29 @@ if (DIRECT_MODE === '2') {
       }
       heldTextures.get(sid)?.release();
       heldTextures.set(sid, data.importedSharedTexture);
+
+      // Bound the map, mirroring kMaxHeld on the main side.
+      //
+      // The publisher normally cycles 4 ids forever, so this never fires. But
+      // ANY pool rebuild mints fresh ids - a window resize, and (found
+      // 2026-08-29) every DLSS toggle, since disabling DLSS tears down the
+      // backbuffer chain. Without eviction the map grew without limit: 58
+      // live imports observed from a handful of clicks, each pinning a
+      // GPU-process mailbox at roughly 4MB.
+      //
+      // main bounded its own imports at 8 and this side bounded nothing, so
+      // the leak survived the fix that was supposed to stop it. Same number
+      // here, and for the same reason: one spare generation keeps frames
+      // already in flight against the old pool paintable, and the paint path
+      // already counts a miss as a drop rather than failing.
+      const kMaxHeldRenderer = 8;
+      while (heldTextures.size > kMaxHeldRenderer) {
+        const oldest = heldTextures.keys().next().value;
+        if (oldest === undefined) break;
+        try { heldTextures.get(oldest)?.release(); } catch { /* already gone */ }
+        heldTextures.delete(oldest);
+      }
+
       console.log(`[direct-canvas] surface ${sid} received (${heldTextures.size} held)`);
     });
 
@@ -1056,14 +1088,13 @@ if (DIRECT_MODE === '2') {
       // Same toggle as the SVG filter (presence of the key disables it).
       // Read per frame so __unclawStream.gamut() applies live; the buffer
       // write only happens on change.
-      let gamutWanted = 1;
-      try {
-        if (localStorage.getItem('unclaw-stream-gamut-off') != null) gamutWanted = 0;
-      } catch { /* storage unavailable: keep the match on */ }
+      // Was hardcoded to 1 here, which is what made the desktop and the
+      // Chrome panel disagree on an sRGB display. Same gate as the painter.
+      const gamutWanted = streamGamutWanted();
       if (gamutWanted !== lastGamutOn) {
         g.device.queue.writeBuffer(g.gamutBuf, 0, new Float32Array([gamutWanted]));
         lastGamutOn = gamutWanted;
-        console.log(`[direct-canvas] in-shader gamut match ${gamutWanted ? 'ON' : 'OFF'}`);
+        console.log(`[direct-canvas] in-shader gamut match ${gamutWanted ? 'ON' : 'OFF'} (display p3=${(() => { try { return window.matchMedia('(color-gamut: p3)').matches; } catch { return 'unknown'; } })()})`);
       }
       const ext = g.device.importExternalTexture({ source: vf });
       const bind = g.device.createBindGroup({
