@@ -680,11 +680,26 @@ ipcMain.handle('dlss5:tooling-present', (): boolean => {
     } catch { /* fall through to the packaged guess */ }
     if (!exeDir) exeDir = path.join(getRuntimeDir(), 'unreal');
     const binDir = path.join(exeDir, 'AudioTestProject02', 'Binaries', 'Win64');
+    // The build must actually SHIP DLSS, or there is no r.NGX.DLSS.Enable for
+    // the control to toggle and it would be a dead switch. NVIDIA's
+    // NGX.Build.cs stages nvngx_dlss.dll next to the DLSS plugin, so its
+    // presence is exactly "this build has DLSS in it".
+    //
+    // This is what keeps the setting invisible in the no-DLSS release, and
+    // what makes it reappear on its own if a later build ships DLSS again -
+    // no flag to remember either way.
+    const dlssDll = path.join(
+      exeDir, 'AudioTestProject02', 'Plugins', 'DLSS',
+      'Binaries', 'ThirdParty', 'Win64', 'nvngx_dlss.dll',
+    );
+    const buildHasDlss = fs.existsSync(dlssDll);
     const hasProxy = fs.existsSync(path.join(binDir, 'dxgi.dll'));
     const hasAddon = hasProxy
       && fs.readdirSync(binDir).some((f) => f.toLowerCase().endsWith('.addon64'));
-    console.log(`[dlss5] tooling check: ${binDir} dxgi=${hasProxy} addon=${hasAddon}`);
-    return hasAddon;
+    const ok = buildHasDlss && hasAddon;
+    console.log(`[dlss5] tooling check: ${binDir} `
+      + `buildHasDlss=${buildHasDlss} dxgi=${hasProxy} addon=${hasAddon} -> ${ok}`);
+    return ok;
   } catch {
     return false;
   }

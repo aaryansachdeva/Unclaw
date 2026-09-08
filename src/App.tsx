@@ -534,7 +534,7 @@ function AppMain() {
   // TEMPORARY (dev only): DLSS 5 Neural Rendering on/off. Mirrors
   // r.NGX.DLSS.Enable in UE, which is the real switch - the NR pass is a
   // hook on DLSS evaluation and cannot run without it.
-  const [neuralRendering, setNeuralRendering] = useState(true);
+
   // DLSS 5 Neural Rendering.
   //
   // `wanted` is the user's saved choice; `available` is whether this machine
@@ -594,7 +594,6 @@ function AppMain() {
       // UE is authoritative when it can be heard; today it cannot, so this
       // only ever confirms what the file check already found.
       setDlss5Available(!!msg.available);
-      setNeuralRendering(!!msg.enabled);
       // eslint-disable-next-line no-console
       console.log(`[dlss5] available=${!!msg.available} enabled=${!!msg.enabled}`);
     };
@@ -4889,50 +4888,6 @@ function AppMain() {
                 pointerEvents: 'none',
               }}
             >
-              {/* TEMPORARY: DLSS 5 Neural Rendering toggle, dev builds only.
-                  Sits in the same stack as the camera toggle so it rides above
-                  the input bar however tall that grows - a fixed bottom offset
-                  would collide as soon as the textarea wraps.
-
-                  Goes through our own narrow command handler in
-                  PixelStreaming2DirectWin, not PS2's "ConsoleCommand" (which
-                  runs GEngine->Exec on any string from any connected client).
-
-                  The switch IS DLSS: the NR pass exists only as a hook on NGX
-                  evaluation, so with DLSS off the addon reverts to "WAITING FOR
-                  GAME DLSS". There is no separate NR control. */}
-              {import.meta.env.DEV && (
-                <div style={{ display: 'flex', marginBottom: 8, pointerEvents: 'auto' }}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const next = !neuralRendering;
-                      setNeuralRendering(next);
-                      pixelStreaming?.emitCommand({ UnclawNeuralRendering: next ? '1' : '0' });
-                    }}
-                    style={{
-                      padding: '5px 12px',
-                      borderRadius: 999,
-                      // Same glass treatment as CameraModeToggle next to it, so
-                      // a dev affordance does not read as product chrome.
-                      background: 'var(--glass-bg, rgba(40,48,65,0.32))',
-                      border: '1px solid var(--glass-border, rgba(255,255,255,0.12))',
-                      backdropFilter: 'var(--glass-blur, blur(32px) saturate(1.6))',
-                      boxShadow: '0 4px 14px -6px rgba(0,0,0,0.5)',
-                      // State shows as presence, not hue: full white when on,
-                      // dimmed when off.
-                      color: neuralRendering ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.45)',
-                      font: '11px ui-monospace, SFMono-Regular, Menlo, monospace',
-                      letterSpacing: '0.02em',
-                      cursor: 'pointer',
-                      WebkitAppRegion: 'no-drag',
-                    } as React.CSSProperties}
-                    title="DLSS 5 Neural Rendering (dev only). Toggles r.NGX.DLSS.Enable in UE."
-                  >
-                    {neuralRendering ? 'DLSS 5: ON' : 'DLSS 5: OFF'}
-                  </button>
-                </div>
-              )}
               {/* Camera framing toggle, floats just above the input bar.
                   Only while a stream is up and not in customization (which owns
                   its own full-figure framing). */}
