@@ -238,16 +238,22 @@ export const MANIFEST: SetupManifest = {
   },
 
   // --- WINDOWS base bundles ---------------------------------------------
-  // unrealWindows: the 2026.0612.01 Win64 Shipping build (stock PixelStreaming2
-  // / NVENC). Carved like Mac — paid paks (goblin/joi) + Saved/ excluded; ships
-  // pakchunk0 (base+grace) + pakchunk5 (mark) only. Zip root holds
-  // AudioTestProject02.exe (extracts flat to <runtime>/unreal/). Includes the
-  // bShareMaterialShaderCode=False shader fix (grey-eyes resolved).
+  // unrealWindows: 2026.0910.02, Win64 Shipping, UE 5.8. FIRST BUILD WITH NO
+  // DLSS OF ANY KIND — the DLSS/NIS/Streamline plugins are all disabled in the
+  // .uproject, so none of their runtimes are staged. Zip root holds
+  // AudioTestProject02.exe (extracts flat to <runtime>/unreal/).
+  //
+  // Carved: paid chunks 1-4 (ava/goblin/chris/joi) removed. Ships chunk0
+  // (base+grace) + chunk5 (Mark, MALE base body) + chunk6 (Syd, FEMALE base
+  // body). All three are load-bearing: grace_custom is CustomF and her base
+  // mesh exists ONLY in chunk6, kevin_custom is CustomM and needs chunk5. Ship
+  // 0 alone, or 0+5, and grace_custom spawns with no body. The previous comment
+  // here said "pakchunk0 + pakchunk5 only" — that predates Syd and was wrong.
   unrealWindows: {
-    url: 'https://files.fotonlabs.com/unreal/2026.0805.03.zip',
-    sha256: '46adffeb4e8402f3a73b1b19dd3273eb799a009982ff45031d88a9292c8874e3',
-    sizeBytes: 3_310_715_009,
-    version: '2026.0805.03',
+    url: 'https://files.fotonlabs.com/unreal/2026.0910.02.zip',
+    sha256: 'e4fa42dcf4702d6ab614d949b52e51009d890ba0fb6264f3a987c037d3ae12bd',
+    sizeBytes: 3_397_257_380,
+    version: '2026.0910.02',
   },
 
   // runtimeAssetsWindows: the lipsync/T2F/express ONNX model + source tree the
@@ -265,13 +271,18 @@ export const MANIFEST: SetupManifest = {
     version: '2026.0805.04',
   },
 
-  // Linux (first release, UE 5.8). The assets bundle is byte-identical to
-  // the Windows one (pure ONNX + python, no platform bits) — same sha, two keys.
+  // Linux (first release, UE 5.8). Same carve as Windows: chunk0 + chunk5 +
+  // chunk6, paid 1-4 removed. Zip root holds AudioTestProject02.sh. Also the
+  // first Linux build since the direct-path plugin landed — see the port
+  // manifest for the three cross-compile fixes it needed.
+  //
+  // The assets bundle is byte-identical to the Windows one (pure ONNX + python,
+  // no platform bits) — same sha, two keys. That duplication is deliberate.
   unrealLinux: {
-    url: 'https://files.fotonlabs.com/linux/unreal/unreal-2026.0805.02-linux.zip',
-    sha256: 'd3ce4de0ce11f462fe08a961efcd1563470e8ad80acdf2715066f8ac84634fe9',
-    sizeBytes: 3_271_558_187,
-    version: '2026.0805.02',
+    url: 'https://files.fotonlabs.com/linux/unreal/unreal-2026.0910.02-linux.zip',
+    sha256: 'b6e81bb69ba5d009121c67da2ae503ad52fa8d99a8c3effde22b3c1c46014c21',
+    sizeBytes: 3_332_850_121,
+    version: '2026.0910.02',
   },
 
   runtimeAssetsLinux: {

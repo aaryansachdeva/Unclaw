@@ -75,7 +75,6 @@
     "win": {
       "extraResources": [
         {
-          "//": "Directory + filter, not a direct file path: a direct path makes electron-builder hard-fail on any machine that has not run `npm run build:addon`, and the direct path is meant to be optional everywhere. An empty match just ships nothing and directSurface.ts logs 'no addon built'.",
           "from": "electron/native/surface_layer/build/Release",
           "to": ".",
           "filter": [ "surface_layer.node" ]
@@ -104,7 +103,6 @@
     "mac": {
       "extraResources": [
         {
-          "//": "Directory + filter, not a direct file path: a direct path makes electron-builder hard-fail on any machine that has not run `npm run build:addon`, and the direct path is meant to be optional everywhere. An empty match just ships nothing and directSurface.ts logs 'no addon built'.",
           "from": "electron/native/surface_layer/build/Release",
           "to": ".",
           "filter": [ "surface_layer.node" ]
@@ -165,7 +163,6 @@
     "linux": {
       "extraResources": [
         {
-          "//": "Directory + filter, not a direct file path: a direct path makes electron-builder hard-fail on any machine that has not run `npm run build:addon`, and the direct path is meant to be optional everywhere. An empty match just ships nothing and directSurface.ts logs 'no addon built'.",
           "from": "electron/native/surface_layer/build/Release",
           "to": ".",
           "filter": [ "surface_layer.node" ]
@@ -175,15 +172,13 @@
         {
           "target": "AppImage",
           "arch": [
-            "x64",
-            "arm64"
+            "x64"
           ]
         },
         {
           "target": "deb",
           "arch": [
-            "x64",
-            "arm64"
+            "x64"
           ]
         }
       ],

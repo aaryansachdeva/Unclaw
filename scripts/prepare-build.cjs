@@ -1,4 +1,16 @@
 #!/usr/bin/env node
+// Why build.<platform>.extraResources points at a DIRECTORY + filter rather
+// than straight at surface_layer.node: a direct file path makes
+// electron-builder hard-fail on any machine that has not run
+// `npm run build:addon`, and the addon is meant to be optional everywhere.
+// An empty match just ships nothing, and directSurface.ts logs
+// 'no addon built' and falls back to WebRTC.
+//
+// This note used to live in package.json under a "//" key. electron-builder
+// 25 validates its config strictly and rejects unknown properties, so that
+// key failed every dist:* target before it packaged anything. JSON has no
+// comments; this script runs first in every dist script, so it lives here.
+
 /*
  * prepare-build — makes `npm run dist:*` work from a clean clone with ZERO
  * manual setup. Idempotent: skips anything already in place. Run automatically
