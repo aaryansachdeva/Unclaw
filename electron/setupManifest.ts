@@ -170,7 +170,7 @@ export const MANIFEST: SetupManifest = {
   // Bumped whenever ANY bundle below changes, so existing installs re-run the
   // wizard for the new artifacts. Shared by all three platforms (each bundle
   // carries its own per-platform version), so no platform suffix here.
-  releaseTag: '2026.0828.01',
+  releaseTag: '2026.0912.01',
   pythonVersion: '3.11',
   minFreeDiskBytes: 15 * 1024 * 1024 * 1024, // 15 GB
 
@@ -256,6 +256,17 @@ export const MANIFEST: SetupManifest = {
     version: '2026.0910.02',
   },
 
+  // runtimeAssetsWindows 2026.0912.01: adds soul-models/pocket/ — the Kyutai
+  // Pocket-TTS weights and our seven torch-format voice embeddings, so Pocket
+  // (the DEFAULT tts_provider) speaks in each character's own voice offline
+  // from first launch instead of pulling ~327 MB from HuggingFace mid-sentence.
+  //
+  // Only the UNGATED `pocket-tts-without-voice-cloning` repo ships. The gated
+  // kyutai/pocket-tts weights were needed to CREATE the embeddings; tier-1
+  // playback loads a <voice>.safetensors in ~15 ms without them, verified
+  // offline against a cache holding only the ungated repo. Do not ship the
+  // gated weights — the licence does not allow redistributing them.
+  //
   // runtimeAssetsWindows: the lipsync/T2F/express ONNX model + source tree the
   // Windows soul expects, extracted to <runtime>/assets/ so run_soul.ps1's
   // $Repo/Audio2Lipsync/python/src, $Repo/ExpressModelv8/checkpoints/... etc.
@@ -265,10 +276,10 @@ export const MANIFEST: SetupManifest = {
   // out of the 5 GB checkpoints_onnx dir, plus t2f_fp16.onnx + best_v4.pt +
   // stats + the lipsync/express .py source. Mac-only .mlpackage excluded.
   runtimeAssetsWindows: {
-    url: 'https://files.fotonlabs.com/assets/runtime-2026.0805.04-win.zip',
-    sha256: '9d35dc196fe7737bf93419322565be31b6b4b96c186ed7ff1fe0f9c66e0d4c7f',
-    sizeBytes: 504_358_510,
-    version: '2026.0805.04',
+    url: 'https://files.fotonlabs.com/assets/runtime-2026.0912.01-win.zip',
+    sha256: 'dc1e2e4b3b7d61533d71200233240bb474b8d39d87bd97bfe3532beb8d3d42aa',
+    sizeBytes: 1_005_425_636,
+    version: '2026.0912.01',
   },
 
   // Linux (first release, UE 5.8). Same carve as Windows: chunk0 + chunk5 +
@@ -286,10 +297,10 @@ export const MANIFEST: SetupManifest = {
   },
 
   runtimeAssetsLinux: {
-    url: 'https://files.fotonlabs.com/linux/assets/runtime-2026.0805.04-linux.zip',
-    sha256: '9d35dc196fe7737bf93419322565be31b6b4b96c186ed7ff1fe0f9c66e0d4c7f',
-    sizeBytes: 504_358_510,
-    version: '2026.0805.04',
+    url: 'https://files.fotonlabs.com/linux/assets/runtime-2026.0912.01-linux.zip',
+    sha256: 'dc1e2e4b3b7d61533d71200233240bb474b8d39d87bd97bfe3532beb8d3d42aa',
+    sizeBytes: 1_005_425_636,
+    version: '2026.0912.01',
   },
 
   // Paid character paks. Cooked from AudioTestProject02 build 2026.0607.03 as
@@ -318,77 +329,78 @@ export const MANIFEST: SetupManifest = {
   // monolithic Mac cook — see Mac - UE 5.8 Chunked Pak Bug and Manual Split).
   // MUST match the base app's UE build, which is why these move in lockstep
   // with manifest.unreal above.
-  // windows hashes: Windows build 2026.0805.03, each re-zipped store-0 as
-  // <id>.pak -> characters/<id>/windows/{current,<id>-<version>}.zip.
+  // windows + linux hashes: builds 2026.0910.02, carved chunk1-4 re-zipped
+  // store-0 as <id>.pak -> characters/<id>/<platform>/{current,<id>-<version>}.zip.
+  // Deflate buys nothing on an already-compressed .pak, so these are STORE-0.
   // (Verified against the live bucket 2026-08-19: all four Mac paks present in
   // both key forms, sizes byte-exact against the entries below.)
   characterPaks: {
     ava: {
       characterId: 'ava',
-      version: '2026.0823.02',
+      version: '2026.0910.02',
       url: 'https://store.unclaw.io/store/characters/ava/download',
       mac: {
         sha256: '949ba8ab7d0a1193bee9a8cc2ca016346ce143d36227e0c17423967e9b7e4a39',
         sizeBytes: 167_088_287,
       },
       windows: {
-        sha256: '8a68198932039e5da3320a876dc8a0f1a9db49c6b5fcb853ccf5521e0cf9c81e',
-        sizeBytes: 151_636_517,
+        sha256: '66b19d15b662c0a757267754d42eeb9a346f07597d06abe6190daeb63c833689',
+        sizeBytes: 163_903_556,
       },
       linux: {
-        sha256: '6d667c4bbab19396b1ec97c904afa5e05d0731e12af9488ce34278861b037569',
-        sizeBytes: 149_936_045,
+        sha256: '3e98404b3fe87dc21cb9aacd630a4756c1560dfaf4aa43affad927b5cc3bcbf0',
+        sizeBytes: 162_186_610,
       },
     },
     goblin: {
       characterId: 'goblin',
-      version: '2026.0823.02',
+      version: '2026.0910.02',
       url: 'https://store.unclaw.io/store/characters/goblin/download',
       mac: {
         sha256: '69a838e24e4aa81fa6a0e65d29ab8d7f768281dff0472e527cea5b96801e629a',
         sizeBytes: 126_354_548,
       },
       windows: {
-        sha256: '315f9052475ec98b9afe42e71df3b5176a32ec66260b5b7ffe5454bac48661e7',
-        sizeBytes: 110_910_478,
+        sha256: '42a1f4478db5f6175e3e1f70f0cb0f0bbe7a4533eea26d6cabf248623957459a',
+        sizeBytes: 123_177_517,
       },
       linux: {
-        sha256: '657f0eea2771d018ad9a44c0cbf03de95144d3ef17660a2712cde16a1cb20eed',
-        sizeBytes: 109_241_115,
+        sha256: 'f767ed1322c85f888b6549eb9e871e5e75ff867c30e213859ad23f41c4a0fdf2',
+        sizeBytes: 121_491_685,
       },
     },
     chris: {
       characterId: 'chris',
-      version: '2026.0823.02',
+      version: '2026.0910.02',
       url: 'https://store.unclaw.io/store/characters/chris/download',
       mac: {
         sha256: '6e7f9aabd3cbc4f0b343de286cd45c910d59a7c0af8b1e9dd742fcdd212f3556',
         sizeBytes: 164_216_981,
       },
       windows: {
-        sha256: '9b163624222b2081f93994e725a105b51d911754c5fc4690b849fef1aa770b2d',
-        sizeBytes: 148_886_257,
+        sha256: '762f5ed9b08f0bd8e560b1fc1f5edc999f6dd615fb6d162f255cefa895af4316',
+        sizeBytes: 161_153_296,
       },
       linux: {
-        sha256: '9030af7928799f492c0e3c929e44cddd5036f80aafbb3f123250de88de33c27f',
-        sizeBytes: 147_351_511,
+        sha256: 'd8da19671a019a98da1ef85426f483139673da867581a0be401d0d5381e5a553',
+        sizeBytes: 159_602_067,
       },
     },
     joi: {
       characterId: 'joi',
-      version: '2026.0823.02',
+      version: '2026.0910.02',
       url: 'https://store.unclaw.io/store/characters/joi/download',
       mac: {
         sha256: 'a8eb5c89e207ebdee48b0a531536073a5e80919db26e204b12ba1b64173d4213',
         sizeBytes: 174_802_419,
       },
       windows: {
-        sha256: '27d6b2af3985bfe8e438672f23c2ee6a3f3ec39ccf43af27a33e221797d6280f',
-        sizeBytes: 159_355_986,
+        sha256: '3a62bfdc0229ec6eb942b994371d3017e69dfabfc619fcdd35172de2ba4206f3',
+        sizeBytes: 171_620_977,
       },
       linux: {
-        sha256: '2e797b1bab9960e14141fba2dfb47a98945fa9084b4526e91a76624a2aedb644',
-        sizeBytes: 157_671_577,
+        sha256: '309e3020311d3354829d6b7a11352c0d04f4c9887c83e6a9240efddaa0c7492a',
+        sizeBytes: 169_922_150,
       },
     },
   },

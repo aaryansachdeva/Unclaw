@@ -59,11 +59,23 @@ export async function createCheckout(token: string, sku: string): Promise<{ url:
 /** Entitlement-gated: returns a short-lived presigned R2 URL for the pak zip.
  *  403 if the user does not own the character. The Worker serves the pak's
  *  current pointer; the client SHA-verifies against its manifest on download. */
-/** Mac and Windows paks are cooked separately and stored under
+/** Mac, Windows and Linux paks are cooked separately and stored under
  *  characters/<id>/<platform>/current.zip. Tell the Worker which one to
- *  presign. Host OS comes from the preload bridge (never UA sniffing). */
-function storePlatform(): 'windows' | 'mac' {
-  return window.electronAPI?.platform === 'win32' ? 'windows' : 'mac';
+ *  presign. Host OS comes from the preload bridge (never UA sniffing).
+ *
+ *  This MUST agree with artifactPlatform() in electron/setupManifest.ts, which
+ *  is what main.ts verifies the downloaded bytes against
+ *  (characterPakForPlatform). They are a pair living in two bundles: the
+ *  renderer cannot import from electron/.
+ *
+ *  It used to fold everything non-win32 into 'mac', so Linux asked for Mac
+ *  paks and then checked them against the Linux sha256 - a permanent
+ *  verify -> delete -> retry loop for every paid character. */
+function storePlatform(): 'windows' | 'mac' | 'linux' {
+  const p = window.electronAPI?.platform;
+  if (p === 'win32') return 'windows';
+  if (p === 'darwin') return 'mac';
+  return 'linux';
 }
 
 export async function fetchDownloadUrl(token: string, characterId: string): Promise<string> {
