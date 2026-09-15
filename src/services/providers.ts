@@ -22,6 +22,11 @@ export interface SoulProviderModel {
   param_size?: string;
   /** Ollama-only: e.g. 'Q4_0', 'Q8_0'. */
   quantization?: string;
+  /** Ollama-only: what the daemon's /api/show advertises for the model. */
+  caps?: { tools?: boolean; vision?: boolean; thinking?: boolean };
+  /** Ollama-only: soul's verdict that this model may run the local agent
+   *  loop (tools capability plus the family size floor). */
+  agentic_ok?: boolean;
 }
 
 export interface SoulProvider {

@@ -29,7 +29,7 @@ import {
   getProvider,
   missingRequiredKeyFields,
   modelSupportsTools,
-  isOptimizedLocalModel,
+  isAgentReadyLocalModel,
   validateKeys,
   filterChatModels,
   thinkingCapabilityFor,
@@ -282,11 +282,11 @@ export function ConnectionsStep({
   const models = useMemo(() => {
     if (provider?.dynamicModels) {
       return (ollamaModels ?? []).map((m) => {
-        // "Optimized" means we've validated tool calling + thinking + size
-        // floor end-to-end. Image support is no longer a badge here: it is
-        // asked of the selected model itself (services/visionCapability).
+        // "Tools" is soul's per-model verdict that the local agent loop
+        // will run on it. Image support is not a badge: it is asked of the
+        // selected model itself (services/visionCapability).
         const badges: string[] = [];
-        if (isOptimizedLocalModel(m.id)) badges.push('Optimized');
+        if (isAgentReadyLocalModel(m)) badges.push('Tools');
         return {
           id: m.id,
           label: m.tag ?? m.label ?? m.id,
@@ -342,7 +342,7 @@ export function ConnectionsStep({
     // agentic backend back to cloud so the wizard can't end up in an
     // unrunnable state where local-agentic is selected but chat
     // doesn't support tools.
-    const canRunLocal = id === 'ollama' && modelSupportsTools(nextModel);
+    const canRunLocal = id === 'ollama' && modelSupportsTools(nextModel, ollamaModels);
     onChange({
       ...values,
       llm_provider: id,
@@ -358,7 +358,7 @@ export function ConnectionsStep({
     const next = modelId || null;
     // Same coercion as setProvider: if the new model can't host local
     // agentic, flip agentic_provider back to cloud.
-    const canRunLocal = values.llm_provider === 'ollama' && modelSupportsTools(next);
+    const canRunLocal = values.llm_provider === 'ollama' && modelSupportsTools(next, ollamaModels);
     onChange({
       ...values,
       llm_model: next,
@@ -611,6 +611,7 @@ export function ConnectionsStep({
           liveValidation={liveValidation}
           isAutoProbing={isAutoProbing}
           thinkingCapsByModel={thinkingCapsByModel}
+          ollamaModels={ollamaModels}
         />
 
         {/* Gemini Search key, sits alongside the chat provider since
@@ -1446,6 +1447,7 @@ function AgenticSection({
   liveValidation,
   isAutoProbing,
   thinkingCapsByModel,
+  ollamaModels,
 }: {
   values: ApiKeysProfile;
   onChange: (next: ApiKeysProfile) => void;
@@ -1453,6 +1455,7 @@ function AgenticSection({
   liveValidation: KeyValidationResult | null;
   isAutoProbing: boolean;
   thinkingCapsByModel: Record<string, ThinkingCapability>;
+  ollamaModels: SoulProviderModel[] | null;
 }) {
   const [showKey, setShowKey] = useState(false);
 
@@ -1480,7 +1483,7 @@ function AgenticSection({
   // capable model (param-count gated). When false, the backend picker
   // is hidden and `agentic_provider` is force-coerced to 'openai' by
   // the parent's setProvider/setModel callbacks.
-  const canRunLocal = values.llm_provider === 'ollama' && modelSupportsTools(values.llm_model);
+  const canRunLocal = values.llm_provider === 'ollama' && modelSupportsTools(values.llm_model, ollamaModels);
   const isLocal = values.agentic_provider === 'ollama' && canRunLocal;
   // Effective "reuse chat" state. Even if user toggled the checkbox,
   // it only takes effect when chat IS OpenAI AND we're on the cloud

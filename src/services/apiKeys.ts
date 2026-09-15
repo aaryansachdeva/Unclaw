@@ -41,107 +41,26 @@ export type AgenticProvider = LLMProviderId;
  *  'medium' (escalation is the reasoning path). */
 export type ThinkingEffort = 'none' | 'low' | 'medium' | 'high';
 
-/** Per-family configuration mirror of soul's `_FAMILY_INFO`. UI-only —
- *  soul is the runtime source of truth. Lookup is longest-substring
- *  first so `qwen3.6` matches before `qwen3`, `llama3.3` before
- *  `llama3`, etc. Unset flags default to `false` via `??`. */
-type LocalFamilyInfo = {
-  /** "Optimized" badge — family validated end-to-end (tool calling +
-   *  thinking + size floor) on the 2026-05-13 sweep. */
-  optimized?: boolean;
-  /** Family supports `<think>` / chain-of-thought. Gates the wizard's
-   *  thinking-effort dropdown. */
-  thinks?: boolean;
-  /** Family accepts image input. Gates the wizard's "Vision" chip and
-   *  the chat input bar's image-attach button. */
-  /** Name-parsed minimum-size floor (B) for reliable tool calls.
-   *  Sub-floor variants drop out of the local-agentic picker. */
-  toolMinB: number;
-};
-
-const _LOCAL_FAMILIES: ReadonlyArray<readonly [string, LocalFamilyInfo]> = [
-  // Qwen — `-vl` variants matched first so vision flag wins.
-  ['qwen3-vl',    { optimized: true, thinks: true, toolMinB: 1.0 }],
-  ['qwen2.5-vl',  {                                toolMinB: 3.0 }],
-  ['qwen3.6',     { optimized: true, thinks: true,               toolMinB: 1.0 }],
-  // qwen3.5: floor 2.0 + vision verified by 2026-05-13 sweep.
-  ['qwen3.5',     { optimized: true, thinks: true, toolMinB: 2.0 }],
-  ['qwen3-coder', { optimized: true, thinks: true,               toolMinB: 8.0 }],
-  ['qwen3',       { optimized: true, thinks: true,               toolMinB: 4.0 }],
-  ['qwen2.5',     {                                              toolMinB: 7.0 }],
-  // Gemma — entire Gemma 4 line multimodal; Gemma 3 multimodal at 4B+.
-  ['gemma4',      { optimized: true, thinks: true, toolMinB: 4.0 }],
-  ['gemma3',      { optimized: true,               toolMinB: 4.0 }],
-  // Llama — vision variants + `llama3-groq` before generic `llama3`.
-  ['llama3.2-vision', { optimized: true,           toolMinB: 11.0 }],
-  ['llama4',      { optimized: true,               toolMinB: 16.0 }],
-  ['llama3.3',    { optimized: true,                             toolMinB: 70.0 }],
-  ['llama3.2',    {                                              toolMinB: 3.0 }],
-  ['llama3.1',    { optimized: true,                             toolMinB: 70.0 }],
-  ['llama3-groq', { optimized: true,                             toolMinB: 8.0 }],
-  ['llama3',      {                                              toolMinB: 8.0 }],
-  // gpt-oss (local) / DeepSeek / Phi / Mistral / Magistral / Cohere.
-  ['gpt-oss',     {                  thinks: true,               toolMinB: 1.0 }],
-  ['deepseek-r1', {                  thinks: true,               toolMinB: 7.0 }],
-  ['deepseek-v3', {                  thinks: true,               toolMinB: 7.0 }],
-  ['phi4-mini',   {                  thinks: true,               toolMinB: 1.0 }],
-  ['phi4',        {                                              toolMinB: 7.0 }],
-  ['magistral',   {                  thinks: true,               toolMinB: 7.0 }],
-  ['mistral',     {                                              toolMinB: 7.0 }],
-  ['command-r',   {                                              toolMinB: 7.0 }],
-  // Vision-language families with no text-only sibling tag.
-  ['llava',       {                                toolMinB: 7.0 }],
-  ['bakllava',    {                                toolMinB: 7.0 }],
-  ['moondream',   {                                toolMinB: 1.0 }],
-];
-
-
-/** Resolve the local family for an Ollama-prefixed model id. Returns
- *  null for cloud / unknown / non-Ollama ids. */
-function _identifyLocalFamily(modelId: string | null | undefined): LocalFamilyInfo | null {
-  if (!modelId) return null;
-  let tag = modelId.toLowerCase();
-  if (tag.startsWith('ollama:')) tag = tag.slice('ollama:'.length);
-  if (tag.startsWith('openai:') || tag.startsWith('openai/') || tag.includes('/')) {
-    return null;
-  }
-  const base = tag.split(':')[0];
-  for (const [key, info] of _LOCAL_FAMILIES) {
-    if (base.includes(key)) return info;
-  }
-  return null;
-}
-
-/** Parameter count parsed from the tag's size suffix. `qwen3:8b` → 8,
- *  `gemma4:e4b` → 4, `llama3.3:70b-instruct-q4_0` → 70. Null when no
- *  parseable suffix — caller may fall back to runtime caps. */
-function _parseSizeB(modelId: string | null | undefined): number | null {
-  if (!modelId) return null;
-  const m = modelId.toLowerCase().match(/:e?(\d+(?:\.\d+)?)b\b/);
-  return m ? parseFloat(m[1]) : null;
-}
-
 /** Does this model support the agentic tool-calling loop?
- *  Cloud (OpenAI / Groq) is permissive — any wire-prefixed id passes.
- *  Ollama requires a known family AND size ≥ family floor. */
-export function modelSupportsTools(modelId: string | null | undefined): boolean {
+ *  Cloud (OpenAI / Groq) is permissive: any wire-prefixed id passes.
+ *  Ollama is answered by soul (2026-09-15): `/providers` stamps every
+ *  installed model with `agentic_ok`, the same verdict the chat path
+ *  uses (daemon-advertised `tools` capability plus the family size
+ *  floor). The renderer keeps no family table of its own any more; it
+ *  drifted from soul's every time a family was added. While the list
+ *  has not loaded yet there is no evidence either way, so the saved
+ *  choice is left alone rather than coerced. */
+export function modelSupportsTools(
+  modelId: string | null | undefined,
+  localModels?: SoulProviderModel[] | null,
+): boolean {
   if (!modelId) return false;
   if (modelId.startsWith('openai:') || modelId.startsWith('openai/')) return true;
   if (modelId.includes('/') && !modelId.startsWith('ollama:')) return true;
   if (!modelId.startsWith('ollama:')) return false;
-  const family = _identifyLocalFamily(modelId);
-  if (!family) return false;
-  const size = _parseSizeB(modelId);
-  return size === null ? true : size >= family.toolMinB;
-}
-
-/** Family supports a `<think>` block. Drives the wizard's
- *  thinking-effort dropdown. Local Ollama only — cloud reasoning is
- *  handled separately by the escalation backend. Retained as the local
- *  fallback used by `thinkingCapabilityFor`. */
-export function modelSupportsThinking(modelId: string | null | undefined): boolean {
-  if (!modelId || !modelId.startsWith('ollama:')) return false;
-  return !!_identifyLocalFamily(modelId)?.thinks;
+  if (!localModels) return true;
+  const entry = localModels.find((m) => m.id === modelId);
+  return entry?.agentic_ok ?? false;
 }
 
 /** Thinking-control tier for a model, mirrored from soul's `_thinking`
@@ -168,10 +87,8 @@ export function thinkingCapabilityFor(
   const bare = modelId.includes(':') ? modelId.split(':').slice(1).join(':') : modelId;
   const cap = caps?.[bare] ?? caps?.[modelId];
   if (cap) return cap.level === 'none' ? null : cap;
-  // Local fallback for Ollama before a validation populates caps.
-  if (modelId.startsWith('ollama:') && modelSupportsThinking(modelId)) {
-    return { level: 'binary', can_disable: true };
-  }
+  // Ollama caps arrive with the same validation as every other provider
+  // (soul lists the installed tags); nothing is guessed from the name.
   return null;
 }
 
@@ -206,14 +123,10 @@ export function normalizeThinkingValue(
   return value;
 }
 
-/** Family has a soul-side validated implementation. Drives the
- *  "Optimized" chip. Sub-floor variants don't qualify. */
-export function isOptimizedLocalModel(modelId: string | null | undefined): boolean {
-  if (!modelId || !modelId.startsWith('ollama:')) return false;
-  const family = _identifyLocalFamily(modelId);
-  if (!family?.optimized) return false;
-  const size = _parseSizeB(modelId);
-  return size === null || size >= family.toolMinB;
+/** Local model soul will run the agent loop on. Drives the "Tools"
+ *  chip in the Ollama picker; the verdict comes from soul per model. */
+export function isAgentReadyLocalModel(m: SoulProviderModel | null | undefined): boolean {
+  return !!m?.agentic_ok;
 }
 
 /* modelSupportsVision was retired 2026-09-15: image support is asked of the
@@ -626,7 +539,7 @@ export interface ApiKeysProfile {
   /** Per-tier thinking effort. Chat default 'none' for snappy
    *  conversational; agentic default 'medium' since escalation is the
    *  reasoning path. Only consulted for models that support thinking
-   *  (see `modelSupportsThinking`); hidden in the wizard otherwise. */
+   *  (soul's `thinking_caps`); hidden in the wizard otherwise. */
   chat_thinking_effort: ThinkingEffort;
   agentic_thinking_effort: ThinkingEffort;
   /** UE graphics quality preset. Surfaces in Settings as Low/Med/High
@@ -921,6 +834,7 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
 // PARALLEL and returns per-key results. Surfaces a typo as a precise
 // error during onboarding instead of as a 502 on first chat.
 
+import type { SoulProviderModel } from './providers';
 import { getSoulBaseUrl } from './soulBase';
 import { POCKET_TTS_ENABLED, CHATTERBOX_TTS_ENABLED } from '../features';
 

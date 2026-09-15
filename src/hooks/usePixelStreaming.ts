@@ -40,6 +40,7 @@ export function usePixelStreaming({
 }: UsePixelStreamingOptions): UsePixelStreamingReturn {
   const videoParentRef = useRef<HTMLDivElement | null>(null);
   const psRef = useRef<PixelStreaming | null>(null);
+  const hadConnectedRef = useRef(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
 
@@ -120,14 +121,27 @@ export function usePixelStreaming({
       }
     });
 
+    // Honest state (2026-09-15): the hook only ever reported 'connecting' or
+    // 'connected', so a UE that died mid-session showed a frozen frame with
+    // no banner. After a first successful connect, a drop reports
+    // 'disconnected' (the banner) and stays there through the retries; a
+    // long run of failed retries reports 'failed' and slows the cadence.
+    let retries = 0;
     const scheduleRetry = () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+      retries += 1;
+      if (retries === 20) setConnectionState('failed');
+      const delay = retries > 20 ? Math.max(retryDelay, 10_000) : retryDelay;
       retryTimerRef.current = setTimeout(() => {
         if (psRef.current) {
-          setConnectionState('connecting');
+          if (!hadConnectedRef.current) setConnectionState('connecting');
           psRef.current.reconnect();
         }
-      }, retryDelay);
+      }, delay);
+    };
+    const onDropped = () => {
+      setConnectionState(hadConnectedRef.current ? (retries >= 20 ? 'failed' : 'disconnected') : 'connecting');
+      scheduleRetry();
     };
 
     // Force MatchViewportRes — the SDK's auto-trigger from the
@@ -607,6 +621,8 @@ export function usePixelStreaming({
     ps.addEventListener('webRtcConnected', () => {
       // eslint-disable-next-line no-console
       console.log('[ps] webRtcConnected');
+      hadConnectedRef.current = true;
+      retries = 0;
       setConnectionState('connected');
       // New session: forget the dedupe state so the first resolution send of
       // this connection always goes out on the wire. MUST be -1, not 0 — UE
@@ -768,14 +784,12 @@ export function usePixelStreaming({
     ps.addEventListener('webRtcDisconnected', () => {
       // eslint-disable-next-line no-console
       console.log('[ps] webRtcDisconnected');
-      setConnectionState('connecting');
-      scheduleRetry();
+      onDropped();
     });
     ps.addEventListener('webRtcFailed', () => {
       // eslint-disable-next-line no-console
       console.log('[ps] webRtcFailed');
-      setConnectionState('connecting');
-      scheduleRetry();
+      onDropped();
     });
 
     return () => {

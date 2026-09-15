@@ -123,8 +123,10 @@ export function UpdateOverlay({ onComplete }: UpdateOverlayProps) {
       // session (we couldn't reach the manifest, Squirrel choked, etc.)
       // and shouldn't block the user from launching the app. Only
       // 'ready' + restartRequired holds the overlay open with a button.
+      // 'ready' with no restart required is an install that applies on the
+      // next launch; it used to hold the overlay open with no button.
       const terminal = (state: string) =>
-        state === 'up-to-date' || state === 'failed';
+        state === 'up-to-date' || state === 'failed' || state === 'ready';
       const allClear = s.done
         && !s.restartRequired
         && s.categories.every((c) => terminal(c.state));

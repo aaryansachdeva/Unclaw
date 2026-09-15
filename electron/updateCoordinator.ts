@@ -475,7 +475,12 @@ export async function runUpdateCheck(window: BrowserWindow | null): Promise<Upda
     // event ever fires) can't leak the listener forever. Generous , this is a
     // safety net, not the primary release path (terminal-state is).
     setTimeout(() => {
-      if (!appShellSettled) { appShellSettled = true; unsubAppShell(); }
+      if (!appShellSettled) {
+        appShellSettled = true;
+        unsubAppShell();
+        // Leaving the row non-terminal kept the overlay up for the session.
+        setCategory(window, 'app', { state: 'failed', progress: null, detail: 'Update check timed out' });
+      }
     }, 30 * 60_000);
 
     // Recover from a swap that was interrupted between its two renames (dest →
