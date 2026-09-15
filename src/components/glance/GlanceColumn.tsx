@@ -198,7 +198,7 @@ export function GlanceColumn({
                 }}
                 exit={reduce ? { opacity: 0 } : { opacity: 0, y: -6, transition: { duration: 0.15, ease: EASE_OUT_EXPO } }}
                 transition={{ layout: { duration: 0.32, ease: EASE_OUT_EXPO } }}
-                style={{ marginTop: i === 0 ? 0 : 16, marginLeft: -8 }}
+                style={{ marginTop: i === 0 ? 0 : 26, marginLeft: -8 }}
               >
                 {nodeFor(key)}
               </motion.div>
@@ -274,7 +274,7 @@ function EditableItem({
       exit={{ opacity: 0, transition: { duration: 0.12 } }}
       transition={{ duration: 0.22, ease: EASE_OUT_EXPO }}
       whileDrag={{ scale: 1.02, zIndex: 2 }}
-      style={{ marginLeft: -8, borderRadius: 8, position: 'relative' }}
+      style={{ marginLeft: -8, marginBottom: 6, borderRadius: 8, position: 'relative' }}
     >
       {children(controls)}
     </Reorder.Item>

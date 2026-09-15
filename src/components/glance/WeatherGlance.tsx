@@ -3,6 +3,7 @@
 // hours and the five-day outlook as rows. Data from soul's free MET Norway
 // path (services/weather), refreshed every 10 minutes.
 
+import type { DragControls } from 'framer-motion';
 import { forwardRef, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Cloud, Sun, CloudRain, Snowflake, Zap, CloudFog, type LucideIcon } from 'lucide-react';
 
@@ -15,6 +16,10 @@ interface Props {
   onClose: () => void;
   panel?: ReactNode;
   refreshKey: number;
+  /** Edit mode (GlanceColumn): header only, drag handle and remove. */
+  editing?: boolean;
+  dragControls?: DragControls;
+  onRemove?: () => void;
   onLayout?: () => void;
 }
 
@@ -32,7 +37,7 @@ function iconFor(family: WeatherIcon): LucideIcon {
 const deg = (c: number | null | undefined) => (c == null ? '–' : `${Math.round(c)}°`);
 
 export const WeatherGlance = forwardRef<HTMLDivElement, Props>(function WeatherGlance(
-  { open, onOpen, onClose, refreshKey, onLayout },
+  { open, onOpen, onClose, refreshKey, onLayout, editing, dragControls, onRemove },
   ref,
 ) {
   const [data, setData] = useState<WeatherPayload | null>(null);
@@ -126,7 +131,7 @@ export const WeatherGlance = forwardRef<HTMLDivElement, Props>(function WeatherG
   );
 
   return (
-    <GlanceSection ref={ref} label="Weather" note={data?.location ?? null} open={open} onOpen={onOpen} onClose={onClose} panel={expanded ?? undefined}>
+    <GlanceSection ref={ref} label="Weather" note={data?.location ?? null} open={open} onOpen={onOpen} onClose={onClose} panel={expanded ?? undefined} editing={editing} dragControls={dragControls} onRemove={onRemove}>
       {state === 'loading' && !data && ghost('Checking the sky…')}
       {state === 'off' && !data && ghost('Weather unavailable')}
       {current}

@@ -5,7 +5,7 @@
 // (title, optional time) instead of a form.
 
 import { forwardRef, useEffect, useRef, useState, type ReactNode } from 'react';
-import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+import { motion, AnimatePresence, useReducedMotion, type DragControls } from 'framer-motion';
 import { Plus, Check, X } from 'lucide-react';
 
 import { createReminder, deleteReminder, type Reminder } from '../../services/reminders';
@@ -24,11 +24,15 @@ interface Props {
   onChanged: () => void;
   now: Date;
   panel?: ReactNode;
+  /** Edit mode (GlanceColumn): header only, drag handle and remove. */
+  editing?: boolean;
+  dragControls?: DragControls;
+  onRemove?: () => void;
   onLayout?: () => void;
 }
 
 export const RemindersGlance = forwardRef<HTMLDivElement, Props>(function RemindersGlance(
-  { reminders, open, onOpen, onClose, onComplete, onChanged, now },
+  { reminders, open, onOpen, onClose, onComplete, onChanged, now, editing, dragControls, onRemove },
   ref,
 ) {
   const list = sortForGlance(reminders);
@@ -73,6 +77,9 @@ export const RemindersGlance = forwardRef<HTMLDivElement, Props>(function Remind
 
   return (
     <GlanceSection
+      editing={editing}
+      dragControls={dragControls}
+      onRemove={onRemove}
       ref={ref}
       label="Reminders"
       note={list.length > 0 ? String(list.length) : null}

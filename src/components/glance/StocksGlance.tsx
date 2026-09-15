@@ -4,7 +4,7 @@
 // Data from soul's free Yahoo chart path (services/stocks), every 10 min.
 
 import { forwardRef, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, type DragControls } from 'framer-motion';
 
 import { getStocks, type StockQuote } from '../../services/stocks';
 import { GlanceSection, GlanceRow, GLANCE_META_STYLE } from './GlanceSection';
@@ -19,6 +19,10 @@ interface Props {
   onClose: () => void;
   panel?: ReactNode;
   refreshKey: number;
+  /** Edit mode (GlanceColumn): header only, drag handle and remove. */
+  editing?: boolean;
+  dragControls?: DragControls;
+  onRemove?: () => void;
   onLayout?: () => void;
 }
 
@@ -38,7 +42,7 @@ function QuoteLine({ q }: { q: StockQuote }) {
 }
 
 export const StocksGlance = forwardRef<HTMLDivElement, Props>(function StocksGlance(
-  { open, onOpen, onClose, refreshKey, onLayout },
+  { open, onOpen, onClose, refreshKey, onLayout, editing, dragControls, onRemove },
   ref,
 ) {
   const [quotes, setQuotes] = useState<StockQuote[] | null>(null);
@@ -93,7 +97,7 @@ export const StocksGlance = forwardRef<HTMLDivElement, Props>(function StocksGla
   );
 
   return (
-    <GlanceSection ref={ref} label="Stocks" note={note} open={open} onOpen={onOpen} onClose={onClose} panel={expanded ?? undefined}>
+    <GlanceSection ref={ref} label="Stocks" note={note} open={open} onOpen={onOpen} onClose={onClose} panel={expanded ?? undefined} editing={editing} dragControls={dragControls} onRemove={onRemove}>
       {!quotes && !off && ghost('Fetching quotes…')}
       {off && !quotes && ghost('Quotes unavailable')}
       {quotes && quotes.length === 0 && ghost('Empty watchlist')}
