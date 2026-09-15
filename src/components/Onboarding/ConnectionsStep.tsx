@@ -28,7 +28,6 @@ import {
   LLM_PROVIDERS,
   getProvider,
   missingRequiredKeyFields,
-  modelSupportsTools,
   isAgentReadyLocalModel,
   validateKeys,
   filterChatModels,
@@ -36,7 +35,6 @@ import {
   thinkingOptionsFor,
   normalizeThinkingValue,
   type ApiKeysProfile,
-  type AgenticProvider,
   type KeyValidationResult,
   type LLMProviderId,
   type KokoroMode,
@@ -201,16 +199,12 @@ export function ConnectionsStep({
   const llmConfigured =
     !!values.llm_provider && values.llm_provider !== 'ollama'
     && (KEYLESS_CLI_PROVIDERS.has(values.llm_provider) || !!(values.llm_api_key || '').trim());
-  const agenticConfigured =
-    values.agentic_enabled
-    && !!values.agentic_provider && values.agentic_provider !== 'ollama'
-    && (KEYLESS_CLI_PROVIDERS.has(values.agentic_provider) || !!(values.agentic_api_key || '').trim());
   const voiceConfigured =
     values.tts_provider === 'elevenlabs'
       ? !!(values.elevenlabs_api_key || '').trim()
       : !!values.tts_provider;
   const shouldProbe =
-    (showLlm && (llmConfigured || agenticConfigured)) || (showVoice && voiceConfigured);
+    (showLlm && llmConfigured) || (showVoice && voiceConfigured);
 
   useEffect(() => {
     if (!shouldProbe) return;
@@ -224,11 +218,6 @@ export function ConnectionsStep({
         if (pid && res.llm.ok && res.llm.models?.length) {
           setLiveModelsByProvider((prev) => ({ ...prev, [pid]: res.llm.models }));
         }
-        const aprov = values.agentic_provider;
-        const agenticModels = (res.agentic as { models?: string[] } | undefined)?.models;
-        if (aprov && res.agentic?.ok && agenticModels?.length) {
-          setLiveModelsByProvider((prev) => ({ ...prev, [aprov]: agenticModels }));
-        }
         setLiveValidation(res);
       }).catch((err) => {
         setProbeError(err instanceof Error ? err.message : 'Could not reach the local engine');
@@ -240,7 +229,7 @@ export function ConnectionsStep({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     values.llm_provider, values.llm_api_key,
-    values.agentic_enabled, values.agentic_provider, values.agentic_api_key,
+    values.agentic_enabled,
     values.grounding_search_enabled, values.gemini_search_api_key,
     values.tts_provider, values.elevenlabs_api_key,
     values.kokoro_mode, values.kokoro_endpoint,
@@ -317,14 +306,7 @@ export function ConnectionsStep({
 
   const setProvider = (id: LLMProviderId | '') => {
     if (!id) {
-      // No provider → chat has no tools, so local agentic can't run.
-      // Coerce agentic_provider back to cloud OpenAI.
-      onChange({
-        ...values,
-        llm_provider: null,
-        llm_model: null,
-        agentic_provider: 'openai',
-      });
+      onChange({ ...values, llm_provider: null, llm_model: null });
       return;
     }
     const next = getProvider(id);
@@ -337,12 +319,6 @@ export function ConnectionsStep({
     } else {
       nextModel = next?.models[0]?.id ?? null;
     }
-    // If the new {provider, model} pair can't host local agentic
-    // (cloud chat, or sub-1B / non-tools-family local), coerce the
-    // agentic backend back to cloud so the wizard can't end up in an
-    // unrunnable state where local-agentic is selected but chat
-    // doesn't support tools.
-    const canRunLocal = id === 'ollama' && modelSupportsTools(nextModel, ollamaModels);
     onChange({
       ...values,
       llm_provider: id,
@@ -350,20 +326,11 @@ export function ConnectionsStep({
       // Wipe the old key when switching to a no-key provider, leaving
       // it on disk would be surprising.
       llm_api_key: next?.requiresApiKey ? values.llm_api_key : null,
-      agentic_provider: canRunLocal ? values.agentic_provider : 'openai',
     });
   };
 
   const setModel = (modelId: string) => {
-    const next = modelId || null;
-    // Same coercion as setProvider: if the new model can't host local
-    // agentic, flip agentic_provider back to cloud.
-    const canRunLocal = values.llm_provider === 'ollama' && modelSupportsTools(next, ollamaModels);
-    onChange({
-      ...values,
-      llm_model: next,
-      agentic_provider: canRunLocal ? values.agentic_provider : 'openai',
-    });
+    onChange({ ...values, llm_model: modelId || null });
   };
 
   const setLlmKey = (key: string) => {
@@ -405,14 +372,8 @@ export function ConnectionsStep({
   const allMissing = missingRequiredKeyFields(values);
   const missing = allMissing.filter((field) => {
     if (mode === 'all') return true;
-    // Any "X key for agentic" string from missingRequiredKeyFields
-    // (label varies per backend: OpenAI / Anthropic / Gemini / DeepSeek).
-    const isAgenticKeyField = field.endsWith(' key for agentic');
     const isLlmField = field === 'LLM provider'
       || field === 'Model'
-      || field === 'Agentic model'
-      || isAgenticKeyField
-      || field === 'Tools-capable Ollama chat model'
       || field === 'Gemini API key for grounded search'
       || (field.endsWith(' API key') && field !== 'ElevenLabs API key');
     return mode === 'llm' ? isLlmField : !isLlmField;
@@ -427,10 +388,6 @@ export function ConnectionsStep({
     values.llm_model,
     values.llm_api_key,
     values.agentic_enabled,
-    values.agentic_provider,
-    values.agentic_use_same_as_chat,
-    values.agentic_model,
-    values.agentic_api_key,
     values.grounding_search_enabled,
     values.gemini_search_api_key,
   ] : mode === 'voice' ? [
@@ -447,10 +404,6 @@ export function ConnectionsStep({
     values.kokoro_mode,
     values.kokoro_endpoint,
     values.agentic_enabled,
-    values.agentic_provider,
-    values.agentic_use_same_as_chat,
-    values.agentic_model,
-    values.agentic_api_key,
     values.grounding_search_enabled,
     values.gemini_search_api_key,
   ];
@@ -604,12 +557,9 @@ export function ConnectionsStep({
           );
         })()}
 
-        <AgenticSection
+        <ToolsSection
           values={values}
           onChange={onChange}
-          liveModelsByProvider={liveModelsByProvider}
-          liveValidation={liveValidation}
-          isAutoProbing={isAutoProbing}
           thinkingCapsByModel={thinkingCapsByModel}
           ollamaModels={ollamaModels}
         />
@@ -745,7 +695,6 @@ export function ConnectionsStep({
             result={liveValidation}
             providerLabel={provider?.label ?? 'Chat'}
             agenticEnabled={values.agentic_enabled}
-            agenticProvider={values.agentic_provider}
             groundingEnabled={values.grounding_search_enabled}
             ttsProvider={values.tts_provider}
             anythingConfigured={shouldProbe}
@@ -767,7 +716,7 @@ type RailState = 'checking' | 'ok' | 'fail' | 'idle';
 
 function StatusRail({
   scope, probing, probeError, result, providerLabel,
-  agenticEnabled, agenticProvider, groundingEnabled, ttsProvider,
+  agenticEnabled, groundingEnabled, ttsProvider,
   anythingConfigured,
 }: {
   scope: 'llm' | 'voice' | 'all';
@@ -776,7 +725,6 @@ function StatusRail({
   result: KeyValidationResult | null;
   providerLabel: string;
   agenticEnabled: boolean;
-  agenticProvider: AgenticProvider;
   groundingEnabled: boolean;
   ttsProvider?: string;
   anythingConfigured: boolean;
@@ -800,10 +748,7 @@ function StatusRail({
   if (scope !== 'voice') {
     rows.push(rowFor(providerLabel, result?.llm));
     if (agenticEnabled) {
-      rows.push(rowFor(
-        agenticProvider === 'ollama' ? 'Agentic (Ollama)' : 'Agentic',
-        result?.agentic,
-      ));
+      rows.push(rowFor('Tools', result?.agentic));
     }
     if (groundingEnabled) {
       rows.push(rowFor('Web search (Gemini)', result?.gemini_search));
@@ -1407,7 +1352,7 @@ function formatBytes(n: number): string {
 //                      Ollama model the user picked for chat. No
 //                      OpenAI key needed; no cloud round-trip. Only
 //                      offered when chat is a tools-capable Ollama
-//                      model (see `modelSupportsTools`).
+//                      model (soul's per-model `agentic_ok`).
 //
 // Nested states (cloud branch):
 //   1. Toggle off (default) , escalation disabled.
@@ -1419,76 +1364,41 @@ function formatBytes(n: number): string {
 // Local branch: no model dropdown, no key field, the chat-tier model
 // runs both roles.
 // ---------------------------------------------------------------------
+// Tools section. One model does everything (2026-09-15): the chat model
+// the user picked above also runs the tool loop (web, browser, files,
+// code). Nothing to configure beyond on/off and how hard it thinks on
+// tasks. A local model that cannot call tools cannot have tools on.
+// ---------------------------------------------------------------------
 
-// Fallback only, for a key that has not validated yet. Once /validate_keys
-// returns the account's live /v1/models, the dropdown is built from that
-// (agenticOpenAiOptions) so a retired id never sits in the list.
-const AGENTIC_OPENAI_FALLBACK: ReadonlyArray<{ id: string; label: string; hint?: string }> = [
-  { id: 'openai:gpt-5.4-mini',  label: 'GPT-5.4 Mini',  hint: 'recommended' },
-  { id: 'openai:gpt-5.4-nano',  label: 'GPT-5.4 Nano',  hint: 'cheapest' },
-];
-
-function agenticOpenAiOptions(live: string[]): Array<{ id: string; label: string; hint?: string }> {
-  const ids = filterChatModels('openai', live);
-  if (ids.length === 0) return [...AGENTIC_OPENAI_FALLBACK];
-  // Mini tiers first (the sensible agentic default), nano next, then the rest.
-  const rank = (id: string) => (/mini/.test(id) ? 0 : /nano/.test(id) ? 1 : 2);
-  return [...ids].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)).map((raw) => ({
-    id: `openai:${raw}`,
-    label: raw,
-    hint: /mini/.test(raw) ? 'recommended' : /nano/.test(raw) ? 'cheapest' : undefined,
-  }));
-}
-
-function AgenticSection({
+function ToolsSection({
   values,
   onChange,
-  liveModelsByProvider,
-  liveValidation,
-  isAutoProbing,
   thinkingCapsByModel,
   ollamaModels,
 }: {
   values: ApiKeysProfile;
   onChange: (next: ApiKeysProfile) => void;
-  liveModelsByProvider: Partial<Record<LLMProviderId, string[]>>;
-  liveValidation: KeyValidationResult | null;
-  isAutoProbing: boolean;
   thinkingCapsByModel: Record<string, ThinkingCapability>;
   ollamaModels: SoulProviderModel[] | null;
 }) {
-  const [showKey, setShowKey] = useState(false);
+  const isOllama = values.llm_provider === 'ollama';
+  const localEntry = isOllama && ollamaModels
+    ? ollamaModels.find((m) => m.id === values.llm_model) ?? null
+    : null;
+  // Cloud models all run the loop; a local one only when soul says so.
+  // Until the local list has loaded, take the saved choice at its word.
+  const canRunTools = !isOllama || !ollamaModels || isAgentReadyLocalModel(localEntry);
 
-  const setEnabled = (b: boolean) => {
-    onChange({ ...values, agentic_enabled: b });
-  };
-  const setBackend = (p: AgenticProvider) => {
-    onChange({ ...values, agentic_provider: p });
-  };
-  const setUseSame = (b: boolean) => {
-    onChange({ ...values, agentic_use_same_as_chat: b });
-  };
-  const setModel = (id: string) => {
-    onChange({ ...values, agentic_model: id || null });
-  };
-  const setKey = (k: string) => {
-    onChange({ ...values, agentic_api_key: k || null });
-  };
+  useEffect(() => {
+    if (values.agentic_enabled && !canRunTools) {
+      onChange({ ...values, agentic_enabled: false });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canRunTools, values.agentic_enabled]);
 
-  // Whether the chat provider is OpenAI, "use same as chat" is
-  // only meaningful in that case (escalation needs an OpenAI model
-  // either way; if chat is already OpenAI we can borrow its key).
-  const chatIsOpenAI = values.llm_provider === 'openai';
-  // Local-agentic eligibility: chat must be Ollama AND on a tools-
-  // capable model (param-count gated). When false, the backend picker
-  // is hidden and `agentic_provider` is force-coerced to 'openai' by
-  // the parent's setProvider/setModel callbacks.
-  const canRunLocal = values.llm_provider === 'ollama' && modelSupportsTools(values.llm_model, ollamaModels);
-  const isLocal = values.agentic_provider === 'ollama' && canRunLocal;
-  // Effective "reuse chat" state. Even if user toggled the checkbox,
-  // it only takes effect when chat IS OpenAI AND we're on the cloud
-  // agentic path.
-  const effectiveReuse = !isLocal && values.agentic_use_same_as_chat && chatIsOpenAI;
+  const modelLabel = values.llm_model
+    ? values.llm_model.replace(/^[a-z-]+:/, '')
+    : 'your model';
 
   return (
     <div style={{
@@ -1500,194 +1410,42 @@ function AgenticSection({
       border: '1px solid var(--glass-border)',
       background: 'rgba(255, 255, 255, 0.025)',
     }}>
-      <Toggle
-        value={values.agentic_enabled}
-        onChange={setEnabled}
-        icon={<Zap size={11} strokeWidth={2} aria-hidden style={{ opacity: 0.7 }} />}
-        title="Enable agentic features"
-        helper={values.agentic_enabled
-          ? (isLocal
-              ? 'Lets the assistant browse, search, and use tools for harder questions. Runs locally on your Ollama model, no API key.'
-              : 'Lets the assistant browse, search, and use tools for harder questions. Uses an OpenAI model for the agentic loop.')
-          : (canRunLocal
-              ? 'Off by default. Turn on for live web search, page-reading, and multi-step research. Runs locally on your Ollama model, or pick OpenAI.'
-              : 'Off by default. Turn on for live web search, page-reading, and multi-step research. Needs an OpenAI key.')}
-        dimWhen={!values.agentic_enabled}
-      />
+      {canRunTools ? (
+        <Toggle
+          value={values.agentic_enabled}
+          onChange={(b) => onChange({ ...values, agentic_enabled: b })}
+          icon={<Zap size={11} strokeWidth={2} aria-hidden style={{ opacity: 0.7 }} />}
+          title="Tools"
+          helper={values.agentic_enabled
+            ? `When a question needs the web, a browser, files or code, ${modelLabel} takes its time with tools. Quick replies stay quick.`
+            : 'Off: every reply is a plain conversational turn. Turn on for live web search, page reading and multi-step tasks, on the same model.'}
+          dimWhen={!values.agentic_enabled}
+        />
+      ) : (
+        <div style={{ fontSize: 12.5, lineHeight: 1.45, color: 'var(--text-secondary)' }}>
+          <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Tools</span>
+          {' '}stay off: {modelLabel} does not call tools, so replies stay conversational.
+          Models marked <span style={{ color: 'var(--text-primary)' }}>Tools</span> in the picker can.
+        </div>
+      )}
 
-      {values.agentic_enabled && (
-        <>
-          {/* Backend picker. Mirrors SettingsPanel's AgenticFacet, all
-              cloud APIs + the 3 CLI-subscription providers + Local
-              Ollama (only when chat is also Ollama + tools-capable).
-              CLI providers (claude-code/gemini-cli/codex) are keyless;
-              detailed sign-in lives in Settings → Agentic, this picker
-              just exposes them so users know the option exists. */}
-          <FieldLabel text="Agentic backend">
+      {values.agentic_enabled && canRunTools && (() => {
+        // Thinking depth for tasks, capability-gated by the one model.
+        const cap = thinkingCapabilityFor(values.llm_model, thinkingCapsByModel);
+        if (!cap) return null;
+        return (
+          <FieldLabel text="Thinking on tasks">
             <Dropdown
-              value={values.agentic_provider}
-              onChange={(v) => setBackend((v as AgenticProvider) || 'openai')}
-              options={[
-                { id: 'openai',      label: 'OpenAI',           hint: 'Responses API' },
-                { id: 'anthropic',   label: 'Anthropic Claude', hint: 'Messages API' },
-                { id: 'gemini',      label: 'Google Gemini',    hint: 'functionDeclarations' },
-                { id: 'deepseek',    label: 'DeepSeek',         hint: 'OpenAI-compat tool loop' },
-                { id: 'glm',         label: 'GLM (Zhipu)',      hint: 'OpenAI-compat tool loop' },
-                { id: 'claude-code', label: 'Claude Code CLI',  hint: 'Pro/Max subscription' },
-                { id: 'gemini-cli',  label: 'Gemini CLI',       hint: 'Free tier or Pro' },
-                { id: 'codex',       label: 'Codex CLI',        hint: 'ChatGPT subscription' },
-                ...(canRunLocal
-                  ? [{ id: 'ollama', label: 'Local (Ollama)', hint: 'no API key' }]
-                  : []),
-              ]}
+              value={normalizeThinkingValue(cap, values.agentic_thinking_effort)}
+              onChange={(v) => onChange({
+                ...values,
+                agentic_thinking_effort: (v as ThinkingEffort) || 'medium',
+              })}
+              options={thinkingOptionsFor(cap)}
             />
           </FieldLabel>
-
-          {!isLocal && chatIsOpenAI && (
-            <Toggle
-              value={values.agentic_use_same_as_chat}
-              onChange={setUseSame}
-              icon={null}
-              title="Use the same model as conversational"
-              helper={values.agentic_use_same_as_chat
-                ? "Reuses your chat model + key. Simpler, but the conversational pick may be too small for tool-use."
-                : "Pick a separate (likely larger) model for agentic work. Recommended."}
-            />
-          )}
-
-          {/* CLI providers (claude-code / gemini-cli / codex) are
-              keyless. Full install + OAuth flow lives in the shared
-              CliProviderStatusCard: detect status, render the right
-              install/sign-in command, copy + Open-in-Terminal buttons.
-              Plus a live model dropdown populated from the agentic
-              auto-probe's response. Same UX as Settings, no follow-up
-              trip needed after onboarding. */}
-          {KEYLESS_CLI_PROVIDERS.has(values.agentic_provider) && (() => {
-            const aprov = values.agentic_provider;
-            const rawLive = liveModelsByProvider[aprov] ?? [];
-            const entries = rawLive.map((rawId) => ({
-              id: `${aprov}:${rawId}`,
-              label: rawId,
-            }));
-            const placeholder =
-              isAutoProbing ? 'Verifying...'
-              : entries.length === 0 ? 'Sign in via Terminal first'
-              : 'Choose a model';
-            return (
-              <>
-                <CliProviderStatusCard
-                  provider={aprov}
-                  outcome={liveValidation?.agentic ?? liveValidation?.llm ?? null}
-                  isProbing={isAutoProbing}
-                />
-                <FieldLabel text="Agentic model">
-                  <Dropdown
-                    value={values.agentic_model ?? ''}
-                    onChange={setModel}
-                    options={entries}
-                    placeholder={placeholder}
-                    disabled={entries.length === 0}
-                  />
-                </FieldLabel>
-              </>
-            );
-          })()}
-
-          {!isLocal
-            && values.agentic_provider !== 'claude-code'
-            && values.agentic_provider !== 'gemini-cli'
-            && values.agentic_provider !== 'codex'
-            && !effectiveReuse
-            && (() => {
-            // Per-provider key + model copy. Each provider's escalation
-            // runner in soul accepts the user's agentic_api_key directly;
-            // the only differences are the placeholder + signup URL.
-            const provider = values.agentic_provider;
-            const meta: Record<string, { label: string; url: string; keyPh: string; modelPh: string }> = {
-              openai:    { label: 'OpenAI',    url: 'https://platform.openai.com/api-keys',         keyPh: 'sk-…',     modelPh: 'gpt-5.4-mini' },
-              anthropic: { label: 'Anthropic', url: 'https://console.anthropic.com/settings/keys', keyPh: 'sk-ant-…', modelPh: 'claude-opus-4-7' },
-              gemini:    { label: 'Google',    url: 'https://aistudio.google.com/apikey',          keyPh: 'AIza…',    modelPh: 'gemini-2.5-flash' },
-              deepseek:  { label: 'DeepSeek',  url: 'https://platform.deepseek.com/api_keys',     keyPh: 'sk-…',     modelPh: 'deepseek-v4-flash' },
-            };
-            const m = meta[provider] ?? meta.openai;
-            const isOpenAI = provider === 'openai';
-            return (
-              <>
-                <FieldLabel
-                  text="Agentic model"
-                >
-                  {isOpenAI ? (
-                    <Dropdown
-                      value={values.agentic_model ?? ''}
-                      onChange={setModel}
-                      placeholder="Choose a model"
-                      options={agenticOpenAiOptions(liveModelsByProvider.openai ?? [])}
-                    />
-                  ) : (
-                    // Anthropic + Gemini live-model fetch isn't wired into
-                    // the agentic dropdown yet; for now accept a free-text
-                    // model id. Users can paste any model their key allows
-                    // (claude-opus-4-7, gemini-2.5-pro, etc.).
-                    <input
-                      type="text"
-                      placeholder={m.modelPh}
-                      value={values.agentic_model ?? ''}
-                      onChange={(e) => setModel(e.target.value)}
-                      style={{
-                        background: 'rgba(255, 255, 255, 0.04)',
-                        border: '1px solid var(--glass-border)',
-                        borderRadius: 10,
-                        color: 'var(--text-primary)',
-                        fontFamily: 'inherit',
-                        fontSize: 14,
-                        padding: '10px 12px',
-                        outline: 'none',
-                        width: '100%',
-                      }}
-                    />
-                  )}
-                </FieldLabel>
-
-                {(!chatIsOpenAI || !isOpenAI) && (
-                  <FieldLabel text={`${m.label} API key`}>
-                    <SecretInput
-                      value={values.agentic_api_key ?? ''}
-                      onChange={setKey}
-                      placeholder={m.keyPh}
-                      visible={showKey}
-                      onToggleVisible={() => setShowKey((v) => !v)}
-                      autoComplete="off"
-                    />
-                  </FieldLabel>
-                )}
-              </>
-            );
-          })()}
-
-          {/* Agentic thinking lever, capability-gated by the effective
-              agentic model (the chat model when reusing/local, else the
-              picked agentic model). Caps come from soul's _thinking
-              resolver via /validate_keys — no hardcoded model lists. */}
-          {(() => {
-            const agModel = (isLocal || effectiveReuse)
-              ? values.llm_model : values.agentic_model;
-            const cap = thinkingCapabilityFor(agModel, thinkingCapsByModel);
-            if (!cap) return null;
-            return (
-              <FieldLabel text="Agentic thinking">
-                <Dropdown
-                  value={normalizeThinkingValue(cap, values.agentic_thinking_effort)}
-                  onChange={(v) => onChange({
-                    ...values,
-                    agentic_thinking_effort: (v as ThinkingEffort) || 'medium',
-                  })}
-                  options={thinkingOptionsFor(cap)}
-                />
-              </FieldLabel>
-            );
-          })()}
-        </>
-      )}
+        );
+      })()}
     </div>
   );
 }

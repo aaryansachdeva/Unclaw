@@ -589,13 +589,12 @@ export function Wizard({
     }
     if (missingKeyFields.length > 0) {
       // Route the user back to whichever step holds the missing field
-      // so they can fix it. LLM-related fields (provider, model, key,
-      // agentic) live on the LLM page; everything else (voice provider
-      // or its install state) lives on the voice page.
+      // so they can fix it. LLM-related fields (provider, model, key)
+      // live on the LLM page; everything else (voice provider or its
+      // install state) lives on the voice page.
       const targetStep: StepKey = missingKeyFields.some((f) =>
         f === 'LLM provider' || f === 'Model'
-        || f.endsWith('API key') && f !== 'ElevenLabs API key'
-        || f === 'Agentic model' || f === 'OpenAI key for agentic',
+        || f.endsWith('API key') && f !== 'ElevenLabs API key',
       ) ? 'llm' : 'voice';
       setStep(targetStep);
       setError(`Please add: ${missingKeyFields.join(', ')}`);

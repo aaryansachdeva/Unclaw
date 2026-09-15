@@ -22,13 +22,6 @@ export type LLMProviderId =
   | 'gemini-cli'  // Google Gemini free tier / Pro via `gemini` CLI (OAuth, keyless)
   | 'codex';      // OpenAI Codex CLI via ChatGPT Plus / Pro subscription (OAuth, keyless)
 
-/** Which backend runs the agentic / escalation loop. Aliased to LLMProviderId
- *  so any provider the user has a working chat key for can also drive
- *  escalation. The actual tool-loop dispatch in soul currently supports
- *  `openai` (Responses API) and `ollama` (native tool calls) fully; other
- *  providers validate the key but escalation falls back to the chat path
- *  without tools. UI surfaces all options; pick what your provider supports. */
-export type AgenticProvider = LLMProviderId;
 
 /** Per-tier thinking lever. Resolved per-family on the soul side:
  *  - 'none'   → omit `think` field; for Gemma 4 also omit the system-
@@ -40,28 +33,6 @@ export type AgenticProvider = LLMProviderId;
  *  Chat default = 'none' (snappy conversational); agentic default =
  *  'medium' (escalation is the reasoning path). */
 export type ThinkingEffort = 'none' | 'low' | 'medium' | 'high';
-
-/** Does this model support the agentic tool-calling loop?
- *  Cloud (OpenAI / Groq) is permissive: any wire-prefixed id passes.
- *  Ollama is answered by soul (2026-09-15): `/providers` stamps every
- *  installed model with `agentic_ok`, the same verdict the chat path
- *  uses (daemon-advertised `tools` capability plus the family size
- *  floor). The renderer keeps no family table of its own any more; it
- *  drifted from soul's every time a family was added. While the list
- *  has not loaded yet there is no evidence either way, so the saved
- *  choice is left alone rather than coerced. */
-export function modelSupportsTools(
-  modelId: string | null | undefined,
-  localModels?: SoulProviderModel[] | null,
-): boolean {
-  if (!modelId) return false;
-  if (modelId.startsWith('openai:') || modelId.startsWith('openai/')) return true;
-  if (modelId.includes('/') && !modelId.startsWith('ollama:')) return true;
-  if (!modelId.startsWith('ollama:')) return false;
-  if (!localModels) return true;
-  const entry = localModels.find((m) => m.id === modelId);
-  return entry?.agentic_ok ?? false;
-}
 
 /** Thinking-control tier for a model, mirrored from soul's `_thinking`
  *  capability resolver (the single source of truth — see
@@ -501,32 +472,11 @@ export interface ApiKeysProfile {
   elevenlabs_voice_override: boolean;
   kokoro_voice_override: boolean;
   supertonic_voice_override: boolean;
-  /** Agentic features toggle. When false (default), the 20b's
-   *  `escalate` action is suppressed in the system prompt and the
-   *  fast-escalation regex no-ops; soul never spins up the agentic
-   *  loop. When true, escalation is live; the backend is chosen by
-   *  `agentic_provider`. */
+  /** Tools on or off. One model does everything (2026-09-15): when a
+   *  question needs the web, a browser, files or code, the SAME model
+   *  the user picked above takes its time with tools. Off = every reply
+   *  is a plain conversational turn. */
   agentic_enabled: boolean;
-  /** Which backend runs the agentic loop. `'openai'` (default) uses
-   *  OpenAI's Responses API; `'ollama'` uses a local Chat-Completions
-   *  loop on the SAME model the user picked for chat — no OpenAI key
-   *  needed. The wizard only exposes `'ollama'` when chat is a
-   *  tools-capable Ollama model. */
-  agentic_provider: AgenticProvider;
-  /** When true AND `llm_provider === 'openai'`, escalation reuses
-   *  the conversational model + key. Only meaningful on the OpenAI
-   *  agentic path; ignored when `agentic_provider === 'ollama'`. */
-  agentic_use_same_as_chat: boolean;
-  /** OpenAI model id used for the agentic loop (e.g. 'gpt-5.4-mini').
-   *  Required when `agentic_provider === 'openai'` AND
-   *  `agentic_enabled` is true unless `agentic_use_same_as_chat` is
-   *  on AND chat is already OpenAI. Ignored on the local path. */
-  agentic_model: string | null;
-  /** OpenAI API key for the agentic loop. Required when
-   *  `agentic_provider === 'openai'` AND `agentic_enabled` is true
-   *  unless `agentic_use_same_as_chat` is on AND chat is OpenAI.
-   *  Ignored on the local path (no key needed). */
-  agentic_api_key: string | null;
   /** Gemini API key — used ONLY for Google Search grounding (a separate
    *  feature from the chat provider). When `grounding_search_enabled` is
    *  true and this key is set, escalation calls can include
@@ -612,10 +562,6 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   kokoro_voice_override:    false,
   supertonic_voice_override: false,
   agentic_enabled:          false,
-  agentic_provider:         'openai',
-  agentic_use_same_as_chat: false,
-  agentic_model:            null,
-  agentic_api_key:          null,
   gemini_search_api_key:    null,
   grounding_search_enabled: false,
   chat_thinking_effort:     'none',
@@ -631,6 +577,11 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
 function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
   const merged: ApiKeysProfile = { ...DEFAULT_API_KEYS, ...parsed };
   const before = JSON.stringify(merged);
+  // The separate agentic tier retired 2026-09-15: one model does both.
+  // Drop the old fields so the blob (which soul also reads) is clean.
+  for (const legacy of ['agentic_provider', 'agentic_use_same_as_chat', 'agentic_model', 'agentic_api_key']) {
+    if (legacy in merged) delete (merged as unknown as Record<string, unknown>)[legacy];
+  }
   // A gated-off engine must be migrated OFF, not just hidden from the
   // dropdown. 1.1.8 shipped Pocket selectable; 1.1.9 gates it again because
   // the generated audio is bad. Anyone who picked it still has it saved and
@@ -768,54 +719,8 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
   } else {
     if (!profile.elevenlabs_api_key) missing.push('ElevenLabs API key');
   }
-  // Agentic gates: only enforced when the user opted in. Three paths:
-  //   * Ollama local: chat-tier Ollama model doubles as the agentic
-  //     model. Only requires that chat itself is on a tools-capable
-  //     Ollama model.
-  //   * Keyless CLI (claude-code / gemini-cli / codex): no API key,
-  //     no required model (the CLI uses sensible defaults if blank,
-  //     and the agentic_model dropdown populates live from the
-  //     CLI's catalog post-auto-probe). The user just needs to be
-  //     signed in to the local CLI, which the CliProviderStatusCard
-  //     surfaces, but the wizard doesn't gate Finish on it.
-  //   * Cloud API (openai / anthropic / gemini / deepseek): needs both
-  //     a model id and the matching API key (or "use same as chat"
-  //     when chat is OpenAI).
-  if (profile.agentic_enabled) {
-    const ap = profile.agentic_provider;
-    const isKeylessCli = ap === 'claude-code' || ap === 'gemini-cli' || ap === 'codex';
-    if (ap === 'ollama') {
-      if (profile.llm_provider !== 'ollama' || !modelSupportsTools(profile.llm_model)) {
-        missing.push('Tools-capable Ollama chat model');
-      }
-    } else if (isKeylessCli) {
-      // Nothing to enforce at the field-validation layer. Sign-in
-      // status surfaces via the CliProviderStatusCard, the wizard
-      // lets the user finish either way (they can wake the sign-in
-      // flow later from Settings if needed).
-    } else {
-      const reuseChat = profile.agentic_use_same_as_chat
-        && profile.llm_provider === 'openai'
-        && !!profile.llm_api_key;
-      if (!profile.agentic_model && !reuseChat) {
-        missing.push('Agentic model');
-      }
-      if (!reuseChat && !profile.agentic_api_key) {
-        // Label reflects the picked backend so the "Required to
-        // finish" panel doesn't say "OpenAI key" when the user
-        // selected Anthropic / Gemini / DeepSeek.
-        const providerLabel =
-          ap === 'anthropic' ? 'Anthropic'
-          : ap === 'gemini' ? 'Gemini'
-          : ap === 'deepseek' ? 'DeepSeek'
-          : ap === 'xai' ? 'xAI'
-          : ap === 'cerebras' ? 'Cerebras'
-          : ap === 'glm' ? 'GLM'
-          : 'OpenAI';
-        missing.push(`${providerLabel} key for agentic`);
-      }
-    }
-  }
+  // Tools need no extra field: they run on the chat model above. An
+  // Ollama model that cannot call tools simply answers without them.
   // Gemini grounded-search gate: only enforced when the user opted in.
   if (profile.grounding_search_enabled && !profile.gemini_search_api_key) {
     missing.push('Gemini API key for grounded search');
@@ -906,19 +811,10 @@ export async function validateKeys(
         profile.tts_provider === 'kokoro' && profile.kokoro_mode === 'custom'
           ? (profile.kokoro_endpoint || null)
           : null,
-      // Agentic probe. Soul picks the right backend from
-      // `agentic_provider`: 'openai' probes the OpenAI key (cheap GET
-      // /v1/models); 'ollama' is a no-op (chat-side Ollama probe
-      // already covered reachability).
-      // When `agentic_use_same_as_chat` is on AND chat is OpenAI,
-      // the chat key is reused as the agentic key.
+      // Tools verdict: soul answers whether the chat model above can
+      // run the tool loop (cloud: same as the chat probe; Ollama: what
+      // the daemon advertises). No second key, no second model.
       agentic_enabled:     profile.agentic_enabled,
-      agentic_provider:    profile.agentic_provider,
-      agentic_model:       profile.agentic_model,
-      agentic_api_key:     profile.agentic_use_same_as_chat
-                            && profile.llm_provider === 'openai'
-                              ? profile.llm_api_key
-                              : profile.agentic_api_key,
       // Gemini grounded-search — soul probes the key when enabled.
       grounding_search_enabled: profile.grounding_search_enabled,
       gemini_search_api_key:    profile.gemini_search_api_key,
