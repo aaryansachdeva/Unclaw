@@ -11,8 +11,8 @@
 // are faster than entrances on purpose.
 
 import { forwardRef, type ReactNode } from 'react';
-import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import { motion, AnimatePresence, useReducedMotion, type DragControls } from 'framer-motion';
+import { Maximize2, Minimize2, GripVertical, X } from 'lucide-react';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -62,23 +62,69 @@ interface Props {
   open?: boolean;
   /** The full panel body, rendered inline while open. */
   panel?: ReactNode;
+  /** Edit mode (GlanceColumn): only the header shows, with a drag handle
+   *  for reordering and a remove control; the body is collapsed. */
+  editing?: boolean;
+  dragControls?: DragControls;
+  onRemove?: () => void;
   children: ReactNode;
 }
 
 export const GlanceSection = forwardRef<HTMLDivElement, Props>(function GlanceSection(
-  { label, note, onOpen, onClose, action, open = false, panel, children },
+  { label, note, onOpen, onClose, action, open = false, panel, editing = false, dragControls, onRemove, children },
   ref,
 ) {
   const reduce = useReducedMotion() ?? false;
-  const toggle = open ? onClose : onOpen;
+  const toggle = editing ? undefined : (open ? onClose : onOpen);
   const Icon = open ? Minimize2 : Maximize2;
   return (
     <div ref={ref}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 4px 3px 8px' }}>
-        <span style={GLANCE_LABEL_STYLE}>
-          {label}{note ? ` · ${note}` : ''}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: editing ? '4px 4px 4px 4px' : '0 4px 3px 8px' }}>
+        {editing && (
+          /* Drag handle: the only thing that starts a reorder, so the rest
+             of the header stays a plain header. */
+          <span
+            role="button"
+            aria-label={`Drag to reorder ${label.toLowerCase()}`}
+            title="Drag to reorder"
+            onPointerDown={(e) => { dragControls?.start(e); }}
+            style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              width: 18, height: 18, marginRight: 2,
+              color: 'var(--text-ghost)', cursor: 'grab', touchAction: 'none',
+              filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))',
+            }}
+          >
+            <GripVertical size={13} strokeWidth={2.2} />
+          </span>
+        )}
+        <span style={{ ...GLANCE_LABEL_STYLE, ...(editing ? { color: 'var(--text-secondary)', fontSize: 11 } : {}) }}>
+          {label}{!editing && note ? ` · ${note}` : ''}
         </span>
-        {action}
+        {!editing && action}
+        {editing && onRemove && (
+          <>
+            <span style={{ flex: 1 }} />
+            <button
+              type="button"
+              onClick={onRemove}
+              aria-label={`Remove ${label.toLowerCase()}`}
+              title="Remove"
+              style={{
+                width: 20, height: 20, borderRadius: 6,
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                background: 'transparent', border: 'none',
+                color: 'var(--text-ghost)', cursor: 'pointer',
+                filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))',
+                transition: 'background 0.15s var(--ease-out-quart), color 0.15s var(--ease-out-quart)',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--glass-bg-hover)'; e.currentTarget.style.color = 'var(--danger)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-ghost)'; }}
+            >
+              <X size={12} strokeWidth={2.5} />
+            </button>
+          </>
+        )}
         {toggle && (
           <motion.button
             type="button"
@@ -107,7 +153,7 @@ export const GlanceSection = forwardRef<HTMLDivElement, Props>(function GlanceSe
       {/* Body: glance rows or the inline panel. `mode="wait"` so the rows
           are gone before the panel lands; the panel rises 8px into place. */}
       <AnimatePresence mode="wait" initial={false}>
-        {open && panel ? (
+        {editing ? null : open && panel ? (
           <motion.div
             key="panel"
             initial={reduce ? { opacity: 1 } : { opacity: 0, y: 8 }}
