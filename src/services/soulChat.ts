@@ -280,6 +280,49 @@ export async function speakViaSoul(
 }
 
 
+/** A due reminder, spoken: soul writes one short line with the user's model
+ *  in the active persona's voice (`systemExtension`), falls back to a fixed
+ *  line, and renders it. The caller dispatches the job like a chat reply. */
+export async function announceReminderViaSoul(
+  reminderId: string,
+  opts: {
+    minutesLate?: number;
+    systemExtension?: string;
+    voices?: SoulChatOptions['voices'];
+  } = {},
+): Promise<SoulChatResult> {
+  const body: Record<string, unknown> = { minutes_late: Math.max(0, Math.round(opts.minutesLate ?? 0)) };
+  if (opts.systemExtension) body.system_extension = opts.systemExtension;
+  try {
+    const keys = await fetchApiKeys();
+    if (keys.llm_model) body.llm_model = keys.llm_model;
+    if (keys.llm_api_key && keys.llm_provider !== 'ollama') body.llm_api_key = keys.llm_api_key;
+    body.tts_provider = keys.tts_provider;
+    if (keys.tts_provider === 'elevenlabs' && keys.elevenlabs_api_key) {
+      body.elevenlabs_api_key = keys.elevenlabs_api_key;
+    }
+    if (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'custom' && keys.kokoro_endpoint) {
+      body.kokoro_endpoint = keys.kokoro_endpoint;
+    }
+    const voice = resolveVoiceId(keys, opts.voices);
+    if (voice) body.voice_id = voice;
+  } catch (err) {
+    console.warn('[reminders] failed to read api keys', err);
+  }
+  const res = await fetch(`${getSoulBaseUrl()}/reminders/${encodeURIComponent(reminderId)}/announce`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(90_000),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`soul /reminders announce ${res.status}: ${errText.slice(0, 200)}`);
+  }
+  return (await res.json()) as SoulChatResult;
+}
+
+
 // ---------------------------------------------------------------------
 // Idle driver
 // ---------------------------------------------------------------------

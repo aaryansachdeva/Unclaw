@@ -14,6 +14,8 @@ interface ElectronAPI {
   close: () => void;
   togglePin: (pinned: boolean) => void;
   focusWindow: () => void;
+  showNotification: (opts: { title: string; body?: string; tag?: string }) => void;
+  onNotificationClick: (cb: (tag: string) => void) => () => void;
   /** Open Terminal.app with a pre-filled command (macOS only). Used by
    *  SettingsPanel's Claude Code subscription card to fire
    *  `claude setup-token` in a fresh tab. */

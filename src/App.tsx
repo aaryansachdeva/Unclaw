@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Check, AlertTriangle } from 'lucide-react';
+import { X, Check, AlertTriangle, Newspaper } from 'lucide-react';
 import { Titlebar } from './components/Titlebar';
 import { StreamView } from './components/StreamView';
 import { Greeting, GREETING_TOP } from './components/Greeting';
 import { GlanceColumn } from './components/glance/GlanceColumn';
 import { InputBar, type InputBarHandle } from './components/InputBar';
+import { readArticle, type ArticleRead, type NewsArticle } from './services/news';
 import { ChatPane, ChatPaneHeader } from './components/ChatPane';
 import { WidgetRail } from './components/WidgetRail';
 // Shared color/lighting constants live in CustomizationOverlay; the unified
@@ -27,7 +28,7 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { SoulBootScreen } from './components/SoulBootScreen';
 import { SetupWizard } from './components/SetupWizard';
 import { UpdateOverlay } from './components/UpdateOverlay';
-import type { WardrobeSettings } from './services/userSettings';
+import type { GlancePrefs, WardrobeSettings } from './services/userSettings';
 import {
   initSoulBase,
   getSoulBaseUrl,
@@ -43,8 +44,11 @@ import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
 import { detectEcho } from './voice/echoGuard';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
-import { chatViaSoul, streamChatViaSoul, fireIdle, fetchCurrentBodyIdle, SoulBodyDirective, SoulChatAction, SoulChatChunk, SoulChatResult } from './services/soulChat';
+import { chatViaSoul, streamChatViaSoul, fireIdle, fetchCurrentBodyIdle, SoulBodyDirective, SoulChatAction, SoulChatChunk, SoulChatResult, announceReminderViaSoul } from './services/soulChat';
 import { startPassthroughBridge } from './services/passthrough';
+import { useReminderAlerts } from './hooks/useReminderAlerts';
+import { buildReminderTemplate } from './services/reminderTemplate';
+import { dayKey } from './services/reminderSchedule';
 import { usePassthroughPrefs } from './hooks/usePassthroughPrefs';
 import { pollNextEscalation } from './services/escalation';
 import { sendListeningEvent } from './services/listening';
@@ -964,6 +968,21 @@ function AppMain() {
       );
     }, 600);
   }, [agentStack, environment]);
+  // The glance column's watchlist and weather places: account config like
+  // the roster, saved the same way (soul mirror plus the versioned cloud
+  // push, which keeps a pending copy until the cloud acknowledges it).
+  const handleGlanceChange = useCallback((glance: GlancePrefs) => {
+    const prof = profileRef.current;
+    if (!prof) return;
+    const next = { ...prof, glance };
+    profileRef.current = next;
+    setProfile(next);
+    void requestSettingsPush(
+      { ...next, roster: stackRef.current, environment: envRef.current },
+      authTokenRef.current ?? null,
+      authUserRef.current?.id ?? null,
+    );
+  }, []);
   // Sync status: an expired session is told, not swallowed. The pending
   // document stays and goes up after the next sign-in.
   useEffect(() => onSyncStatus((st, d) => {
@@ -1832,6 +1851,28 @@ function AppMain() {
   // can review and edit before sending.
   const inputBarRef = useRef<InputBarHandle | null>(null);
 
+  // A news article staged from the News glance's Summarize: a chip above
+  // the input bar, its text read through soul the moment it is staged so
+  // it is usually ready by the time the user sends. `read` stays undefined
+  // while that read is in flight; null means it failed (headline only).
+  // One article at a time; staging another replaces it.
+  const [attachedArticle, setAttachedArticle] = useState<{
+    key: number; article: NewsArticle; read?: ArticleRead | null;
+  } | null>(null);
+  const attachedArticleRef = useRef(attachedArticle);
+  attachedArticleRef.current = attachedArticle;
+  const articleReadRef = useRef<Promise<ArticleRead | null> | null>(null);
+  const handleSummarizeArticle = useCallback((article: NewsArticle) => {
+    const key = Date.now();
+    setAttachedArticle({ key, article });
+    const read = readArticle(article.url).then((r) => {
+      setAttachedArticle((cur) => (cur && cur.key === key ? { ...cur, read: r } : cur));
+      return r;
+    });
+    articleReadRef.current = read;
+    inputBarRef.current?.focus();
+  }, []);
+
   // Push-to-talk state. Distinct from `streaming.isActive` because
   // the continuous voice button also flips streaming.isActive on,
   // and we only want the spacebar release to inject text into the
@@ -2315,9 +2356,12 @@ function AppMain() {
     // Allow image-only sends: the user can stage one or more
     // screenshots and hit Enter with no text. Soul fills in a generic
     // "What is shown in this screenshot?" prompt on its end.
-    const trimmed = message.trim();
+    let trimmed = message.trim();
     let pendingImages = attachedImages;
-    if (!trimmed && pendingImages.length === 0) return;
+    // A staged news article is a valid send on its own: an empty box
+    // means "summarize it".
+    const stagedArticle = attachedArticleRef.current;
+    if (!trimmed && pendingImages.length === 0 && !stagedArticle) return;
 
     // Video call mode: one live camera frame rides along with this turn. It
     // never touches `attachedImages` (no chip, nothing to clear) and only
@@ -2380,6 +2424,28 @@ function AppMain() {
     // pane renders them in-bubble. Image-only sends (no text) still
     // create a turn now; `add` allows an empty-content turn when it
     // carries images.
+    // The staged article rides on the user turn (useChatMemory expands it
+    // into the history the model reads, for this turn and follow-ups).
+    // Its read started when it was staged; wait a moment for one still in
+    // flight, else send the headline alone.
+    let turnArticle: { title: string; source: string; url: string; text?: string } | undefined;
+    if (stagedArticle) {
+      const read = stagedArticle.read !== undefined
+        ? stagedArticle.read
+        : await Promise.race([
+            articleReadRef.current ?? Promise.resolve(null),
+            new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 4000)),
+          ]);
+      turnArticle = {
+        title: stagedArticle.article.title,
+        source: stagedArticle.article.source,
+        url: read?.resolved_url || stagedArticle.article.url,
+        ...(read?.text ? { text: read.text.slice(0, 6000) } : {}),
+      };
+      setAttachedArticle(null);
+      articleReadRef.current = null;
+      if (!trimmed) trimmed = 'Summarize this article.';
+    }
     const pendingImageB64 = pendingImages.map((img) => img.base64);
     // The transcript keeps what the user attached, never the live camera
     // frame: a 640 px PNG per spoken sentence would bloat chat memory and
@@ -2391,6 +2457,7 @@ function AppMain() {
         trimmed,
         undefined,
         userImageB64.length > 0 ? userImageB64 : undefined,
+        turnArticle,
       );
     }
     const history = memory.getHistory();
@@ -2909,15 +2976,19 @@ function AppMain() {
   useEffect(() => {
     if (connectionState !== 'connected') return;
     let cancelled = false;
-    void (async () => {
+    const load = async () => {
       const r = await listReminders();
       if (!cancelled && r.available) {
         const open = r.reminders.filter(x => !x.completed_at);
         setReminders(open);
         setRemindersCount(open.length);
       }
-    })();
-    return () => { cancelled = true; };
+    };
+    void load();
+    // Once a minute as well: the alert clock (useReminderAlerts) and the
+    // Today list must see reminders the chat tools or another window made.
+    const id = window.setInterval(() => { void load(); }, 60_000);
+    return () => { cancelled = true; window.clearInterval(id); };
   }, [refreshKey, connectionState, remindersCount]);
 
   // Resume auth session on app start. Independent of stream state , 
@@ -4252,6 +4323,39 @@ function AppMain() {
     passthroughBridgeRef.current?.reportReady(passthroughReady);
   }, [passthroughReady]);
 
+  // Reminder alerts (hooks/useReminderAlerts): a heads-up notification
+  // before a timed reminder, then at its time a notification and a line
+  // from the character, written by the user's model in this persona's
+  // voice and played like a chat reply, so it lands in the chat pane and
+  // can be answered ("push it back an hour"). Speech waits for a quiet
+  // moment: stream up, no reply in flight or playing, no tool run, and not
+  // in passthrough, where the external agent owns the voice.
+  const isSendingRef = useRef(isSending);
+  isSendingRef.current = isSending;
+  const isConnectedRef = useRef(isConnected);
+  isConnectedRef.current = isConnected;
+  const passthroughModeRef = useRef(passthrough);
+  passthroughModeRef.current = passthrough;
+  const personaPromptRef = useRef(persona.prompt);
+  personaPromptRef.current = persona.prompt;
+  useReminderAlerts({
+    enabled: !!authToken && !!profile && wizardMode !== 'first',
+    reminders,
+    canSpeak: () => isConnectedRef.current && !isSendingRef.current && !isAISpeakingRef.current
+      && escalationIntervalRef.current === null && !passthroughModeRef.current,
+    speak: async (reminder, minutesLate) => {
+      const result = await announceReminderViaSoul(reminder.id, {
+        minutesLate,
+        systemExtension: personaPromptRef.current,
+        voices: personaVoicesRef.current,
+      });
+      dispatchChatResultRef.current(result);
+      return Number((result as { duration?: unknown }).duration ?? 0);
+    },
+    // Called later, from a click, so the handler declared further down is set.
+    onNotificationClick: () => { if (activeWidget !== 'reminders') handleToggleWidget('reminders'); },
+  });
+
   // Body-idle resync. A renderer refresh/crash tears down the stream
   // session and the fresh one starts on the default body-idle loop,
   // while soul still holds the real rotation state ("we lose the
@@ -4826,6 +4930,17 @@ function AppMain() {
         onRemindersChanged={() => setRemindersCount((c) => c + 1)}
         refreshKey={refreshKey}
         faded={chatPaneOpen}
+        glance={profile?.glance ?? null}
+        onGlanceChange={handleGlanceChange}
+        onSummarizeArticle={handleSummarizeArticle}
+        onAddReminder={(day) => {
+          // Reminders + (and "Add a reminder" / "Add on <day>"): a fill-in
+          // sentence in the input bar instead of a form (services/
+          // reminderTemplate). Pressing + means typing, and voice mode keeps
+          // the box read-only for its transcript, so it steps aside first.
+          if (voice.isListening) void voice.stop();
+          inputBarRef.current?.insertTemplate(buildReminderTemplate(day, dayKey(new Date())));
+        }}
       />
 
       {/* Ambient widget sheets are disabled until onboarding completes — they
@@ -4979,7 +5094,7 @@ function AppMain() {
           {/* Pending screenshot stack, chips above the bar, animate
               in from below, hover reveals × per chip, full row rides
               along on send. */}
-          {attachedImages.length > 0 && (
+          {(attachedImages.length > 0 || attachedArticle) && (
             <div
               style={{
                 position: 'absolute',
@@ -4996,6 +5111,22 @@ function AppMain() {
               }}
             >
               <AnimatePresence initial={false}>
+                {attachedArticle && (
+                  <motion.div
+                    key={`article-${attachedArticle.key}`}
+                    layout
+                    initial={{ opacity: 0, y: 10, scale: 0.94 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 8, scale: 0.94 }}
+                    transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <ArticleChip
+                      article={attachedArticle.article}
+                      state={attachedArticle.read === undefined ? 'reading' : attachedArticle.read?.text ? 'ready' : 'headline'}
+                      onDismiss={() => { setAttachedArticle(null); articleReadRef.current = null; }}
+                    />
+                  </motion.div>
+                )}
                 {attachedImages.map((img) => (
                   <motion.div
                     key={img.id}
@@ -5072,7 +5203,8 @@ function AppMain() {
                   onSetPassthroughVerbosity={setPassthroughVerbosity}
                   onTogglePassthroughMuted={togglePassthroughMuted}
                   disabled={!isConnected}
-                  hasAttachments={attachedImages.length > 0}
+                  hasAttachments={attachedImages.length > 0 || !!attachedArticle}
+                  placeholderOverride={attachedArticle ? 'Ask about this article, or just send' : undefined}
                   attachHint={canAttachImages ? null : visionHint}
                   onSendMessage={handleSendMessage}
                   onOpenSheet={handleToggleWidget}
@@ -5667,6 +5799,74 @@ function ScreenshotThumbnail({
         onMouseDown={(e) => e.preventDefault()}
       >
         <X size={12} strokeWidth={2.4} />
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Staged news article chip: source, read state and headline above the
+// input bar, in the same frosted material as the bar. The x unstages it.
+// ---------------------------------------------------------------------
+
+function ArticleChip({
+  article,
+  state,
+  onDismiss,
+}: {
+  article: NewsArticle;
+  state: 'reading' | 'ready' | 'headline';
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      style={{
+        position: 'relative',
+        width: 300,
+        maxWidth: '100%',
+        padding: '9px 36px 10px 12px',
+        borderRadius: 12,
+        border: '1px solid rgba(255, 255, 255, 0.14)',
+        boxShadow: '0 6px 20px -4px rgba(0, 0, 0, 0.45)',
+        background: 'rgba(40, 48, 65, 0.62)',
+        backdropFilter: 'blur(32px) saturate(1.6)',
+        WebkitBackdropFilter: 'blur(32px) saturate(1.6)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 3,
+      }}
+    >
+      <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, fontSize: 10.5, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+        <Newspaper size={12} strokeWidth={2.2} aria-hidden style={{ flexShrink: 0 }} />
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{article.source}</span>
+        {state !== 'ready' && (
+          <span style={{ flexShrink: 0, color: 'var(--text-ghost)' }}>
+            {state === 'reading' ? 'Reading…' : 'Headline only'}
+          </span>
+        )}
+      </span>
+      <span style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.3, color: 'var(--text-primary)', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+        {article.title}
+      </span>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Remove article"
+        title="Remove"
+        onMouseDown={(e) => e.preventDefault()}
+        style={{
+          position: 'absolute', top: 8, right: 8,
+          width: 20, height: 20, borderRadius: '50%',
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          padding: 0, background: 'rgba(255, 255, 255, 0.08)',
+          border: '1px solid rgba(255, 255, 255, 0.14)',
+          color: 'var(--text-secondary)', cursor: 'pointer',
+          transition: 'background 0.15s var(--ease-out-quart), color 0.15s var(--ease-out-quart)',
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.16)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+      >
+        <X size={11} strokeWidth={2.4} />
       </button>
     </div>
   );

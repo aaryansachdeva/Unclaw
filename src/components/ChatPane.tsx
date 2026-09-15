@@ -9,7 +9,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { X } from 'lucide-react';
+import { X, Newspaper } from 'lucide-react';
 import type { Turn } from '../hooks/useChatMemory';
 import { PulseGrid } from './PulseGrid';
 
@@ -440,9 +440,34 @@ function MessageRow({
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'flex-end',
-          gap: turn.content && turn.images && turn.images.length > 0 ? 6 : 0,
+          gap: 6,
         }}
       >
+        {turn.article && (
+          /* A shared news article: source and headline, opens the page. */
+          <button
+            type="button"
+            onClick={() => { if (turn.article?.url) window.open(turn.article.url, '_blank', 'noopener,noreferrer'); }}
+            title="Open the article"
+            style={{
+              maxWidth: '78%',
+              display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3,
+              padding: '8px 12px', textAlign: 'left',
+              background: 'rgba(255, 255, 255, 0.05)',
+              border: '1px solid rgba(255, 255, 255, 0.06)',
+              borderRadius: 12,
+              fontFamily: 'inherit', color: 'var(--text-primary)', cursor: 'pointer',
+            }}
+          >
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 10.5, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+              <Newspaper size={12} strokeWidth={2.2} aria-hidden />
+              {turn.article.source}
+            </span>
+            <span style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.35, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+              {turn.article.title}
+            </span>
+          </button>
+        )}
         {turn.images && turn.images.length > 0 && (
           <div
             style={{

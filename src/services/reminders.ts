@@ -28,6 +28,10 @@ export interface Reminder {
   created_at: string;
   /** ISO timestamp once marked complete; null while still active. */
   completed_at: string | null;
+  /** Soul-owned: the `when_iso` each alert stage last fired for (plus
+   *  `lead_at` / `due_at` stamps). A moved reminder no longer matches, so it
+   *  alerts again. See hooks/useReminderAlerts. */
+  alerts?: { lead?: string; due?: string; lead_at?: string; due_at?: string };
 }
 
 /** Result wrapper that distinguishes "endpoint missing" from "endpoint errored". */
@@ -137,4 +141,28 @@ export async function completeReminder(id: string): Promise<Reminder | null> {
   );
   if (!res.ok) return null;
   return await safeJson<Reminder>(res);
+}
+
+
+export type AlertClaim = 'claimed' | 'taken' | 'error';
+
+/** Claim one alert stage for a reminder. 'claimed' exactly once per stage
+ *  per reminder time across every window and restart; 'taken' when it
+ *  already fired (or the reminder is gone, or soul predates alerts);
+ *  'error' when soul could not be reached, so the clock retries. */
+export async function claimReminderAlert(id: string, stage: 'lead' | 'due'): Promise<AlertClaim> {
+  try {
+    const res = await fetch(`${getSoulBaseUrl()}/reminders/${encodeURIComponent(id)}/alert`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.status === 404) return 'taken';
+    if (!res.ok) return 'error';
+    const body = await safeJson<{ claimed?: boolean }>(res);
+    return body?.claimed ? 'claimed' : 'taken';
+  } catch {
+    return 'error';
+  }
 }

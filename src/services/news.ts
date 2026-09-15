@@ -58,3 +58,30 @@ export async function getNews(topic?: string): Promise<NewsResult> {
     return { available: true, error: `parse: ${(err as Error).message}` };
   }
 }
+
+/** What soul could read of one article (GET /news/article). */
+export interface ArticleRead {
+  url: string;
+  /** The publisher URL the Google News link resolved to. */
+  resolved_url: string;
+  site: string;
+  title: string;
+  /** Readable article text, capped; empty when the site could not be read. */
+  text: string;
+  text_from: 'jsonld' | 'paragraphs' | 'description' | 'none';
+}
+
+/** Read one article through soul for the News glance's Summarize. null on
+ *  any failure (older soul, network); the chat then gets the headline. */
+export async function readArticle(url: string): Promise<ArticleRead | null> {
+  if (!url) return null;
+  try {
+    const res = await fetch(`${getSoulBaseUrl()}/news/article?url=${encodeURIComponent(url)}`, {
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as ArticleRead;
+  } catch {
+    return null;
+  }
+}

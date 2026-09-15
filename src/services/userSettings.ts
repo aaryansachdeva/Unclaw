@@ -82,8 +82,64 @@ export interface UserSettings {
    *  returning user's room did not follow them to a new machine. It is
    *  part of the account's config like everything else except API keys. */
   environment?: EnvironmentSettings | null;
+  /** The lists the glance column edits in place: the stock watchlist and
+   *  the weather places. Account config like the rest of this blob; soul
+   *  reads `glance.stocks` when a caller asks for quotes without a list.
+   *  Read it through `readGlancePrefs`, another build may have written it. */
+  glance?: GlancePrefs | null;
   /** Allow any future top-level setting without a Pydantic edit. */
   [k: string]: unknown;
+}
+
+/** The automatic weather place: the profile city, else the Mac's rough
+ *  network location, resolved by soul. It carries no coordinates. */
+export interface AutoPlace {
+  id: 'here';
+  auto: true;
+}
+
+/** A weather place picked from the glance's place search. */
+export interface NamedPlace {
+  id: string;
+  name: string;
+  /** Admin area and country, shown while picking. */
+  region?: string;
+  lat: number;
+  lon: number;
+}
+
+export type WeatherPlace = AutoPlace | NamedPlace;
+
+/** Absent keys mean the defaults: soul's starter watchlist, and only the
+ *  automatic place for weather. */
+export interface GlancePrefs {
+  /** Stock watchlist in display order (Yahoo symbols). */
+  stocks?: string[];
+  /** Weather places in cycle order. The first one also feeds the chat
+   *  tier's cached weather. */
+  places?: WeatherPlace[];
+}
+
+/** Defensive read of `glance`: drops malformed entries, never throws. */
+export function readGlancePrefs(raw: unknown): GlancePrefs {
+  const g = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const out: GlancePrefs = {};
+  if (Array.isArray(g.stocks)) {
+    out.stocks = g.stocks.filter(
+      (s, i, arr): s is string => typeof s === 'string' && s.length > 0 && arr.indexOf(s) === i,
+    );
+  }
+  if (Array.isArray(g.places)) {
+    out.places = g.places.filter((p): p is WeatherPlace => {
+      if (!p || typeof p !== 'object') return false;
+      const o = p as Record<string, unknown>;
+      if (o.auto === true) return o.id === 'here';
+      return typeof o.id === 'string' && typeof o.name === 'string'
+        && typeof o.lat === 'number' && Number.isFinite(o.lat)
+        && typeof o.lon === 'number' && Number.isFinite(o.lon);
+    });
+  }
+  return out;
 }
 
 /** Wardrobe is a sub-object so all related state lives under one key

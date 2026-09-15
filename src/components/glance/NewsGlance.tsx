@@ -1,10 +1,13 @@
 // News glance: one headline at a time, cycling through the feed, source
 // in caps under it. Expanded, every headline as a row in the same
-// language with source and age; clicking a headline opens the article.
+// language with source and age, spaced apart; clicking a headline opens
+// the article, and Summarize under each one stages it in the input bar so
+// the next message (a question, or nothing) is about that article.
 // Data from soul's free Google News RSS path (services/news), every 30 min.
 
 import { forwardRef, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { motion, AnimatePresence, type DragControls } from 'framer-motion';
+import { MessageSquareText } from 'lucide-react';
 
 import { getNews, type NewsArticle } from '../../services/news';
 import { GlanceSection, GlanceRow, GLANCE_META_STYLE } from './GlanceSection';
@@ -19,6 +22,8 @@ interface Props {
   onClose: () => void;
   panel?: ReactNode;
   refreshKey: number;
+  /** Stage an article in the input bar for the chat. Absent = no button. */
+  onSummarize?: (article: NewsArticle) => void;
   /** Edit mode (GlanceColumn): header only, drag handle and remove. */
   editing?: boolean;
   dragControls?: DragControls;
@@ -47,7 +52,7 @@ function Headline({ a, lines = 2 }: { a: NewsArticle; lines?: number }) {
 }
 
 export const NewsGlance = forwardRef<HTMLDivElement, Props>(function NewsGlance(
-  { open, onOpen, onClose, refreshKey, onLayout, editing, dragControls, onRemove },
+  { open, onOpen, onClose, refreshKey, onLayout, editing, dragControls, onRemove, onSummarize },
   ref,
 ) {
   const [articles, setArticles] = useState<NewsArticle[] | null>(null);
@@ -83,10 +88,13 @@ export const NewsGlance = forwardRef<HTMLDivElement, Props>(function NewsGlance(
   const expanded = articles && (
     <div>
       {articles.length === 0 && ghost('No headlines right now')}
-      {articles.map((a) => (
-        <GlanceRow key={a.url || a.title} onClick={() => openArticle(a, onOpen)} ariaLabel={`Open article: ${a.title}`} align="flex-start">
-          <Headline a={a} lines={3} />
-        </GlanceRow>
+      {articles.map((a, i) => (
+        <div key={a.url || a.title} style={{ marginTop: i === 0 ? 0 : 12 }}>
+          <GlanceRow onClick={() => openArticle(a, onOpen)} ariaLabel={`Open article: ${a.title}`} align="flex-start">
+            <Headline a={a} lines={3} />
+          </GlanceRow>
+          {onSummarize && <SummarizeButton title={a.title} onClick={() => onSummarize(a)} />}
+        </div>
       ))}
     </div>
   );
@@ -117,6 +125,33 @@ export const NewsGlance = forwardRef<HTMLDivElement, Props>(function NewsGlance(
     </GlanceSection>
   );
 });
+
+/** Quiet caps action under a headline: sends the article to the input bar. */
+function SummarizeButton({ title, onClick }: { title: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      data-sheet-trigger
+      onClick={onClick}
+      aria-label={`Summarize: ${title}`}
+      title="Ask about this article"
+      style={{
+        ...GLANCE_META_STYLE,
+        display: 'inline-flex', alignItems: 'center', gap: 5,
+        margin: '1px 0 0 2px', padding: '3px 6px', borderRadius: 6,
+        background: 'transparent', border: 'none', fontFamily: 'inherit',
+        color: 'var(--text-ghost)', opacity: 1, cursor: 'pointer',
+        textShadow: 'var(--text-shadow-floating)',
+        transition: 'background 0.15s var(--ease-out-quart), color 0.15s var(--ease-out-quart)',
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--glass-bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-ghost)'; }}
+    >
+      <MessageSquareText size={11} strokeWidth={2.4} aria-hidden style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))' }} />
+      Summarize
+    </button>
+  );
+}
 
 function ago(iso: string): string {
   const t = new Date(iso).getTime();

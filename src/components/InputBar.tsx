@@ -18,6 +18,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { DETAILS_LABEL, DETAILS_LINE, SLOT_OPEN, finalizeReminderTemplate, missingSubject, nextSlot, slotRanges, templateSegments } from '../services/reminderTemplate';
 import { createPortal } from 'react-dom';
 import {
   AnimatePresence,
@@ -169,6 +170,9 @@ interface InputBarProps {
   comingSoon?: boolean;
   /** Copy shown in the placeholder slot while `comingSoon` is true. */
   comingSoonMessage?: string;
+  /** A static placeholder that replaces the cycling prompts while set
+   *  (e.g. a staged news article: "Ask about this article"). */
+  placeholderOverride?: string;
 }
 
 /** Imperative API for the parent — used by App.tsx to drive the
@@ -186,6 +190,23 @@ export interface InputBarHandle {
   setText(text: string): void;
   /** Move keyboard focus to the textarea. */
   focus(): void;
+  /** Put a fill-in template (blanks are "____") in the textarea and select
+   *  the first blank. While it is active Tab walks the blanks and then adds
+   *  a Details line; send drops whatever was left blank. Existing typed
+   *  text is kept, with the template on a new line. */
+  insertTemplate(text: string): void;
+}
+
+/** A template blank in the mirror; brighter while it holds the selection. */
+function slotBlockStyle(active: boolean) {
+  const bg = active ? 'rgba(255, 255, 255, 0.18)' : 'rgba(255, 255, 255, 0.09)';
+  return {
+    background: bg,
+    boxShadow: `0 0 0 2px ${bg}`,
+    borderRadius: 5,
+    color: active ? 'rgba(255, 255, 255, 0.66)' : 'rgba(255, 255, 255, 0.46)',
+    transition: 'background 0.15s var(--ease-out-quart), box-shadow 0.15s var(--ease-out-quart), color 0.15s var(--ease-out-quart)',
+  } as const;
 }
 
 export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function InputBar({
@@ -223,6 +244,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onToggleChatPane,
   comingSoon = false,
   comingSoonMessage = 'Coming soon',
+  placeholderOverride,
 }, forwardedRef) {
   // Lock the editing surface (textarea, send, voice) when the active
   // persona isn't ready yet. Persona-switcher chevrons stay live so
@@ -251,6 +273,21 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   //      drawn, so the bar can't show the same word twice).
   //   3. focus() returns keyboard focus to the textarea so the user
   //      can edit immediately after a voice session.
+  // Fill-in template state (insertTemplate). The selection to apply once the
+  // new text has rendered, and whether Tab/send treat the text as a template.
+  const templateActiveRef = useRef(false);
+  const pendingSelectionRef = useRef<[number, number] | null>(null);
+  const applyPendingSelection = () => {
+    const el = textareaRef.current;
+    const range = pendingSelectionRef.current;
+    if (!el || !range) return;
+    pendingSelectionRef.current = null;
+    el.focus();
+    el.setSelectionRange(range[0], range[1]);
+    // A selection set from code never reaches onSelect; mirror it by hand.
+    setSelection(range);
+  };
+
   useImperativeHandle(forwardedRef, () => ({
     getText: () => messageRef.current,
     setText: (text: string) => {
@@ -264,7 +301,35 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
         el.setSelectionRange(len, len);
       }
     },
+    insertTemplate: (text: string) => {
+      const current = messageRef.current;
+      const prefix = current.trim() && !templateActiveRef.current ? `${current.replace(/\s+$/, '')}\n` : '';
+      const next = prefix + text;
+      templateActiveRef.current = true;
+      setMessage(next);
+      pendingSelectionRef.current = nextSlot(next, prefix.length) ?? [next.length, next.length];
+      window.requestAnimationFrame(applyPendingSelection);
+    },
   }), []);
+
+  useEffect(() => { if (!message) templateActiveRef.current = false; }, [message]);
+
+  // The selection, so the mirror can brighten the blank being filled. A
+  // caret dropped inside a blank selects the whole blank, so typing
+  // replaces the hint instead of editing it.
+  const [selection, setSelection] = useState<[number, number]>([0, 0]);
+  const handleSelect = useCallback((e: { currentTarget: HTMLTextAreaElement }) => {
+    const el = e.currentTarget;
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    if (start === end && el.value.includes(SLOT_OPEN)) {
+      const inside = slotRanges(el.value).find(([a, b]) => start > a && start < b);
+      if (inside) { el.setSelectionRange(inside[0], inside[1]); return; }
+    }
+    setSelection([start, end]);
+  }, []);
+  const blankSelected = message.includes(SLOT_OPEN)
+    && slotRanges(message).some(([a, b]) => a === selection[0] && b === selection[1]);
 
   // Cycling placeholder (typewriter).
   const [currentPrompt, setCurrentPrompt] = useState('');
@@ -309,7 +374,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   // message. In the comingSoon case the placeholder slot displays a
   // static message (rendered below) instead of the cycling prompts.
   useEffect(() => {
-    const shouldPause = !!message || isSending || comingSoon;
+    const shouldPause = !!message || isSending || comingSoon || !!placeholderOverride;
     if (shouldPause) {
       paused.current = true;
       clearTimeout(timerRef.current);
@@ -319,7 +384,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       promptIdx.current++;
       cyclePlaceholder();
     }
-  }, [message, isSending, comingSoon, cyclePlaceholder]);
+  }, [message, isSending, comingSoon, placeholderOverride, cyclePlaceholder]);
 
   // Auto-grow the textarea up to ~10 lines. Tall enough to handle
   // dictated multi-sentence prompts comfortably, capped so the bar
@@ -443,13 +508,25 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       slash.select();
       return;
     }
-    const text = message.trim();
+    let text = message.trim();
+    if (templateActiveRef.current) {
+      // A reminder template with its subject still blank has nothing to
+      // say yet: select that blank instead of sending.
+      if (missingSubject(text)) {
+        const el = textareaRef.current;
+        const slot = el ? nextSlot(el.value, 0) : null;
+        if (el && slot) { el.focus(); el.setSelectionRange(slot[0], slot[1]); setSelection(slot); }
+        return;
+      }
+      text = finalizeReminderTemplate(text);
+    }
     // Allow image-only sends: when the user has staged a screenshot
     // (or several) we let Enter fire with no text — the attachment
     // is the message. Otherwise require text. Guard against double-
     // fires while a send is in flight without clearing keystrokes.
     if ((!text && !hasAttachments) || inputLocked || isSending) return;
     onSendMessage(text);
+    templateActiveRef.current = false;
     setMessage('');
     setPulse('submit');
     window.setTimeout(() => setPulse('none'), 280);
@@ -485,11 +562,35 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       handleSend();
       return;
     }
-    if (e.key === 'Tab' && currentPrompt && !message) {
+    if (e.key === 'Escape' && templateActiveRef.current) {
+      e.preventDefault();
+      setMessage('');
+      return;
+    }
+    // Template Tab: next blank (Shift: previous); with none left, a Details
+    // line for extra context; with that written, the caret goes to the end.
+    if (e.key === 'Tab' && templateActiveRef.current && message) {
+      e.preventDefault();
+      const el = e.currentTarget;
+      const text = el.value;
+      const slot = nextSlot(text, e.shiftKey ? el.selectionStart : el.selectionEnd, e.shiftKey);
+      if (slot) { el.setSelectionRange(slot[0], slot[1]); setSelection(slot); return; }
+      if (e.shiftKey) return;
+      if (!text.includes(DETAILS_LABEL)) {
+        const next = `${text.replace(/\s+$/, '')}\n${DETAILS_LINE}`;
+        setMessage(next);
+        pendingSelectionRef.current = slotRanges(next).pop() ?? [next.length, next.length];
+        window.requestAnimationFrame(applyPendingSelection);
+      } else {
+        el.setSelectionRange(text.length, text.length);
+      }
+      return;
+    }
+    if (e.key === 'Tab' && currentPrompt && !message && !placeholderOverride) {
       e.preventDefault();
       setMessage(currentPrompt);
     }
-  }, [slash, currentPrompt, message, handleSend]);
+  }, [slash, currentPrompt, message, placeholderOverride, handleSend]);
 
   const handleSlashSelect = useCallback((item: SlashItem) => {
     slash.select(item);
@@ -951,7 +1052,21 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               zIndex: 1,
             }}
           >
-            {message}
+            {message.includes(SLOT_OPEN)
+              ? templateSegments(message).map((seg) => (seg.slot ? (
+                  /* A template blank: a soft block with its hint. Background plus
+                     a same-colour spread shadow, never padding, so the block adds
+                     no width and the textarea's caret stays aligned; the angle
+                     brackets are painted transparent and read as the padding. */
+                  <span key={seg.start} style={slotBlockStyle(selection[0] < seg.end && selection[1] > seg.start)}>
+                    <span style={{ color: 'transparent' }}>{seg.text.slice(0, 1)}</span>
+                    {seg.text.slice(1, -1)}
+                    <span style={{ color: 'transparent' }}>{seg.text.slice(-1)}</span>
+                  </span>
+                ) : (
+                  <span key={seg.start}>{seg.text}</span>
+                )))
+              : message}
             {/* Tentative (unconfirmed) voice tail — dim ghost after the
                 committed text. A leading space only when we're joining two
                 non-empty, non-space-bounded pieces so words don't glue. */}
@@ -977,6 +1092,9 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             {message.endsWith('\n') ? '​' : ''}
           </div>
 
+          {/* A selected template blank shows as a brighter block in the mirror,
+              not as the native selection wash. */}
+          <style>{'.unclaw-blank-selected::selection { background: transparent; }'}</style>
           <textarea
             ref={textareaRef}
             value={message}
@@ -985,6 +1103,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               setMessage(e.target.value);
             }}
             onKeyDown={handleKeyDown}
+            onSelect={handleSelect}
+            className={blankSelected ? 'unclaw-blank-selected' : undefined}
             onPaste={handlePaste}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
@@ -1041,11 +1161,11 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
                   // Coming-soon shows static; cycling prompts honor the
                   // typewriter's visibility state so the fade between
                   // prompts still reads.
-                  opacity: comingSoon ? 1 : promptVisible ? 1 : 0,
+                  opacity: comingSoon || placeholderOverride ? 1 : promptVisible ? 1 : 0,
                   transition: 'opacity 0.4s var(--ease-out-quart)',
                 }}
               >
-                {comingSoon ? comingSoonMessage : currentPrompt}
+                {comingSoon ? comingSoonMessage : placeholderOverride ?? currentPrompt}
               </span>
             </div>
           )}

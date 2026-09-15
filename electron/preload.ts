@@ -391,6 +391,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
    *  capture that would otherwise eat the first click on the streamed
    *  <video> and prevent AppKit from raising the always-on-top window. */
   focusWindow: () => ipcRenderer.send('window:focus'),
+  /** Native notification from the main process (reminder alerts). `tag`
+   *  comes back through onNotificationClick when the user clicks it. */
+  showNotification: (opts: { title: string; body?: string; tag?: string }) =>
+    ipcRenderer.send('notify:show', opts),
+  /** Subscribe to notification clicks; returns the unsubscribe. */
+  onNotificationClick: (cb: (tag: string) => void) => {
+    const handler = (_event: unknown, tag: string) => cb(tag);
+    ipcRenderer.on('notify:click', handler);
+    return () => { ipcRenderer.removeListener('notify:click', handler); };
+  },
 
   /** Open Terminal.app and run a command. Used by SettingsPanel's
    *  Claude Code subscription card to launch `claude setup-token`

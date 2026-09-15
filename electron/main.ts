@@ -13,8 +13,7 @@ import {
   desktopCapturer,
   systemPreferences,
   Display,
-  IpcMainEvent,
-} from 'electron';
+  IpcMainEvent, Notification } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { spawnSync } from 'child_process';
@@ -607,7 +606,7 @@ function createWindow() {
       ? (e.level === 'warning' || e.level === 'error')
       : (legacyLevel ?? 0) >= 2;
     if (message.includes('[direct-canvas]') || message.includes('[ps]')
-        || message.includes('[rtc-gpu]') || warn) {
+        || message.includes('[rtc-gpu]') || message.includes('[reminders]') || warn) {
       console.log(`[renderer${warn ? ':warn' : ''}] ${message}`);
     }
   });
@@ -815,6 +814,45 @@ ipcMain.handle('terminal:open-with-command', async (_event, command: string) => 
       },
     );
   });
+});
+
+// Reminder notifications (renderer hooks/useReminderAlerts). Sent from here
+// rather than the renderer's web Notification: the session permission
+// handler grants media only, and a native one is the proper macOS banner
+// under the app's name. A click brings the window up and tells the
+// renderer which reminder it was (the tag). Live notifications are held so
+// their click handlers are not collected before the user gets to them.
+const liveNotifications = new Set<Notification>();
+ipcMain.on('notify:show', (_event, payload: { title?: unknown; body?: unknown; tag?: unknown }) => {
+  if (!Notification.isSupported()) return;
+  const title = String(payload?.title ?? '').slice(0, 120) || 'Reminder';
+  const body = String(payload?.body ?? '').slice(0, 240);
+  const tag = String(payload?.tag ?? '');
+  const n = new Notification({ title, body });
+  liveNotifications.add(n);
+  while (liveNotifications.size > 20) {
+    const oldest = liveNotifications.values().next().value;
+    if (!oldest) break;
+    liveNotifications.delete(oldest);
+  }
+  const release = () => { liveNotifications.delete(n); };
+  n.on('click', () => {
+    release();
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    try { app.focus({ steal: true }); } catch { /* not critical */ }
+    mainWindow.focus();
+    mainWindow.webContents.send('notify:click', tag);
+  });
+  n.on('close', release);
+  // macOS reports 'show' only when it actually presented the banner; an
+  // unsigned or ad-hoc build (dev Electron) or a denied permission gets no
+  // 'show', so the log says which happened.
+  n.on('show', () => console.log(`[notify] shown: ${title}`));
+  n.on('failed', (_e, error) => console.warn(`[notify] failed: ${title}: ${error}`));
+  n.show();
+  console.log(`[notify] ${title}${body ? ` (${body})` : ''}`);
 });
 
 ipcMain.on('window:focus', () => {

@@ -23,6 +23,9 @@
 // list reorders by dragging (framer Reorder, transform only), hidden
 // widgets return through "+ Weather" rows, and Done leaves. The layout
 // persists per install (services/glanceLayout).
+//
+// The stock watchlist and the weather places are edited inside their
+// expanded glances and saved with the account (user settings `glance`).
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { motion, AnimatePresence, LayoutGroup, Reorder, useDragControls, useReducedMotion } from 'framer-motion';
@@ -30,6 +33,8 @@ import { Plus, SlidersHorizontal, Check } from 'lucide-react';
 
 import type { SheetKey } from '../../hooks/useSheet';
 import type { Reminder } from '../../services/reminders';
+import type { NewsArticle } from '../../services/news';
+import { readGlancePrefs, type GlancePrefs } from '../../services/userSettings';
 import {
   ALL_GLANCES, GLANCE_LABELS, hiddenGlances, loadGlanceLayout, saveGlanceLayout,
   type GlanceKey, type GlanceLayout,
@@ -62,10 +67,19 @@ interface Props {
   /** Fade the column out (chat pane open: the stream half is too narrow
    *  for it to stay off the face). State is kept, nothing remounts. */
   faded?: boolean;
+  /** The account's saved glance lists (user settings `glance`). */
+  glance?: GlancePrefs | null;
+  /** The watchlist or the places changed; the owner saves it. */
+  onGlanceChange?: (next: GlancePrefs) => void;
+  /** Summarize under a news headline: stage the article in the input bar. */
+  onSummarizeArticle?: (article: NewsArticle) => void;
+  /** Reminders +: start a reminder in the input bar (on a picked day). */
+  onAddReminder?: (day?: string) => void;
 }
 
 export function GlanceColumn({
   top, reminders, onCompleteReminder, onRemindersChanged, activeWidget, onOpen, onClose, refreshKey, faded = false,
+  glance, onGlanceChange, onSummarizeArticle, onAddReminder,
 }: Props) {
   const reduce = useReducedMotion() ?? false;
   const [now, setNow] = useState(() => new Date());
@@ -114,6 +128,7 @@ export function GlanceColumn({
   const add = (key: GlanceKey) => updateLayout({ order: [...layout.order, key] });
 
   const noop = useCallback(() => {}, []);
+  const prefs = useMemo(() => readGlancePrefs(glance), [glance]);
   const sectionProps = (key: GlanceKey) => ({
     open: expanded === key,
     onOpen: () => onOpen(key),
@@ -127,10 +142,26 @@ export function GlanceColumn({
     const p = { ...sectionProps(key), ...extra };
     switch (key) {
       case 'reminders':
-        return <RemindersGlance reminders={reminders ?? []} now={now} onComplete={onCompleteReminder} onChanged={onRemindersChanged} {...p} />;
-      case 'weather': return <WeatherGlance refreshKey={refreshKey} {...p} />;
-      case 'stocks': return <StocksGlance refreshKey={refreshKey} {...p} />;
-      case 'news': return <NewsGlance refreshKey={refreshKey} {...p} />;
+        return <RemindersGlance reminders={reminders ?? []} now={now} onComplete={onCompleteReminder} onChanged={onRemindersChanged} onAdd={onAddReminder} {...p} />;
+      case 'weather':
+        return (
+          <WeatherGlance
+            refreshKey={refreshKey}
+            places={prefs.places ?? null}
+            onPlacesChange={onGlanceChange ? (places) => onGlanceChange({ ...prefs, places }) : undefined}
+            {...p}
+          />
+        );
+      case 'stocks':
+        return (
+          <StocksGlance
+            refreshKey={refreshKey}
+            symbols={prefs.stocks ?? null}
+            onSymbolsChange={onGlanceChange ? (stocks) => onGlanceChange({ ...prefs, stocks }) : undefined}
+            {...p}
+          />
+        );
+      case 'news': return <NewsGlance refreshKey={refreshKey} onSummarize={onSummarizeArticle} {...p} />;
     }
   };
 
