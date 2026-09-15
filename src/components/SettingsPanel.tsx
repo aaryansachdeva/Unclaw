@@ -31,6 +31,7 @@ import {
   thinkingCapabilityFor,
   thinkingOptionsFor,
   normalizeThinkingValue,
+  isAgentReadyLocalModel,
   type ApiKeysProfile,
   type GraphicsQuality,
   type KeyValidationOutcome,
@@ -41,6 +42,7 @@ import {
   type TtsProviderId,
 } from '../services/apiKeys';
 import { Dropdown } from './Onboarding/Dropdown';
+import { fetchOllamaModels, type SoulProviderModel } from '../services/providers';
 import { POCKET_TTS_ENABLED, CHATTERBOX_TTS_ENABLED } from '../features';
 import { usePassthroughPrefs } from '../hooks/usePassthroughPrefs';
 import { Slider } from './Onboarding/Slider';
@@ -93,8 +95,7 @@ type FacetId = 'profile' | 'chat' | 'voice' | 'agentic' | 'graphics' | 'about';
 // that one goes through `setProvider()` which calls `setValidation`
 // directly so it doesn't need to be here.
 const VALIDATION_INVALIDATING_FIELDS = new Set<keyof ApiKeysProfile>([
-  'llm_api_key', 'agentic_api_key',
-  'agentic_provider',
+  'llm_api_key',
   'elevenlabs_api_key', 'tts_provider',
   'gemini_search_api_key',
   'kokoro_endpoint',
@@ -110,7 +111,7 @@ const FACETS: FacetMeta[] = [
   { id: 'profile',  label: 'Profile',  Glyph: GlyphProfile },
   { id: 'chat',     label: 'Chat',     Glyph: GlyphMind },
   { id: 'voice',    label: 'Voice',    Glyph: GlyphVoice },
-  { id: 'agentic',  label: 'Agentic',  Glyph: GlyphWill },
+  { id: 'agentic',  label: 'Tools',    Glyph: GlyphWill },
   { id: 'graphics', label: 'Graphics', Glyph: GlyphPresence },
   { id: 'about',    label: 'About',    Glyph: GlyphAbout },
 ];
@@ -289,49 +290,6 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, loading, draft.llm_provider, draft.llm_api_key]);
-
-  // Mirror of the chat-side auto-probe, for the AGENTIC provider slot.
-  // Claude Code is keyless on both sides, without this, picking it as
-  // the agentic backend leaves the status card stuck at "probing"
-  // because nothing ever fires validateKeys for it.
-  useEffect(() => {
-    if (!open || loading) return;
-    if (!draft.agentic_enabled) return;
-    const aprov = draft.agentic_provider;
-    if (!aprov || aprov === 'ollama') return;
-    const akey = (draft.agentic_api_key || '').trim();
-    if (!KEYLESS_CLI_PROVIDERS.has(aprov) && !akey) return;
-    // Already have a healthy result for this provider, don't re-probe.
-    if (validation?.agentic?.ok) return;
-    const t = setTimeout(() => {
-      setIsProbingKey(true);
-      void validateKeys(draft)
-        .then((res) => {
-          mergeThinkingCaps(res);
-          // Same pattern as the chat-side probe: when the agentic
-          // response carries a model list (claude-code returns the
-          // sonnet/opus/haiku catalog; future API providers may too),
-          // stash it under the agentic provider's slot in
-          // liveModelsByProvider so the agentic model dropdown
-          // populates from the live source rather than a hardcoded list.
-          if (aprov && res.agentic?.ok && (res.agentic as any).models?.length) {
-            setLiveModelsByProvider((prev) => ({
-              ...prev,
-              [aprov]: (res.agentic as any).models,
-            }));
-          }
-          setValidation((prev) => ({
-            ...(prev ?? { ok: false } as any),
-            ...(res.llm ? { llm: res.llm } : {}),
-            ...(res.agentic ? { agentic: res.agentic } : {}),
-          } as any));
-        })
-        .catch(() => { /* surfaced on save */ })
-        .finally(() => setIsProbingKey(false));
-    }, 600);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, loading, draft.agentic_enabled, draft.agentic_provider, draft.agentic_api_key]);
 
   const handleSave = useCallback(async () => {
     // Only validate keys when keys actually changed, a profile-only
@@ -530,7 +488,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
                       {active === 'profile'  && <ProfileFacet  {...ctx} />}
                       {active === 'chat'     && <ChatFacet     {...ctx} />}
                       {active === 'voice'    && <VoiceFacet    {...ctx} />}
-                      {active === 'agentic'  && <AgenticFacet  {...ctx} />}
+                      {active === 'agentic'  && <ToolsFacet    {...ctx} />}
                       {active === 'graphics' && <GraphicsFacet {...ctx} />}
                       {active === 'about'    && <AboutFacet    />}
                     </motion.div>
@@ -982,141 +940,61 @@ function ttsHeadline(p: TtsProviderId): string {
 // AGENTIC, escalation backend + key + model
 // =============================================================================
 
-function AgenticFacet({ draft, update, validation, isProbingKey, liveModelsByProvider, thinkingCapsByModel }: PaneContext) {
-  const backends: { id: LLMProviderId; label: string; tag: string }[] = [
-    { id: 'openai',      label: 'OpenAI',          tag: 'Responses API' },
-    { id: 'anthropic',   label: 'Anthropic',       tag: 'Messages API' },
-    { id: 'gemini',      label: 'Gemini',          tag: 'functionDeclarations' },
-    { id: 'deepseek',    label: 'DeepSeek',        tag: 'OpenAI-compat tool loop' },
-    { id: 'glm',         label: 'GLM (Zhipu)',     tag: 'OpenAI-compat tool loop' },
-    { id: 'claude-code', label: 'Claude Code CLI', tag: 'Pro/Max subscription' },
-    { id: 'gemini-cli',  label: 'Gemini CLI',      tag: 'Free tier or Pro' },
-    { id: 'codex',       label: 'Codex CLI',       tag: 'ChatGPT subscription' },
-    { id: 'ollama',      label: 'Local',           tag: 'reuses chat model' },
-  ];
-  const meta: Record<string, { url: string; keyPh: string; modelPh: string }> = {
-    openai:    { url: 'https://platform.openai.com/api-keys',         keyPh: 'sk-…',     modelPh: 'gpt-5.4-mini' },
-    anthropic: { url: 'https://console.anthropic.com/settings/keys', keyPh: 'sk-ant-…', modelPh: 'claude-opus-4-7' },
-    gemini:    { url: 'https://aistudio.google.com/apikey',          keyPh: 'AIza…',    modelPh: 'gemini-2.5-flash' },
-    deepseek:  { url: 'https://platform.deepseek.com/api_keys',     keyPh: 'sk-…',     modelPh: 'deepseek-v4-flash' },
-  };
-  const m = meta[draft.agentic_provider] ?? meta.openai;
-  const isKeylessCli = KEYLESS_CLI_PROVIDERS.has(draft.agentic_provider);
-  const isLocal = draft.agentic_provider === 'ollama';
-  const needsApiKey = !isKeylessCli && !isLocal;
+function ToolsFacet({ draft, update, thinkingCapsByModel }: PaneContext) {
+  // One model does everything (2026-09-15): the chat model runs the tool
+  // loop too. The only knowledge this facet needs is whether a LOCAL
+  // model can call tools, which soul stamps on its /providers list.
+  const isOllama = draft.llm_provider === 'ollama';
+  const [ollamaModels, setOllamaModels] = useState<SoulProviderModel[] | null>(null);
+  useEffect(() => {
+    if (!isOllama) { setOllamaModels(null); return; }
+    let cancelled = false;
+    void fetchOllamaModels().then((list) => { if (!cancelled) setOllamaModels(list); });
+    return () => { cancelled = true; };
+  }, [isOllama]);
+  const localEntry = isOllama && ollamaModels
+    ? ollamaModels.find((m) => m.id === draft.llm_model) ?? null
+    : null;
+  const canRunTools = !isOllama || !ollamaModels || isAgentReadyLocalModel(localEntry);
+  useEffect(() => {
+    if (draft.agentic_enabled && !canRunTools) update('agentic_enabled', false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canRunTools, draft.agentic_enabled]);
+
+  const modelLabel = draft.llm_model ? draft.llm_model.replace(/^[a-z-]+:/, '') : 'your model';
+  const cap = thinkingCapabilityFor(draft.llm_model, thinkingCapsByModel);
+
   return (
     <Composition
-      eyebrow="escalation for tools, search, and code"
-      title={draft.agentic_enabled ? 'Escalation on.' : 'Escalation off.'}
-      tagline={draft.agentic_enabled
-        ? 'Chat hands off to a bigger model when a question wants tools, web search, or browsing.'
-        : 'Conversational only. Every reply comes from the chat model, nothing else.'}
+      eyebrow="web, browser, files and code"
+      title={draft.agentic_enabled && canRunTools ? 'Tools on.' : 'Tools off.'}
+      tagline={!canRunTools
+        ? `${modelLabel} does not call tools, so replies stay conversational. Pick a model marked Tools to turn this on.`
+        : draft.agentic_enabled
+          ? `When a question needs the web, a browser, files or code, ${modelLabel} takes its time with tools. Quick replies stay quick.`
+          : 'Every reply is a plain conversational turn. Turn on for live web search, page reading and multi-step tasks, on the same model.'}
     >
       <Stack>
-        <Lever
-          on={draft.agentic_enabled}
-          onChange={(v) => update('agentic_enabled', v)}
-          onLabel="On"
-          offLabel="Off"
-        />
+        {canRunTools && (
+          <Lever
+            on={draft.agentic_enabled}
+            onChange={(v) => update('agentic_enabled', v)}
+            onLabel="On"
+            offLabel="Off"
+          />
+        )}
 
-        {draft.agentic_enabled && (
-          <>
-            <FieldStack label="Backend">
-              <BackendGrid
-                options={backends}
-                value={draft.agentic_provider}
-                onChange={(v) => update('agentic_provider', v)}
-              />
-            </FieldStack>
-
-            {needsApiKey && (
-              <>
-                <FieldStack label="Key">
-                  <SecretInput
-                    value={draft.agentic_api_key ?? ''}
-                    onChange={(v) => update('agentic_api_key', v || null)}
-                    placeholder={m.keyPh}
-                  />
-                </FieldStack>
-                <FieldStack label="Model">
-                  <input
-                    type="text"
-                    placeholder={m.modelPh}
-                    value={draft.agentic_model ?? ''}
-                    onChange={(e) => update('agentic_model', e.target.value || null)}
-                    style={NATIVE_INPUT_STYLE}
-                  />
-                </FieldStack>
-              </>
-            )}
-
-            {isKeylessCli && (() => {
-              // Same architecture as the chat facet's model dropdown:
-              // model list comes from liveModelsByProvider, populated
-              // by the agentic auto-probe when a CLI provider is
-              // selected. Single render handles all three CLIs.
-              const aprov = draft.agentic_provider;
-              const rawLive = liveModelsByProvider[aprov] ?? [];
-              const entries = rawLive.map((rawId) => ({
-                id: `${aprov}:${rawId}`,
-                label: rawId,
-              }));
-              const placeholder =
-                isProbingKey ? 'Verifying…'
-                : entries.length === 0 ? 'Sign in via Terminal first'
-                : 'Choose a model';
-              return (
-                <>
-                  <CliProviderStatusCard
-                    provider={aprov as LLMProviderId}
-                    outcome={validation?.agentic ?? validation?.llm ?? null}
-                    isProbing={isProbingKey}
-                  />
-                  <FieldStack
-                    label="Model"
-                    aside={
-                      isProbingKey
-                        ? <InlineHint><Loader2 size={10} className="animate-spin" /> verifying</InlineHint>
-                        : entries.length
-                          ? <InlineHint>{entries.length} live from CLI</InlineHint>
-                          : undefined
-                    }
-                  >
-                    <Dropdown
-                      value={draft.agentic_model ?? ''}
-                      onChange={(id) => update('agentic_model', id || null)}
-                      options={entries}
-                      placeholder={placeholder}
-                      disabled={entries.length === 0}
-                    />
-                  </FieldStack>
-                </>
-              );
-            })()}
-
-            {/* Agentic thinking lever, capability-gated by the effective
-                agentic model (chat model when reusing local, else the
-                agentic model). Caps from soul's _thinking resolver. */}
-            {(() => {
-              const agModel = draft.agentic_provider === 'ollama'
-                ? draft.llm_model : draft.agentic_model;
-              const cap = thinkingCapabilityFor(agModel, thinkingCapsByModel);
-              if (!cap) return null;
-              return (
-                <FieldStack
-                  label="Thinking"
-                  aside={<InlineHint>reasoning depth</InlineHint>}
-                >
-                  <Dropdown
-                    value={normalizeThinkingValue(cap, draft.agentic_thinking_effort)}
-                    onChange={(v) => update('agentic_thinking_effort', (v as ThinkingEffort) || 'medium')}
-                    options={thinkingOptionsFor(cap)}
-                  />
-                </FieldStack>
-              );
-            })()}
-          </>
+        {draft.agentic_enabled && canRunTools && cap && (
+          <FieldStack
+            label="Thinking on tasks"
+            aside={<InlineHint>reasoning depth</InlineHint>}
+          >
+            <Dropdown
+              value={normalizeThinkingValue(cap, draft.agentic_thinking_effort)}
+              onChange={(v) => update('agentic_thinking_effort', (v as ThinkingEffort) || 'medium')}
+              options={thinkingOptionsFor(cap)}
+            />
+          </FieldStack>
         )}
       </Stack>
     </Composition>
@@ -1764,7 +1642,7 @@ function SecretInput({
 }
 
 // =============================================================================
-// Will-facet specific: Lever + BackendGrid
+// Will-facet specific: Lever
 // =============================================================================
 
 function Lever({
@@ -1782,7 +1660,7 @@ function Lever({
   return (
     <div
       role="group"
-      aria-label="Escalation"
+      aria-label="Tools"
       style={{
         display: 'inline-flex',
         padding: 3,
@@ -1830,71 +1708,6 @@ function LeverHalf({
     >
       {children}
     </button>
-  );
-}
-
-function BackendGrid({
-  options, value, onChange,
-}: {
-  options: { id: LLMProviderId; label: string; tag: string }[];
-  value: LLMProviderId;
-  onChange: (v: LLMProviderId) => void;
-}) {
-  return (
-    <div style={{
-      display: 'grid',
-      gridTemplateColumns: 'repeat(2, 1fr)',
-      gap: 8,
-    }}>
-      {options.map((opt) => {
-        const isActive = value === opt.id;
-        return (
-          <button
-            key={opt.id}
-            type="button"
-            onClick={() => onChange(opt.id)}
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'flex-start',
-              gap: 3,
-              padding: '11px 14px',
-              background: isActive
-                ? 'rgba(196, 68, 68, 0.12)'
-                : 'rgba(255, 255, 255, 0.025)',
-              border: `1px solid ${isActive ? 'rgba(196, 68, 68, 0.40)' : 'var(--glass-border)'}`,
-              borderRadius: 10,
-              color: 'var(--text-primary)',
-              fontFamily: 'inherit',
-              textAlign: 'left',
-              cursor: 'pointer',
-              transition: 'background var(--duration-fast) var(--ease-out-quart), border-color var(--duration-fast) var(--ease-out-quart)',
-            }}
-            onMouseEnter={(e) => {
-              if (isActive) return;
-              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
-              e.currentTarget.style.borderColor = 'var(--glass-border-focus)';
-            }}
-            onMouseLeave={(e) => {
-              if (isActive) return;
-              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.025)';
-              e.currentTarget.style.borderColor = 'var(--glass-border)';
-            }}
-          >
-            <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '-0.005em' }}>
-              {opt.label}
-            </span>
-            <span style={{
-              fontSize: 10.5,
-              color: 'var(--text-secondary)',
-              letterSpacing: '0.005em',
-            }}>
-              {opt.tag}
-            </span>
-          </button>
-        );
-      })}
-    </div>
   );
 }
 

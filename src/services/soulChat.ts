@@ -174,20 +174,9 @@ export async function chatViaSoul(
       const voice = resolveVoiceId(keys, opts.voices);
       if (voice) body.voice_id = voice;
     }
-    // Agentic / escalation BYOK. Soul reads these on /chat and routes
-    // to either _run_escalation (cloud) or _run_escalation_local based
-    // on agentic_provider. The local path uses the chat-tier Ollama
-    // model for both chat AND agentic, so agentic_model / agentic_api_key
-    // are unused there — we omit them to keep wire payloads small.
+    // Tools on/off. One model does both tiers: soul derives the agent
+    // route from llm_model / llm_api_key, nothing else to send.
     body.agentic_enabled = keys.agentic_enabled;
-    body.agentic_provider = keys.agentic_provider;
-    if (keys.agentic_enabled && keys.agentic_provider !== 'ollama') {
-      const reuseChat = keys.agentic_use_same_as_chat
-        && keys.llm_provider === 'openai'
-        && !!keys.llm_api_key;
-      body.agentic_model = reuseChat ? keys.llm_model : keys.agentic_model;
-      body.agentic_api_key = reuseChat ? keys.llm_api_key : keys.agentic_api_key;
-    }
     // Per-tier thinking effort. Soul translates per-family — gpt-oss
     // takes level strings natively, Qwen 3.x takes bool, Gemma 4 takes
     // a system-prompt token, Llama families omit. Sending both fields
@@ -492,14 +481,6 @@ export async function* streamChatViaSoul(
     // these on the streaming endpoint too so escalation kicked off
     // mid-stream uses the wizard's backend pick.
     body.agentic_enabled = keys.agentic_enabled;
-    body.agentic_provider = keys.agentic_provider;
-    if (keys.agentic_enabled && keys.agentic_provider !== 'ollama') {
-      const reuseChat = keys.agentic_use_same_as_chat
-        && keys.llm_provider === 'openai'
-        && !!keys.llm_api_key;
-      body.agentic_model = reuseChat ? keys.llm_model : keys.agentic_model;
-      body.agentic_api_key = reuseChat ? keys.llm_api_key : keys.agentic_api_key;
-    }
     // Per-tier thinking effort — same as chatViaSoul.
     body.chat_thinking_effort = keys.chat_thinking_effort;
     body.agentic_thinking_effort = keys.agentic_thinking_effort;

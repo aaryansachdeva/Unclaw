@@ -572,6 +572,9 @@ function spawnSoul(window: BrowserWindow): boolean {
   // keys. byok.py prefers SOUL_BYOK_KEYS_FILE over its Keychain fallback.
   writeSoulKeysBridge();
   childEnv.SOUL_BYOK_KEYS_FILE = soulKeysBridgePath();
+  // soul watches this pid and shuts itself down (UE included) if we die
+  // without stopping it; an orphan with a dead stdout pipe used to 500.
+  childEnv.SOUL_PARENT_PID = String(process.pid);
 
   // Packaged-install env. The setup wizard provisions
   //   <userData>/runtime/{python-env, assets, unreal, data}/
