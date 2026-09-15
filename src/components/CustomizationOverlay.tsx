@@ -107,6 +107,19 @@ export const HAIR_COLORS: Array<{
   { label: 'Teal',     hex: '#4e9a94', melanin: 0.20, redness: 0.00, dyeHex: '#4e9a94' },
 ];
 
+/** The natural HAIR_COLORS preset whose levers equal `params`, or undefined
+ *  when none does. The photo pipeline resolves colour names to these same
+ *  values in the main process (it cannot import this table), and this maps
+ *  them back so the detected colour lights its swatch instead of arriving as
+ *  an anonymous pair. Grey and white from the read have no preset. */
+export function hairPresetFor(params: { melanin: number; redness: number }): number | undefined {
+  const i = HAIR_COLORS.findIndex((h) =>
+    !h.dyeHex
+    && Math.abs(h.melanin - params.melanin) < 1e-6
+    && Math.abs(h.redness - params.redness) < 1e-6);
+  return i >= 0 ? i : undefined;
+}
+
 // Eye palette. The iris is a TEXTURE swap, not a tint: the hue parameters are
 // inert while the eye renders from its baked map, and the one live colour
 // parameter (Iris Color Multiply) can only darken. So each entry names a baked

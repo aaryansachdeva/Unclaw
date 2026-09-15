@@ -25,9 +25,10 @@ import {
   useReducedMotion,
 } from 'framer-motion';
 import {
-  Plus, ArrowRight, ChevronDown,
+  Plus, ArrowRight, ChevronDown, Check,
   PanelRightOpen, PanelRightClose,
   Volume2, VolumeX,
+  Webcam,
 } from 'lucide-react';
 
 import { SheetKey } from '../hooks/useSheet';
@@ -110,6 +111,13 @@ interface InputBarProps {
    *  /express <emotion> slash command. */
   onExpress: (emotion: string) => void;
   voice: InputVoiceState;
+  /** Video call mode (2026-09-15). `available` is false when the chat model
+   *  cannot see images; the button then renders dimmed with an explanation
+   *  instead of hiding, so the feature stays discoverable. */
+  videoCall?: { active: boolean; available: boolean; hint?: string | null; toggle: () => void };
+  /** Why attaching is off right now (model cannot see images, still
+   *  checking...). The + button stays visible and shows this as its tooltip. */
+  attachHint?: string | null;
   /** When true, the input bar shows its voice-active visual state
    *  (accent border + halo) and disables manual editing of the
    *  textarea. The textarea content is driven imperatively by
@@ -124,7 +132,7 @@ interface InputBarProps {
   tentative?: string;
   /** Persona switcher — the roster as a dropdown list, plus a + button to add.
    *  `agents` is every roster instance in carousel order. */
-  agents: Array<{ id: string; name: string }>;
+  agents: Array<{ id: string; name: string; portrait?: string }>;
   /** Currently selected roster instance id (or the Add slot). */
   selectedAgentId: string;
   /** Switch to a roster instance by id (dropdown pick). */
@@ -199,6 +207,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onOpenOnboarding,
   onExpress,
   voice,
+  videoCall,
+  attachHint,
   voiceActive = false,
   tentative = '',
   agents,
@@ -1051,7 +1061,9 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             gap: 8,
           }}
         >
-          {/* Agent switcher — dropdown list of the roster + a + button to add */}
+          {/* Left group, "who and where": the agent chip (its menu carries
+              Add character as the last row) and the chat-history toggle for
+              that conversation. */}
           <AgentSwitcher
             personaName={personaName}
             agents={agents}
@@ -1061,16 +1073,54 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             disabled={personaDisabled}
             reduce={reduce}
           />
+          {onToggleChatPane && (
+            <button
+              type="button"
+              onClick={onToggleChatPane}
+              aria-label={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
+              aria-pressed={chatPaneOpen}
+              title={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
+              style={{
+                flexShrink: 0,
+                width: 32,
+                height: 32,
+                borderRadius: 8,
+                background: chatPaneOpen ? 'var(--glass-bg-hover)' : 'transparent',
+                border: 'none',
+                color: chatPaneOpen ? 'var(--text-primary)' : 'var(--text-secondary)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                transition: 'all 0.15s var(--ease-out-quart)',
+              }}
+              onMouseEnter={(e) => {
+                if (chatPaneOpen) return;
+                e.currentTarget.style.background = 'var(--glass-bg-hover)';
+                e.currentTarget.style.color = 'var(--text-primary)';
+              }}
+              onMouseLeave={(e) => {
+                if (chatPaneOpen) return;
+                e.currentTarget.style.background = 'transparent';
+                e.currentTarget.style.color = 'var(--text-secondary)';
+              }}
+            >
+              {chatPaneOpen ? (
+                <PanelRightClose size={18} strokeWidth={2} />
+              ) : (
+                <PanelRightOpen size={18} strokeWidth={2} />
+              )}
+            </button>
+          )}
 
           {/* Spacer */}
           <div style={{ flex: 1 }} />
 
-          {/* Right action cluster: chat-pane toggle, then + image-attach
-              (when the chat model supports vision), then mic/send. Reads
-              as one unit: [chat-pane][+ attach][mic / send]. The chat-pane
-              + the + are wrapped in their own sub-flex with a tight 2px
-              gap so they read as a paired control, while the outer row
-              gap (8px) still spaces them away from the mic/send slot. */}
+          {/* Right group, "compose": + attach, video call, then the mic/send
+              circle. Attach and video sit in their own sub-flex with a tight
+              2px gap so they read as a pair; the outer 8px gap holds them off
+              the white circle, which stays the only filled control. */}
           <div
             style={{
               display: 'inline-flex',
@@ -1079,59 +1129,29 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               flexShrink: 0,
             }}
           >
-            {onToggleChatPane && (
-              <button
-                type="button"
-                onClick={onToggleChatPane}
-                aria-label={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
-                aria-pressed={chatPaneOpen}
-                title={chatPaneOpen ? 'Close chat history' : 'Open chat history'}
-                style={{
-                  flexShrink: 0,
-                  width: 32,
-                  height: 32,
-                  borderRadius: 8,
-                  background: chatPaneOpen ? 'var(--glass-bg-hover)' : 'transparent',
-                  border: 'none',
-                  color: chatPaneOpen ? 'var(--text-primary)' : 'var(--text-secondary)',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: 'pointer',
-                  fontFamily: 'inherit',
-                  transition: 'all 0.15s var(--ease-out-quart)',
-                }}
-                onMouseEnter={(e) => {
-                  if (chatPaneOpen) return;
-                  e.currentTarget.style.background = 'var(--glass-bg-hover)';
-                  e.currentTarget.style.color = 'var(--text-primary)';
-                }}
-                onMouseLeave={(e) => {
-                  if (chatPaneOpen) return;
-                  e.currentTarget.style.background = 'transparent';
-                  e.currentTarget.style.color = 'var(--text-secondary)';
-                }}
-              >
-                {chatPaneOpen ? (
-                  <PanelRightClose size={18} strokeWidth={2} />
-                ) : (
-                  <PanelRightOpen size={18} strokeWidth={2} />
-                )}
-              </button>
-            )}
 
-            {canAttachImages && (
-              <>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  style={{ display: 'none' }}
-                  onChange={handleFileChange}
-                />
-                <PlusButton onClick={handlePickFiles} disabled={inputLocked} />
-              </>
+            {/* Always rendered: when the model cannot take images the button is
+                disabled with the reason in its tooltip, never hidden. */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              style={{ display: 'none' }}
+              onChange={handleFileChange}
+            />
+            <PlusButton
+              onClick={handlePickFiles}
+              disabled={inputLocked || !canAttachImages}
+              title={!canAttachImages && attachHint ? `Attach image (${attachHint})` : 'Attach image'}
+            />
+            {videoCall && (
+              <VideoCallButton
+                active={videoCall.active}
+                available={videoCall.available}
+                hint={videoCall.hint ?? null}
+                onToggle={videoCall.toggle}
+              />
             )}
           </div>
 
@@ -1204,15 +1224,41 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   );
 });
 
+// 22px portrait for a roster row. Preset characters ship a PNG; custom
+// ones (or a missing asset) fall back to the initial on the glass tint,
+// so every row keeps the same left rhythm.
+function AgentFace({ name, portrait }: { name: string; portrait?: string }) {
+  const initial = (name.trim()[0] ?? '?').toUpperCase();
+  return (
+    <span
+      aria-hidden
+      style={{
+        width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+        overflow: 'hidden',
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        background: 'rgba(255,255,255,0.08)',
+        border: '1px solid rgba(255,255,255,0.10)',
+        fontSize: 10.5, fontWeight: 600, letterSpacing: '0.02em',
+        color: 'var(--text-secondary)',
+      }}
+    >
+      {portrait
+        ? <img src={portrait} alt="" draggable={false} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+        : initial}
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------
-// Agent switcher — the roster as a dropdown list + a + button (row 2)
+// Agent switcher — the roster as a dropdown list; Add character is its
+// last row (row 2). Portraits come from src/assets/agents.
 // ---------------------------------------------------------------------
 
 function AgentSwitcher({
   personaName, agents, selectedAgentId, onSelect, onAdd, disabled, reduce,
 }: {
   personaName: string;
-  agents: Array<{ id: string; name: string }>;
+  agents: Array<{ id: string; name: string; portrait?: string }>;
   selectedAgentId: string;
   onSelect: (id: string) => void;
   onAdd?: () => void;
@@ -1235,7 +1281,7 @@ function AgentSwitcher({
     setMenuPos({
       left: r.left,
       bottom: window.innerHeight - r.top + 8,
-      minWidth: Math.max(176, r.width),
+      minWidth: Math.max(208, r.width),
     });
   }, []);
 
@@ -1276,7 +1322,6 @@ function AgentSwitcher({
         position: 'relative',
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 4,
         flexShrink: 0,
         opacity: disabled ? 0.4 : 1,
         transition: 'opacity 0.25s var(--ease-out-quart)',
@@ -1329,31 +1374,6 @@ function AgentSwitcher({
         />
       </button>
 
-      {/* + add a new agent */}
-      {onAdd && (
-        <motion.button
-          type="button"
-          whileHover={disabled ? undefined : { scale: 1.08 }}
-          whileTap={disabled ? undefined : { scale: 0.92 }}
-          onClick={() => { if (!disabled) { setOpen(false); onAdd(); } }}
-          disabled={disabled}
-          aria-label="Add a new agent"
-          title="Add a new agent"
-          style={{
-            width: 24, height: 24, borderRadius: 7,
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            background: 'transparent', border: 'none',
-            color: 'var(--text-secondary)',
-            cursor: disabled ? 'not-allowed' : 'pointer',
-            flexShrink: 0,
-            transition: 'background 150ms var(--ease-out-quart), color 150ms var(--ease-out-quart)',
-          }}
-          onMouseEnter={(e) => { if (disabled) return; e.currentTarget.style.background = 'var(--glass-bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
-        >
-          <Plus size={15} strokeWidth={2.75} />
-        </motion.button>
-      )}
 
       {/* Roster list — portaled to <body> so it escapes the InputBar's
           `overflow: hidden` glass capsule (which otherwise clips it to inside
@@ -1395,8 +1415,8 @@ function AgentSwitcher({
                     onClick={() => pick(a.id)}
                     style={{
                       width: '100%', textAlign: 'left',
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '7px 9px', borderRadius: 8,
+                      display: 'flex', alignItems: 'center', gap: 9,
+                      padding: '6px 8px 6px 6px', borderRadius: 8,
                       fontSize: 13, fontWeight: active ? 600 : 500,
                       letterSpacing: '0.01em',
                       color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
@@ -1407,33 +1427,48 @@ function AgentSwitcher({
                     onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; }}
                     onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
                   >
-                    {/* Presence dot. TODO: wire to real per-agent activity;
-                        for now every agent reads "idle" (there's no live
-                        task-status signal yet), so a hollow ring always. */}
-                    <span
-                      aria-hidden
-                      style={{
-                        width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-                        background: 'transparent',
-                        border: '1.5px solid rgba(255,255,255,0.22)',
-                        transition: 'all 150ms var(--ease-out-quart)',
-                      }}
-                    />
+                    <AgentFace name={a.name} portrait={a.portrait} />
                     <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {a.name}
                     </span>
-                    <span style={{
-                      flexShrink: 0,
-                      fontSize: 9.5, fontWeight: 600, letterSpacing: '0.06em',
-                      textTransform: 'uppercase',
-                      color: 'var(--text-ghost)',
-                    }}>
-                      Idle
-                    </span>
+                    {active && (
+                      <Check size={14} strokeWidth={2.5} style={{ flexShrink: 0, opacity: 0.9 }} aria-hidden />
+                    )}
                   </button>
                 </li>
               );
             })}
+            {onAdd && (
+              <li role="none" style={{ marginTop: 4, paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+                <button
+                  type="button"
+                  onClick={() => { setOpen(false); onAdd(); }}
+                  style={{
+                    width: '100%', textAlign: 'left',
+                    display: 'flex', alignItems: 'center', gap: 9,
+                    padding: '6px 8px 6px 6px', borderRadius: 8,
+                    fontSize: 13, fontWeight: 500, letterSpacing: '0.01em',
+                    color: 'var(--text-secondary)',
+                    background: 'transparent', border: 'none', cursor: 'pointer',
+                    transition: 'background 120ms var(--ease-out-quart), color 120ms var(--ease-out-quart)',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+                >
+                  <span
+                    aria-hidden
+                    style={{
+                      width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      border: '1px dashed rgba(255,255,255,0.28)',
+                    }}
+                  >
+                    <Plus size={12} strokeWidth={2.5} />
+                  </span>
+                  <span>Add character</span>
+                </button>
+              </li>
+            )}
           </motion.ul>
         )}
         </AnimatePresence>,
@@ -1450,9 +1485,11 @@ function AgentSwitcher({
 function PlusButton({
   onClick,
   disabled = false,
+  title = 'Attach image',
 }: {
   onClick?: () => void;
   disabled?: boolean;
+  title?: string;
 }) {
   return (
     <motion.button
@@ -1461,8 +1498,8 @@ function PlusButton({
       whileTap={disabled ? undefined : { scale: 0.92 }}
       onClick={onClick}
       disabled={disabled}
-      aria-label="Attach image"
-      title="Attach image"
+      aria-label={title}
+      title={title}
       style={{
         flexShrink: 0,
         width: 32,
@@ -1491,6 +1528,89 @@ function PlusButton({
     >
       <Plus size={18} strokeWidth={2} />
     </motion.button>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Video call button (webcam glyph, same at rest and live; the ember dot and
+// the pressed background carry the state). Sits between the + attach button and the voice/send
+// slot: same 32px ghost square as the chat-pane toggle so the cluster reads
+// as one family, with the voice circle still the only white element. Active
+// state borrows the toggle's pressed look plus a 6px ember dot on the icon,
+// the one place the accent is allowed here: a live camera is a moment of
+// attention. Unavailable (chat model has no vision) stays visible at 40%
+// with the reason in the tooltip.
+// -----------------------------------------------------------------------------
+
+function VideoCallButton({
+  active,
+  available,
+  hint,
+  onToggle,
+}: {
+  active: boolean;
+  available: boolean;
+  hint?: string | null;
+  onToggle: () => void;
+}) {
+  const label = !available
+    ? `Video call (${hint ?? 'your chat model does not accept images'})`
+    : active
+      ? 'End video call'
+      : 'Start video call';
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      disabled={!available}
+      aria-label={label}
+      aria-pressed={active}
+      title={label}
+      style={{
+        position: 'relative',
+        flexShrink: 0,
+        width: 32,
+        height: 32,
+        borderRadius: 8,
+        background: active ? 'var(--glass-bg-hover)' : 'transparent',
+        border: 'none',
+        color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+        opacity: available ? 1 : 0.4,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: available ? 'pointer' : 'not-allowed',
+        fontFamily: 'inherit',
+        transition: 'all 0.15s var(--ease-out-quart)',
+      }}
+      onMouseEnter={(e) => {
+        if (active || !available) return;
+        e.currentTarget.style.background = 'var(--glass-bg-hover)';
+        e.currentTarget.style.color = 'var(--text-primary)';
+      }}
+      onMouseLeave={(e) => {
+        if (active || !available) return;
+        e.currentTarget.style.background = 'transparent';
+        e.currentTarget.style.color = 'var(--text-secondary)';
+      }}
+    >
+      <Webcam size={18} strokeWidth={2} />
+      {active && (
+        <span
+          aria-hidden
+          style={{
+            position: 'absolute',
+            top: 6,
+            right: 6,
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            background: 'var(--accent)',
+            boxShadow: '0 0 0 2px rgba(40, 48, 65, 0.9)',
+          }}
+        />
+      )}
+    </button>
   );
 }
 

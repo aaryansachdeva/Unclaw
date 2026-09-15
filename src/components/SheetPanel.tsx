@@ -39,25 +39,24 @@ interface SheetPanelProps {
    *  icon button in the dock). The map is keyed by sheet name; when
    *  null the close just blurs without restoring focus. */
   triggerRefs?: Partial<Record<SheetKey, React.RefObject<HTMLElement | null>>>;
+  /** Top (px, in the stage's box) of each glance in the left column; the
+   *  sheet for `activeKey` opens there. */
+  anchors?: Partial<Record<SheetKey, number>>;
   /** The active sheet's body. App owns the rendering decision. */
   children: ReactNode;
 }
 
-// Vertical offset (px) from the rail's center to each icon's center.
-// Rail icon: 38px tall, 4px gap → 42px stride. With 5 icons, the rail
-// center sits on the middle icon (News). Formula: (i - 2) * 42.
-const ICON_OFFSET: Record<SheetKey, number> = {
-  reminders: -84,
-  stocks:    -42,
-  news:        0,
-  weather:    42,
-  wardrobe:   84,
-};
+// Every sheet opens in place of its glance in the left column
+// (2026-09-15): top-aligned at the glance's measured position (App gets
+// it from GlanceColumn), left-aligned with the column.
+const SHEET_LEFT = 22;
+const SHEET_WIDTH = 360;
 
 export function SheetPanel({
   activeKey,
   onClose,
   triggerRefs,
+  anchors,
   children,
 }: SheetPanelProps) {
   const sheetRef = useRef<HTMLDivElement | null>(null);
@@ -119,6 +118,7 @@ export function SheetPanel({
   }, [activeKey, onClose]);
 
   const titleId = activeKey ? `sheet-title-${activeKey}` : undefined;
+  const anchorTop = activeKey ? anchors?.[activeKey] : undefined;
 
   return (
     // `mode="wait"` so when the user switches widgets, the old panel
@@ -137,28 +137,18 @@ export function SheetPanel({
           // intent — we keep the panel vertically centered on the
           // active icon by using `y: '-50%'` as the resting state and
           // animating only `x` + opacity for entry/exit.
-          initial={reduce
-            ? { x: 0, y: '-50%', opacity: 1 }
-            : { x: -16, y: '-50%', opacity: 0 }}
-          animate={{ x: 0, y: '-50%', opacity: 1 }}
-          exit={reduce
-            ? { y: '-50%', opacity: 0 }
-            : { x: -16, y: '-50%', opacity: 0 }}
+          initial={reduce ? { y: 0, opacity: 1 } : { y: -6, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={reduce ? { opacity: 0 } : { y: -6, opacity: 0 }}
           transition={reduce
             ? { duration: 0 }
             : { type: 'spring', stiffness: 320, damping: 34, mass: 0.8 }}
           style={{
-            // Vertically centered on the active rail icon — `top: 50%`
-            // sits at the rail's midpoint; the offset shifts up/down
-            // to land at the specific icon's center. The framer-motion
-            // `y: '-50%'` (above) pulls the panel up by half its own
-            // height, so the active icon is at the panel's vertical
-            // middle.
             position: 'absolute',
-            top: `calc(50% + ${ICON_OFFSET[activeKey]}px)`,
-            left: 70,
-            width: 300,
-            maxHeight: 'min(440px, calc(100% - 200px))',
+            top: anchorTop ?? 220,
+            left: SHEET_LEFT,
+            width: SHEET_WIDTH,
+            maxHeight: `min(440px, calc(100% - ${(anchorTop ?? 220) + 60}px))`,
             zIndex: 35,
             display: 'flex',
             flexDirection: 'column',

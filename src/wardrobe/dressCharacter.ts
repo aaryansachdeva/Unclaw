@@ -173,14 +173,16 @@ export async function dressCharacter(
     fireAll();
   }
 
-  // GROOM CONFIRMATION RE-SEND. UE applies groom slots silently -- there is
-  // NO updateHairSuccess-style ack in the shipped BP (verified in game.log),
-  // so a dropped hair application is undetectable in-band. What IS proven to
-  // recover it every time is a later re-send of the same index (that's why a
-  // refresh always fixed the hair bug: reconcile re-dresses long after the
-  // groom system settled). So: one deferred re-send of just the groom items,
-  // after the spawn window has definitely passed. Epoch-guarded; re-applying
-  // an already-correct groom is visually idempotent.
+  // GROOM CONFIRMATION RE-SEND. Current builds DO ack each groom reload
+  // (updateHairSuccess / updateEyebrowSuccess / updateEyelashSuccess, seen live
+  // 2026-09-03; the earlier "no ack in game.log" reading predates the 07-20
+  // per-slot acks), and App.tsx colours the hair off those acks. The re-send
+  // stays for the failure this chain cannot see: a groom descriptor eaten in
+  // the spawn window never acks at all, and a later re-send of the same index
+  // is what recovered it every time (a refresh always fixed the hair bug
+  // because reconcile re-dresses long after the groom system settled). One
+  // deferred re-send of just the groom items, epoch-guarded; re-applying an
+  // already-correct groom is visually idempotent.
   const groomPayloads = payloads.filter(
     (p) => p.EventType === 'changeWardrobeItem'
       && ['hair', 'eyebrow', 'eyelash'].includes(String(p.wardrobeCategory)),

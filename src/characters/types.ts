@@ -16,6 +16,9 @@ export interface CharacterVoices {
   /** Pocket-TTS clone stem -> data/pocket/refs/<name>.wav (state cached
    *  as data/pocket/voices/<name>.safetensors on first use). */
   pocket: string;
+  /** Chatterbox-Turbo clone stem -> data/chatterbox/voices/<name>.safetensors
+   *  (encoded on first use from data/chatterbox/refs or the Pocket clip). */
+  chatterbox: string;
 }
 
 export interface CharacterProfile {

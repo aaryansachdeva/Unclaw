@@ -1,11 +1,13 @@
-// Top-left greeting — time + warm welcome + cycling quote. Sits over
-// the pixel stream with text-shadow for legibility against bright
-// frames. No chrome surface; the type carries everything.
+// Top-left greeting — time + warm welcome + cycling quote. Sits over the
+// pixel stream with text-shadow for legibility against bright frames. No
+// chrome surface; the type carries everything. Fixed at the top-left of
+// the stage; the scrollable glance column (components/glance) starts under
+// it, which is why this reports its height through onHeight.
 //
 // Quotes rotate every ~30s with a soft cross-fade. The greeting word
 // ("Good Morning / Afternoon / Evening") tracks the wall clock.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
@@ -25,14 +27,16 @@ interface GreetingProps {
   /** Display name to greet ("Aryan"). Defaults to a generic warm welcome
    *  if absent so the surface still reads correctly. */
   userName?: string;
+  /** Rendered height (px), so the glance column can start right under it. */
+  onHeight?: (h: number) => void;
 }
 
-export function Greeting({ userName = 'friend' }: GreetingProps) {
+export const GREETING_TOP = 72;
+
+export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
   const reduce = useReducedMotion() ?? false;
+  const rootRef = useRef<HTMLDivElement>(null);
   const [now, setNow] = useState(() => new Date());
-  const [quoteIdx, setQuoteIdx] = useState(() =>
-    Math.floor(Math.random() * QUOTES.length),
-  );
 
   // Tick the time every second. Re-renders every second now (we show
   // seconds in the time string), but the cost is just one cheap
@@ -41,6 +45,19 @@ export function Greeting({ userName = 'friend' }: GreetingProps) {
     const id = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(id);
   }, []);
+
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!el || !onHeight) return undefined;
+    const report = () => onHeight(el.offsetHeight);
+    report();
+    const ro = new ResizeObserver(report);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [onHeight]);
+  const [quoteIdx, setQuoteIdx] = useState(() =>
+    Math.floor(Math.random() * QUOTES.length),
+  );
 
   // Rotate quotes every 30s. Pause if the user prefers reduced motion.
   useEffect(() => {
@@ -54,21 +71,20 @@ export function Greeting({ userName = 'friend' }: GreetingProps) {
   const greetingWord = greetingFor(now);
   const timeStr = formatClock(now);
   const quote = QUOTES[quoteIdx];
-
   const dateStr = formatDate(now);
 
-  // Per-child stagger. The wrapper no longer fades as one block — the
-  // time/date row settles in first, the headline second, the quote
-  // third. Reads as a gentle "the room turns on" beat instead of
-  // everything appearing at once.
+  // Per-child stagger. The time/date row settles in first, the headline
+  // second, the quote third. Reads as a gentle "the room turns on" beat
+  // instead of everything appearing at once.
   const baseDelay = reduce ? 0 : 0.15;
   const stagger = reduce ? 0 : 0.18;
 
   return (
     <div
+      ref={rootRef}
       style={{
         position: 'absolute',
-        top: 72,
+        top: GREETING_TOP,
         left: 22,
         right: 22,
         maxWidth: 520,
@@ -79,10 +95,7 @@ export function Greeting({ userName = 'friend' }: GreetingProps) {
     >
       {/* Time + date row. Time is the lead; date sits beside it in a
           quieter tone with a hairline dot separator. Tabular numerics
-          on both so the row never reflows tick to tick. The whole
-          row uses warm-ash rather than a heavier label color so it
-          reads as ambient telemetry, not a UI element fighting the
-          headline for attention. */}
+          on both so the row never reflows tick to tick. */}
       <motion.div
         initial={reduce ? { opacity: 1 } : { opacity: 0, y: 4 }}
         animate={{ opacity: 1, y: 0 }}
@@ -163,7 +176,11 @@ export function Greeting({ userName = 'friend' }: GreetingProps) {
           delay: baseDelay + stagger * 2,
           ease: EASE_OUT_EXPO,
         }}
-        style={{ marginTop: 18 }}
+        // Reserve two quote lines plus the author line so a longer quote
+        // never changes this block's height: the glance column starts
+        // right under the greeting and would otherwise shift with every
+        // rotation.
+        style={{ marginTop: 18, minHeight: 66 }}
       >
         <AnimatePresence mode="wait">
           <motion.p

@@ -1,12 +1,9 @@
 // Soul.exe weather REST client.
 //
-// Soul now reads weather via Gemini-grounded search (replacing the old
-// WeatherAPI.com proxy), which means the user's Gemini key is required.
-// BYOK strict — we never fall back to a dev key. When the user hasn't
-// supplied a Gemini key OR hasn't enabled grounded search, the panel
-// surfaces a hint pointing them at Settings, not blank data.
+// Soul serves weather from MET Norway (free, keyless) and geocodes the
+// profile city through Open-Meteo when geolocation is unavailable. No key,
+// no gate: the widget works for every user from first run (2026-09-15).
 
-import { fetchApiKeys } from './apiKeys';
 
 import { getSoulBaseUrl } from './soulBase';
 
@@ -55,15 +52,12 @@ export interface WeatherResult {
 export interface Coords { lat: number; lon: number; }
 
 const HINT_DISABLED =
-  'Enable web search (Gemini) in Settings to fetch live weather.';
+  'Live weather could not be reached right now.';
 
 export async function getWeather(coords?: Coords): Promise<WeatherResult> {
-  // Strict BYOK: skip soul entirely when the user hasn't opted in,
-  // saving a roundtrip and a 200-with-hint response.
-  const keys = await fetchApiKeys();
-  if (!keys.grounding_search_enabled || !keys.gemini_search_api_key) {
-    return { available: false, hint: HINT_DISABLED };
-  }
+  // No key, no gate (2026-09-15): soul serves this from free public
+  // sources (MET Norway, Google News / BBC RSS, Yahoo chart data) and
+  // caches it, so the widget works for every user from first run.
 
   const qs = coords
     ? `?lat=${encodeURIComponent(coords.lat)}&lon=${encodeURIComponent(coords.lon)}`
@@ -72,7 +66,6 @@ export async function getWeather(coords?: Coords): Promise<WeatherResult> {
   try {
     res = await fetch(`${getSoulBaseUrl()}/weather${qs}`, {
       method: 'GET',
-      headers: { 'X-Gemini-Key': keys.gemini_search_api_key },
       // Bound the request so a wedged-but-listening soul can't hang the
       // widget spinner forever (chat + idle paths already do this).
       signal: AbortSignal.timeout(15000),

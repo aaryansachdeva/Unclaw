@@ -3,18 +3,14 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, Check, AlertTriangle } from 'lucide-react';
 import { Titlebar } from './components/Titlebar';
 import { StreamView } from './components/StreamView';
-import { Greeting } from './components/Greeting';
+import { Greeting, GREETING_TOP } from './components/Greeting';
+import { GlanceColumn } from './components/glance/GlanceColumn';
 import { InputBar, type InputBarHandle } from './components/InputBar';
 import { ChatPane, ChatPaneHeader } from './components/ChatPane';
 import { WidgetRail } from './components/WidgetRail';
-import { SheetPanel } from './components/SheetPanel';
-import { RemindersPanel } from './components/Reminders';
-import { StocksPanel } from './components/Stocks';
-import { NewsPanel } from './components/News';
-import { WeatherPanel } from './components/Weather';
 // Shared color/lighting constants live in CustomizationOverlay; the unified
 // customization surface itself is CustomWardrobe (drives every character now).
-import { ACCENT_COLORS, BG_COLORS, BG_GLOW_DEFAULT, LIGHT_INTENSITY_DEFAULT, CLOTHING_COLORS } from './components/CustomizationOverlay';
+import { ACCENT_COLORS, BG_COLORS, BG_GLOW_DEFAULT, LIGHT_INTENSITY_DEFAULT, CLOTHING_COLORS, hairPresetFor } from './components/CustomizationOverlay';
 import { CustomWardrobe } from './components/CustomWardrobe';
 import { IDENTITY_HOSTS } from './wardrobe/catalog';
 import { CUSTOM_CHARACTERS_ENABLED } from './features';
@@ -40,6 +36,7 @@ import {
 } from './services/soulBase';
 import { usePixelStreaming } from './hooks/usePixelStreaming';
 import { useVideoRectPublisher } from './hooks/useVideoRectPublisher';
+import { useGazeCursorPublisher } from './hooks/useGazeCursorPublisher';
 import { useChatMemory, type Turn } from './hooks/useChatMemory';
 import { fetchCloudChat, pushCloudChat, gatherLocalChat, restoreLocalChat, deleteCloudChat } from './services/chatSync';
 import { SheetKey } from './hooks/useSheet';
@@ -51,7 +48,8 @@ import { startPassthroughBridge } from './services/passthrough';
 import { usePassthroughPrefs } from './hooks/usePassthroughPrefs';
 import { pollNextEscalation } from './services/escalation';
 import { sendListeningEvent } from './services/listening';
-import { listReminders } from './services/reminders';
+import { listReminders, completeReminder, type Reminder } from './services/reminders';
+import { agentPortrait } from './assets/agents';
 import { expressFace } from './services/express';
 import { getStocks } from './services/stocks';
 import {
@@ -69,7 +67,10 @@ import {
   type AuthUser,
 } from './services/auth';
 import { resetEverything } from './services/accountReset';
-import { fetchApiKeys, modelSupportsVision } from './services/apiKeys';
+import { fetchApiKeys } from './services/apiKeys';
+import { fetchVisionCapability, type VisionCapability } from './services/visionCapability';
+import { useCameraFeed } from './hooks/useCameraFeed';
+import { VideoCallSelfView } from './components/VideoCallSelfView';
 import { Wizard } from './components/Onboarding/Wizard';
 import { voicesForInstance, characterFor } from './characters';
 import { AGENTS, GENERIC_MALE_AGENT, UNIFIED_AGENT, type Agent } from './types';
@@ -531,6 +532,11 @@ function AppMain() {
   // relative coords.
   useVideoRectPublisher(pixelStreaming, videoParentRef);
 
+  // Streams the OS cursor to UE so the character's eyes can follow the mouse
+  // while it moves (and return to the camera when it stops). Works on Mac,
+  // where UE can't see the cursor at all.
+  useGazeCursorPublisher(pixelStreaming, videoParentRef);
+
   // Wardrobe descriptor emitter, narrow wrapper around the PS emit
   // so callers don't import PS types. Each payload is timestamped to
   // match the project's existing descriptor pattern. Declared up here
@@ -632,9 +638,9 @@ function AppMain() {
   }>>([]);
   const screenshotIdRef = useRef(0);
 
-  // Active chat model, kept fresh so capability checks
-  // (modelSupportsVision in particular) drive the input bar's
-  // attach-image button visibility. Refreshed on mount, after the
+  // Active chat model, kept fresh so the image-capability answer soul
+  // gives for it (services/visionCapability) drives the input bar's
+  // attach-image and video call buttons. Refreshed on mount, after the
   // onboarding wizard closes, and whenever the Settings panel saves
   // (its onSaved below): all three places apiKeys can mutate.
   const [activeLlmModel, setActiveLlmModel] = useState<string | null>(null);
@@ -643,13 +649,21 @@ function AppMain() {
   // the vision-capable escalation model, so attachments are usable
   // even when the chat model itself is text-only.
   const [agenticEnabled, setAgenticEnabled] = useState(false);
+  // Image support is asked of the selected model itself (through soul) the
+  // moment it changes; nothing here knows which models can see. 'checking'
+  // keeps the image features disabled until the answer lands.
+  const [visionCap, setVisionCap] = useState<VisionCapability | 'checking'>('checking');
   const refreshActiveLlmModel = useCallback(async () => {
     try {
       const keys = await fetchApiKeys();
       setActiveLlmModel(keys.llm_model);
       setAgenticEnabled(!!keys.agentic_enabled);
+      setVisionCap('checking');
+      const cap = await fetchVisionCapability(keys.llm_model, keys.llm_api_key);
+      setVisionCap(cap);
     } catch (err) {
       console.warn('[apiKeys] failed to read active llm_model', err);
+      setVisionCap('unknown');
     }
   }, []);
   useEffect(() => {
@@ -659,9 +673,38 @@ function AppMain() {
   // either the chat model is vision-capable, or agentic is on (soul's
   // escalation fast-path digests the images on a vision model).
   const canAttachImages = useMemo(
-    () => modelSupportsVision(activeLlmModel) || agenticEnabled,
-    [activeLlmModel, agenticEnabled],
+    () => visionCap === 'yes' || agenticEnabled,
+    [visionCap, agenticEnabled],
   );
+  // Why the image features are off, for the buttons' tooltips. They stay
+  // visible either way; a hidden control cannot explain itself.
+  const visionHint = useMemo(() => {
+    if (visionCap === 'checking') return 'Checking whether your chat model can see images…';
+    if (visionCap === 'unknown') return 'Could not verify image support for your chat model (check the key or connection)';
+    if (visionCap === 'no') return 'Your chat model does not accept images';
+    return null;
+  }, [visionCap]);
+
+  // Video call mode (2026-09-15): camera on, self-view bottom-right, and one
+  // live frame attached to every turn so she sees the user as they talk.
+  // Gated on the CHAT model seeing images (not agentic): a frame per turn on
+  // a blind chat model would escalate every sentence to the agentic tier.
+  // Session-only, never on at boot: a camera that lights up unasked is creepy.
+  const camera = useCameraFeed();
+  const [videoCall, setVideoCall] = useState(false);
+  const videoCallRef = useRef(false);
+  videoCallRef.current = videoCall && camera.active;
+  const videoCallAvailable = visionCap === 'yes';
+  const videoCallAvailableRef = useRef(videoCallAvailable);
+  videoCallAvailableRef.current = videoCallAvailable;
+  // A video call is a call: starting it also starts continuous listening, so
+  // she hears you without a click. Remembered so ending the call only stops
+  // the listening it started, never a voice mode you had on beforehand.
+  const voiceStartedByVideoRef = useRef(false);
+  // The camera stream dropping (unplugged, taken by another app) ends the call.
+  useEffect(() => {
+    if (videoCall && !camera.active) setVideoCall(false);
+  }, [videoCall, camera.active]);
 
   // Single active widget panel, lifted up so opening one closes the
   // others. The dock and the sheet both subscribe to this state.
@@ -840,6 +883,11 @@ function AppMain() {
   // panel. The panels still own their own fetch loop for their full
   // content; this is just the lightweight count/aggregate snapshot.
   const [remindersCount, setRemindersCount] = useState(0);
+  // Open reminders, for the glance under the greeting (the bell left the
+  // rail 2026-09-15). Refetched whenever the panel reports a count change
+  // so a completed or deleted row leaves the glance immediately.
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [greetingHeight, setGreetingHeight] = useState(150);
   const [stocksDayPct, setStocksDayPct] = useState<number | null>(null);
 
   // Auth session, fetched at app start from safeStorage.
@@ -1131,6 +1179,9 @@ function AppMain() {
           || (i.id === BASE_INSTANCE_ID
             ? (profile?.agent_name ?? AGENTS[0].name)
             : (agentById[i.agentId]?.name ?? 'Grace')),
+        // Roster rows show the character's face; custom builds have none
+        // and the switcher falls back to the initial.
+        portrait: agentPortrait(i.agentId),
       })),
     [agentStack, profile?.agent_name, agentById],
   );
@@ -2231,8 +2282,21 @@ function AppMain() {
     // screenshots and hit Enter with no text. Soul fills in a generic
     // "What is shown in this screenshot?" prompt on its end.
     const trimmed = message.trim();
-    const pendingImages = attachedImages;
+    let pendingImages = attachedImages;
     if (!trimmed && pendingImages.length === 0) return;
+
+    // Video call mode: one live camera frame rides along with this turn. It
+    // never touches `attachedImages` (no chip, nothing to clear) and only
+    // counts as the "camera-only" case when the user attached nothing else,
+    // which is what lets the turn keep the streaming TTS path below.
+    let cameraFrameOnly = false;
+    if (videoCallRef.current && videoCallAvailableRef.current) {
+      const frame = await camera.captureFrame();
+      if (frame) {
+        cameraFrameOnly = pendingImages.length === 0;
+        pendingImages = [...pendingImages, { id: -1, ...frame }];
+      }
+    }
 
     // NOTE: the per-message claw is awarded on SUCCESS only, down in the chat
     // result handlers (awardClawForInteraction). Awarding here at send time
@@ -2283,12 +2347,16 @@ function AppMain() {
     // create a turn now; `add` allows an empty-content turn when it
     // carries images.
     const pendingImageB64 = pendingImages.map((img) => img.base64);
+    // The transcript keeps what the user attached, never the live camera
+    // frame: a 640 px PNG per spoken sentence would bloat chat memory and
+    // show up as a "photo you sent" in the chat pane.
+    const userImageB64 = attachedImages.map((img) => img.base64);
     if (trimmed || pendingImageB64.length > 0) {
       memory.add(
         'user',
         trimmed,
         undefined,
-        pendingImageB64.length > 0 ? pendingImageB64 : undefined,
+        userImageB64.length > 0 ? userImageB64 : undefined,
       );
     }
     const history = memory.getHistory();
@@ -2325,12 +2393,18 @@ function AppMain() {
       // utterance latch, so the avatar starts speaking on the first sentence
       // instead of waiting for the whole reply. Custom Kokoro endpoints,
       // ElevenLabs, and image-bearing turns (escalation) stay on /chat.
+      // Chatterbox (2026-09-15) streams too: its runtime emits clean
+      // per-sentence chunks like supertonic, and one-shot /chat made the
+      // user wait for the whole reply's synthesis before the first word.
       const localStreamingTts =
         (keys.tts_provider === 'kokoro' && keys.kokoro_mode === 'recommended') ||
-        keys.tts_provider === 'supertonic';
+        keys.tts_provider === 'supertonic' ||
+        keys.tts_provider === 'chatterbox';
       if (localStreamingTts) {
-        useStreaming = pendingImages.length === 0;
-        interChunkGapMs = keys.tts_provider === 'supertonic' ? 60 : 800;
+        // A lone camera frame streams too: soul's streaming endpoint hands
+        // images to the (vision-capable) chat model exactly like /chat.
+        useStreaming = pendingImages.length === 0 || cameraFrameOnly;
+        interChunkGapMs = keys.tts_provider === 'kokoro' ? 800 : 60;
       }
     } catch { /* fall through to non-streaming */ }
 
@@ -2366,6 +2440,8 @@ function AppMain() {
           systemExtension: systemExt,
           voices: personaVoices,
           history,
+          images: cameraFrameOnly ? pendingImages.map((img) => img.base64) : undefined,
+          videoCall: cameraFrameOnly,
           signal: ac.signal,
         })) {
           if (chunk._escalation_request) {
@@ -2432,6 +2508,7 @@ function AppMain() {
             voices: personaVoices,
             history,
             images: pendingImages.map((img) => img.base64),
+            videoCall: cameraFrameOnly,
           });
           dispatchChatResult(fallback);
           if (fallback.escalation?.id) {
@@ -2488,6 +2565,7 @@ function AppMain() {
         voices: personaVoices,
         history,
         images: pendingImages.map((img) => img.base64),
+        videoCall: cameraFrameOnly,
       });
 
       dispatchChatResult(result);
@@ -2512,7 +2590,7 @@ function AppMain() {
     } finally {
       setIsSending(false);
     }
-  }, [isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream, awardClawForInteraction, holdAISpeaking, releaseAISpeaking, forceReleaseAISpeaking]);
+  }, [camera.captureFrame, isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream, awardClawForInteraction, holdAISpeaking, releaseAISpeaking, forceReleaseAISpeaking]);
 
   // Slash-command animation dispatcher, hands a ready-to-go UE
   // descriptor to the dock so it can fire `/dance`, `/kiss`, `/hello`
@@ -2539,11 +2617,11 @@ function AppMain() {
   // the console where no user ever sees them. Surface them as a dismissible
   // notice above the input bar; mic-permission ones offer a jump to Settings.
   const [voiceNotice, setVoiceNotice] = useState<
-    { text: string; kind: 'mic' | 'generic' } | null
+    { text: string; kind: 'mic' | 'camera' | 'generic' } | null
   >(null);
   const voiceNoticeTimer = useRef<number | null>(null);
   const showVoiceNotice = useCallback(
-    (text: string, kind: 'mic' | 'generic') => {
+    (text: string, kind: 'mic' | 'camera' | 'generic') => {
       setVoiceNotice({ text, kind });
       if (voiceNoticeTimer.current) {
         window.clearTimeout(voiceNoticeTimer.current);
@@ -2713,6 +2791,40 @@ function AppMain() {
     void voice.toggle();
   }, [voice, showVoiceNotice]);
 
+  const handleVideoCallToggle = useCallback(async () => {
+    if (videoCall) {
+      setVideoCall(false);
+      camera.stop();
+      if (voiceStartedByVideoRef.current) {
+        voiceStartedByVideoRef.current = false;
+        if (voice.isListening) void voice.stop();
+      }
+      return;
+    }
+    try {
+      const ok = await window.electronAPI?.camera?.request?.();
+      if (ok === false) {
+        showVoiceNotice('Camera access is off, so she can’t see you.', 'camera');
+        return;
+      }
+    } catch {
+      /* non-electron / older preload: let getUserMedia decide */
+    }
+    const started = await camera.start();
+    if (!started) {
+      showVoiceNotice(camera.error ?? 'The camera could not be started.', 'camera');
+      return;
+    }
+    setVideoCall(true);
+    // Continuous audio comes on with the call (mic permission + the same
+    // start path the voice button uses), and the input bar takes its
+    // voice-active shape through `voiceActive` as a result.
+    if (!voice.isListening) {
+      voiceStartedByVideoRef.current = true;
+      await handleVoiceToggle();
+    }
+  }, [videoCall, camera, showVoiceNotice, voice, handleVoiceToggle]);
+
   // Voice started successfully → mic access is clearly fine, so retire any
   // lingering mic warning.
   useEffect(() => {
@@ -2720,6 +2832,11 @@ function AppMain() {
       setVoiceNotice((n) => (n?.kind === 'mic' ? null : n));
     }
   }, [voice.isListening]);
+  useEffect(() => {
+    if (camera.active) {
+      setVoiceNotice((n) => (n?.kind === 'camera' ? null : n));
+    }
+  }, [camera.active]);
 
   // Listening reactions (backchannel): while the user speaks, ping soul so
   // the avatar visibly attends (brow flick on start, slow nods while they
@@ -2760,11 +2877,13 @@ function AppMain() {
     void (async () => {
       const r = await listReminders();
       if (!cancelled && r.available) {
-        setRemindersCount(r.reminders.filter(x => !x.completed_at).length);
+        const open = r.reminders.filter(x => !x.completed_at);
+        setReminders(open);
+        setRemindersCount(open.length);
       }
     })();
     return () => { cancelled = true; };
-  }, [refreshKey, connectionState]);
+  }, [refreshKey, connectionState, remindersCount]);
 
   // Resume auth session on app start. Independent of stream state , 
   // the SignInScreen renders over the loading screen anyway, so the
@@ -3030,30 +3149,66 @@ function AppMain() {
   // swapping the hairstyle replaces those components and takes the colour with
   // them. Re-sent on every spawn and reconcile for the same reason the identity
   // and the environment are, since UE forgets renderer-owned state.
-  const emitAppearanceColors = useCallback((w?: WardrobeSettings | null) => {
-    if (!pixelStreaming || !w) return;
-    if (w.hairColor && (w.hairColor.melanin !== undefined || w.hairColor.redness !== undefined)) {
-      pixelStreaming.emitUIInteraction({
-        EventType: 'changeHairColor',
-        melanin: w.hairColor.melanin,
-        redness: w.hairColor.redness,
-        // Hair and brows only: real lashes stay dark whatever the hair does.
-        targets: ['hair', 'brows'],
-        Timestamp: new Date().toISOString(),
-      });
-      console.log('[appearance] changeHairColor sent', w.hairColor);
-    }
-    if (w.eyeColor?.iris) {
-      pixelStreaming.emitUIInteraction({
-        EventType: 'changeEyeColor',
-        iris: w.eyeColor.iris,
-        Timestamp: new Date().toISOString(),
-      });
-      console.log('[appearance] changeEyeColor sent', w.eyeColor.iris);
-    }
+  //
+  // The two take different routes. Hair colour races the groom: UE reloads the
+  // groom asynchronously on every changeWardrobeItem, so it goes out on the
+  // groom's own ready ack (updateHairSuccess / updateEyebrowSuccess, handled
+  // with the clothing acks below; verified live 2026-09-03, one ack per reload,
+  // each answered by changeHairColorSuccess). Eye colour is a face texture swap
+  // that only needs the face to exist, so it follows the dress chain.
+  const emitHairColor = useCallback((w?: WardrobeSettings | null) => {
+    const hc = w?.hairColor;
+    if (!pixelStreaming || !hc) return;
+    if (hc.melanin === undefined && hc.redness === undefined) return;
+    pixelStreaming.emitUIInteraction({
+      EventType: 'changeHairColor',
+      melanin: hc.melanin,
+      redness: hc.redness,
+      // Hair and brows only: real lashes stay dark whatever the hair does.
+      targets: ['hair', 'brows'],
+      Timestamp: new Date().toISOString(),
+    });
+    console.log('[appearance] changeHairColor sent', hc);
   }, [pixelStreaming]);
-  const emitAppearanceColorsRef = useRef(emitAppearanceColors);
-  emitAppearanceColorsRef.current = emitAppearanceColors;
+  const emitHairColorRef = useRef(emitHairColor);
+  emitHairColorRef.current = emitHairColor;
+
+  const emitEyeColor = useCallback((w?: WardrobeSettings | null) => {
+    const iris = w?.eyeColor?.iris;
+    if (!pixelStreaming || !iris) return;
+    pixelStreaming.emitUIInteraction({
+      EventType: 'changeEyeColor',
+      iris,
+      Timestamp: new Date().toISOString(),
+    });
+    console.log('[appearance] changeEyeColor sent', iris);
+  }, [pixelStreaming]);
+
+  const emitEyeColorRef = useRef(emitEyeColor);
+  emitEyeColorRef.current = emitEyeColor;
+
+  // GROOM-SETTLE FALLBACK. The dress chain ends with a confirmation re-send of
+  // the groom items, so a colour sent "after the chain" still arrives while UE
+  // is reloading the groom and lands on components about to be replaced. The
+  // groom ack is the real fix; this covers a Blueprint that never sends one:
+  // a single hair re-send once the groom system has surely settled, skipped
+  // when an ack already re-coloured this epoch, dropped if the character
+  // changed underneath it.
+  const APPEARANCE_RESEND_MS = 2500;
+  const appearanceResendRef = useRef<number | null>(null);
+  const groomAckEpochRef = useRef(-1);
+  const scheduleAppearanceResend = useCallback((w?: WardrobeSettings | null) => {
+    if (appearanceResendRef.current != null) window.clearTimeout(appearanceResendRef.current);
+    const epoch = dressEpochRef.current;
+    appearanceResendRef.current = window.setTimeout(() => {
+      appearanceResendRef.current = null;
+      if (dressEpochRef.current !== epoch || groomAckEpochRef.current === epoch) return;
+      console.log('[appearance] groom-settle re-send (no groom ack this epoch)');
+      emitHairColorRef.current?.(w);
+    }, APPEARANCE_RESEND_MS);
+  }, []);
+  const scheduleAppearanceResendRef = useRef(scheduleAppearanceResend);
+  scheduleAppearanceResendRef.current = scheduleAppearanceResend;
 
   // Log UE's appearance acks. The Blueprint already sends them and nothing was
   // listening, which is why "hair colour did not apply" could not be pinned to a
@@ -3444,7 +3599,8 @@ function AppMain() {
         inst?.wardrobe, inst?.agentId,
         continuesSwitch ? { scope: 'outfit', epoch: pending.epoch } : undefined,
       ).then(() => {
-        emitAppearanceColorsRef.current?.(inst?.wardrobe);
+        emitEyeColorRef.current?.(inst?.wardrobe);
+        scheduleAppearanceResendRef.current?.(inst?.wardrobe);
       });
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3459,9 +3615,12 @@ function AppMain() {
   // colour (a dynamic material instance) can only take AFTER its mesh exists, so
   // we send changeClothingColor off these signals — the moment each slot is
   // ready, coloured from the selected instance's saved pair. No-op when the slot
-  // has no saved colour (keeps the mesh default). hair/eyelash/eyebrow are
-  // grooms with no clothing colour. Live edits during customization colour
-  // directly (the character is already on-screen), so they don't need this.
+  // has no saved colour (keeps the mesh default). The hair and eyebrow grooms
+  // ride the same signal with the HAIR colour: their dynamic material instances
+  // only exist once the async groom load completes, which is exactly what
+  // updateHairSuccess / updateEyebrowSuccess report. Live edits during
+  // customization colour directly (the character is already on-screen), so
+  // they don't need this.
   useEffect(() => {
     if (!pixelStreaming) return;
     const CAT_FOR: Record<string, 'top' | 'bottom' | 'shoes'> = {
@@ -3472,9 +3631,15 @@ function AppMain() {
       try { parsed = JSON.parse(raw); } catch { return; }
       const et = (parsed as { EventType?: unknown })?.EventType;
       if (typeof et !== 'string') return;
+      const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current);
+      if (et === 'updateHairSuccess' || et === 'updateEyebrowSuccess') {
+        groomAckEpochRef.current = dressEpochRef.current;
+        console.log('[appearance] groom ack', et, 'for', inst?.id);
+        emitHairColorRef.current?.(inst?.wardrobe);
+        return;
+      }
       const cat = CAT_FOR[et];
       if (!cat) return;
-      const inst = agentStackRef.current.find((i) => i.id === wardrobeTargetRef.current);
       const pair = inst?.wardrobe?.clothingColors?.[cat];
       if (!pair) return; // no saved colour for this slot -> leave the mesh default
       const c1 = pair.c1Hex ? hexToRgb01(pair.c1Hex) : (CLOTHING_COLORS[pair.c1] ?? CLOTHING_COLORS[0]);
@@ -3609,8 +3774,12 @@ function AppMain() {
         // reconcile lands on an already-live character with no ready signal.
         emitApplyIdentityRef.current?.(inst);
         emitBodyBlendsRef.current?.(inst);
-        emitAppearanceColorsRef.current?.(inst?.wardrobe);
-        void applyInstanceWardrobe(inst.wardrobe, inst.agentId);
+        // Colours AFTER the outfit, as at characterReady: the chain re-applies
+        // the groom, and a colour sent ahead of that leaves with the old groom.
+        void applyInstanceWardrobe(inst.wardrobe, inst.agentId).then(() => {
+          emitEyeColorRef.current?.(inst.wardrobe);
+          scheduleAppearanceResendRef.current?.(inst.wardrobe);
+        });
         // Re-assert the GLOBAL environment (backdrop color + key light) too.
         // No characterReady fires on this path, so without this the saved
         // backdrop color silently reverts to UE's default on any reconcile
@@ -3812,8 +3981,9 @@ function AppMain() {
         // point the roster is correct.
         //
         // No characterReady fires here (nothing respawned), so this mirrors
-        // the on-target reconcile's re-assert order: identity, body, colors,
-        // then the outfit. The environment re-applies through its own effect
+        // the on-target reconcile's re-assert order: identity, body, the
+        // outfit, then colours (a colour sent ahead of the groom re-apply is
+        // discarded with the old groom). The environment re-applies through its own effect
         // when hydrateEnvironment lands above.
         const restoredRoster = (p?.roster && Array.isArray(p.roster)) ? p.roster : null;
         if (restoredRoster && restoredRoster.length > 0) {
@@ -3824,8 +3994,11 @@ function AppMain() {
           if (live) {
             emitApplyIdentityRef.current?.(live);
             emitBodyBlendsRef.current?.(live);
-            emitAppearanceColorsRef.current?.(live.wardrobe);
-            void applyInstanceWardrobeRef.current?.(live.wardrobe, live.agentId);
+            void Promise.resolve(applyInstanceWardrobeRef.current?.(live.wardrobe, live.agentId))
+              .then(() => {
+                emitEyeColorRef.current?.(live.wardrobe);
+                scheduleAppearanceResendRef.current?.(live.wardrobe);
+              });
           }
         }
 
@@ -4347,31 +4520,6 @@ function AppMain() {
 
   // Active sheet content. App owns the routing so the SheetPanel
   // doesn't need to know about the data layer.
-  const sheetContent = useMemo(() => {
-    switch (activeWidget) {
-      case 'reminders':
-        return (
-          <RemindersPanel
-            refreshKey={refreshKey}
-            onCountChange={setRemindersCount}
-          />
-        );
-      case 'stocks':
-        return (
-          <StocksPanel
-            refreshKey={refreshKey}
-            onDayPctChange={setStocksDayPct}
-          />
-        );
-      case 'news':
-        return <NewsPanel refreshKey={refreshKey} />;
-      case 'weather':
-        return <WeatherPanel refreshKey={refreshKey} />;
-      // wardrobe is intentionally NOT a sheet, see CustomizationOverlay.
-      default:
-        return null;
-    }
-  }, [activeWidget, refreshKey]);
 
   return (
     <div className={`relative flex-1 min-h-0 overflow-hidden${uiHidden ? ' unclaw-ui-hidden' : ''}`}>
@@ -4409,6 +4557,9 @@ function AppMain() {
         effectId={effectPreview?.effectId ?? environment.effectId}
         strength={effectPreview?.effectStrength ?? environment.effectStrength}
       />
+
+      {/* Video call self-view, bottom-right of the stage; slides with the chat pane. */}
+      <VideoCallSelfView active={videoCall && camera.active} videoRef={camera.videoRef} />
 
       {/* Customization mode, full-screen overlay anchored to the
           workspace wrapper, so it shares Grace's framing. Every other
@@ -4548,7 +4699,9 @@ function AppMain() {
                     // resolved the names it picked into material values, so a
                     // custom character arrives coloured rather than defaulting
                     // to the base character's hair and eyes.
-                    ...(grooming.hairColorParams ? { hairColor: grooming.hairColorParams } : {}),
+                    ...(grooming.hairColorParams
+                      ? { hairColor: { preset: hairPresetFor(grooming.hairColorParams), ...grooming.hairColorParams } }
+                      : {}),
                     ...(grooming.irisVariant ? { eyeColor: { iris: grooming.irisVariant } } : {}),
                   }
                 : null;
@@ -4593,28 +4746,34 @@ function AppMain() {
             ? wizardLiveName.trim()
             : (profile?.name || 'friend')
         }
+        onHeight={setGreetingHeight}
+      />
+      <GlanceColumn
+        top={GREETING_TOP + greetingHeight + 28}
+        reminders={onboardingComplete ? reminders : null}
+        onCompleteReminder={(id) => {
+          // Optimistic: the row already ticked itself; drop it from the
+          // list a beat later and let the count change refetch the truth.
+          void completeReminder(id).finally(() => {
+            window.setTimeout(() => {
+              setReminders((prev) => prev.filter((r) => r.id !== id));
+              setRemindersCount((c) => Math.max(0, c - 1));
+            }, 420);
+          });
+        }}
+        activeWidget={activeWidget}
+        onOpen={handleToggleWidget}
+        onClose={handleCloseSheet}
+        onRemindersChanged={() => setRemindersCount((c) => c + 1)}
+        refreshKey={refreshKey}
       />
 
-      {/* Ambient widgets are disabled until onboarding completes — they need
-          the user's profile (timezone/city/interests) and shouldn't clutter
-          first-run setup. */}
+      {/* Ambient widget sheets are disabled until onboarding completes — they
+          need the user's profile (timezone/city/interests) and shouldn't
+          clutter first-run setup. The widget row itself lives above the
+          input bar (dock layer below). */}
       {onboardingComplete && (
         <>
-          <WidgetRail
-            activeWidget={activeWidget}
-            onToggle={handleToggleWidget}
-            remindersCount={remindersCount}
-            stocksDayPct={stocksDayPct}
-            triggerRefs={triggerRefs}
-          />
-
-          <SheetPanel
-            activeKey={activeWidget}
-            onClose={handleCloseSheet}
-            triggerRefs={triggerRefs}
-          >
-            {sheetContent}
-          </SheetPanel>
         </>
       )}
 
@@ -4818,7 +4977,17 @@ function AppMain() {
                   Only while a stream is up and not in customization (which owns
                   its own full-figure framing). */}
               {isConnected && !customizationActive && (
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8, pointerEvents: 'auto' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, marginBottom: 8, pointerEvents: 'auto' }}>
+                  {/* Character controls, right-aligned: wardrobe beside the
+                      framing toggle. The whole left side above the bar stays
+                      clear for the glance column (2026-09-15). */}
+                  {onboardingComplete && (
+                    <WidgetRail
+                      activeWidget={activeWidget}
+                      onToggle={handleToggleWidget}
+                      triggerRefs={triggerRefs}
+                    />
+                  )}
                   <CameraModeToggle mode={cameraMode} onChange={setCameraMode} />
                 </div>
               )}
@@ -4840,12 +5009,19 @@ function AppMain() {
                   onTogglePassthroughMuted={togglePassthroughMuted}
                   disabled={!isConnected}
                   hasAttachments={attachedImages.length > 0}
+                  attachHint={canAttachImages ? null : visionHint}
                   onSendMessage={handleSendMessage}
                   onOpenSheet={handleToggleWidget}
                   onDispatchAnimation={dispatchAnimation}
                   onClearMemory={handleClearMemory}
                   onOpenOnboarding={() => setWizardMode('edit')}
                   onExpress={handleExpress}
+                  videoCall={{
+                    active: videoCall && camera.active,
+                    available: videoCallAvailable,
+                    hint: videoCallAvailable ? null : visionHint,
+                    toggle: () => { void handleVideoCallToggle(); },
+                  }}
                   voice={{
                     active: voice.isListening,
                     // Only block STARTING voice while she's replying. It must
@@ -4993,7 +5169,7 @@ function AppMain() {
             padding: '9px 12px 9px 14px',
             borderRadius: 12,
             background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.66))',
-            border: `1px solid ${voiceNotice.kind === 'mic' ? 'color-mix(in srgb, var(--accent) 45%, transparent)' : 'rgba(255,255,255,0.12)'}`,
+            border: `1px solid ${voiceNotice.kind !== 'generic' ? 'color-mix(in srgb, var(--accent) 45%, transparent)' : 'rgba(255,255,255,0.12)'}`,
             backdropFilter: 'var(--glass-blur)',
             WebkitBackdropFilter: 'var(--glass-blur)',
             boxShadow: '0 10px 28px -12px rgba(0,0,0,0.6)',
@@ -5003,10 +5179,13 @@ function AppMain() {
           }}
         >
           <span style={{ flex: 1 }}>{voiceNotice.text}</span>
-          {voiceNotice.kind === 'mic' && (
+          {voiceNotice.kind !== 'generic' && (
             <button
               type="button"
-              onClick={() => { void window.electronAPI?.mic?.openSettings?.(); }}
+              onClick={() => {
+                if (voiceNotice.kind === 'camera') void window.electronAPI?.camera?.openSettings?.();
+                else void window.electronAPI?.mic?.openSettings?.();
+              }}
               style={{
                 flex: '0 0 auto',
                 padding: '5px 10px',

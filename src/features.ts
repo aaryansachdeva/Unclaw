@@ -10,11 +10,13 @@
  *  handoff, local identity inference, and the identity-host roster instances
  *  that flow produces.
  *
- *  OFF for the Mac 1.1.7 ship. The pipeline itself works end to end, but the
- *  capture rendezvous Worker is not deployed and the identity artifacts are
- *  not in the shipped runtimeAssets, so a real user would hit a dead QR.
- *  Everything behind this flag stays in the build, just unreachable. */
-export const CUSTOM_CHARACTERS_ENABLED = false
+ *  ON in dev, OFF in packaged builds. The pipeline runs end to end on a dev
+ *  machine (local UnclawCharWorker, the p1 secrets, the dev UE container),
+ *  but the identity artifacts are not in the shipped runtimeAssets and the
+ *  pipeline keys are dev-only, so a real user would hit a dead flow.
+ *  Everything behind this flag stays in the build, just unreachable outside
+ *  dev. */
+export const CUSTOM_CHARACTERS_ENABLED = import.meta.env.DEV
 
 /** Kyutai Pocket-TTS as a selectable voice engine.
  *
@@ -40,3 +42,11 @@ export const CUSTOM_CHARACTERS_ENABLED = false
  *  in-app ears test; making Pocket the DEFAULT provider is a separate,
  *  later decision after that test. */
 export const POCKET_TTS_ENABLED = true
+
+/** Chatterbox-Turbo (Resemble, MIT) as a second local clone engine next to
+ *  Pocket. Same reference clips, but it performs inline sounds ([laugh],
+ *  [sigh], ...) so the character can react, at ~0.9 GB more resident memory
+ *  than Pocket and ~3.5x realtime instead of ~12x. Pocket stays the default;
+ *  this only adds the option to the engine pickers. Off = the option hides
+ *  and a saved selection migrates back to Pocket (migrateApiKeys). */
+export const CHATTERBOX_TTS_ENABLED = true

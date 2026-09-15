@@ -27,8 +27,19 @@ interface ElectronAPI {
     openSettings: () => Promise<{ ok: boolean; error?: string }>;
   };
 
+  /** Camera permission (macOS), same contract as `mic`; video call mode. */
+  camera?: {
+    getStatus: () => Promise<'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown'>;
+    request: () => Promise<boolean>;
+    openSettings: () => Promise<{ ok: boolean; error?: string }>;
+  };
+
   /** TEMP(revert): Cmd+H all-chrome hide toggle. Returns an unsubscribe fn. */
   onTempToggleUi?: (cb: () => void) => () => void;
+
+  /** OS cursor position in screen DIP, pushed by main while it changes. Drives the
+   *  character's gaze via useGazeCursorPublisher. Returns an unsubscribe fn. */
+  onGazeCursor?: (cb: (p: { x: number; y: number }) => void) => () => void;
 
   /** Trigger the screenshot region selector. Same effect as the
    *  global Ctrl+Shift+G shortcut. */
@@ -238,12 +249,12 @@ interface ElectronAPI {
     listInstalled: () => Promise<{ ids: string[]; stale: string[] }>;
     /** Which of a character's cloned voice files are already on disk. */
     hasVoices: (args: { characterId: string }) => Promise<{
-      ok: boolean; present?: { supertonic: boolean; kokoro: boolean; pocket: boolean }; complete?: boolean; error?: string;
+      ok: boolean; present?: { supertonic: boolean; kokoro: boolean; pocket: boolean; chatterbox: boolean }; complete?: boolean; error?: string;
     }>;
     /** Download + install presigned cloned-voice files into the soul voices dirs. */
     downloadVoices: (args: {
       characterId: string;
-      files: { kind: 'supertonic' | 'kokoro' | 'pocket'; filename: string; url: string }[];
+      files: { kind: 'supertonic' | 'kokoro' | 'pocket' | 'chatterbox'; filename: string; url: string }[];
     }) => Promise<{ ok: boolean; written?: number; error?: string }>;
     /** Subscribe to byte progress for a pak download. */
     onPakProgress: (

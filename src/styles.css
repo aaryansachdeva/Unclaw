@@ -266,6 +266,9 @@ textarea::placeholder {
 
 /* Sheet body — thin scrollbar so the panel content can scroll
    without the default 3px chrome grabbing the eye. */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
 .sheet-scroll::-webkit-scrollbar { width: 6px; }
 .sheet-scroll::-webkit-scrollbar-track { background: transparent; }
 .sheet-scroll::-webkit-scrollbar-thumb {

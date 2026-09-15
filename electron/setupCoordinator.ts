@@ -1222,8 +1222,10 @@ export async function downloadAndExtractCharacterPak(
 //
 //   supertonic -> <SOUL_DATA>/supertonic/voices/<id>.json
 //   kokoro     -> <SOUL_DATA>/kokoro/voices/<id>_kokoro.safetensors
+//   pocket     -> <SOUL_DATA>/pocket/voices/<id>.safetensors
+//   chatterbox -> <SOUL_DATA>/chatterbox/voices/<id>.safetensors
 // ----------------------------------------------------------------------
-type VoiceEngine = 'supertonic' | 'kokoro' | 'pocket';
+type VoiceEngine = 'supertonic' | 'kokoro' | 'pocket' | 'chatterbox';
 
 function soulVoicesDir(engine: VoiceEngine): string {
   // getSoulDataDir() resolves SOUL_DATA_DIR exactly like run_soul, so this lands
@@ -1248,6 +1250,12 @@ function voiceFileNames(characterId: string): Record<VoiceEngine, string> {
     // collide with kokoro's key; on disk it is `<id>.safetensors` because
     // pocket_runtime looks it up by bare voice name.
     pocket: `${characterId}.safetensors`,
+    // Chatterbox-Turbo's per-character file is its conditioning set (T3
+    // speaker embedding + prompt tokens + S3Gen reference features, ~0.6 MB)
+    // in the same key layout as the model's own conds.safetensors. R2 key is
+    // `<id>_chatterbox.safetensors`; on disk chatterbox_runtime looks it up
+    // by bare voice name in data/chatterbox/voices.
+    chatterbox: `${characterId}.safetensors`,
   };
 }
 
@@ -1267,6 +1275,7 @@ export function characterVoicesPresent(
     supertonic: ok('supertonic', names.supertonic),
     kokoro: ok('kokoro', names.kokoro),
     pocket: ok('pocket', names.pocket),
+    chatterbox: ok('chatterbox', names.chatterbox),
   };
 }
 
@@ -1289,7 +1298,7 @@ export async function downloadCharacterVoices(
   const names = voiceFileNames(characterId);
   let written = 0;
   for (const f of files) {
-    if (f.kind !== 'supertonic' && f.kind !== 'kokoro' && f.kind !== 'pocket') continue;
+    if (f.kind !== 'supertonic' && f.kind !== 'kokoro' && f.kind !== 'pocket' && f.kind !== 'chatterbox') continue;
     // Force the destination name from the trusted id, never the server-supplied
     // filename, so a rogue presign response can't write outside the voices dir.
     const destName = names[f.kind];

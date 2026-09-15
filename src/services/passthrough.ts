@@ -33,7 +33,7 @@ export interface PassthroughBridgeOptions {
   /** Resolve per-character voice ids for the active TTS provider (same
    *  shape chatViaSoul takes). Read fresh per speak so an agent switch
    *  mid-session voices the new character. */
-  getVoices?: () => { elevenlabs?: string; supertonic?: string; kokoro?: string; qwen3?: string } | undefined;
+  getVoices?: () => { elevenlabs?: string; supertonic?: string; kokoro?: string; qwen3?: string; pocket?: string; chatterbox?: string } | undefined;
   /** Lipsync model for the active character. */
   getLipsyncModel?: () => 'v6' | 'v6mini' | 'v4' | undefined;
   /** Drive UE with the rendered job (reuse App's dispatchChatResult). */

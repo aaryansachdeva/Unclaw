@@ -441,6 +441,32 @@ const APP_ICON = nativeImage.createFromPath(
   path.join(__dirname, '../../resources/icon.png'),
 );
 
+// Cursor for the character's gaze. Unreal can't see the mouse (it renders
+// off-screen and the app draws the frame), so main reads the OS cursor and the
+// renderer maps it onto the character. getCursorScreenPoint works while the
+// window is unfocused on Mac and Windows, needs no permission, and costs next to
+// nothing at 30 Hz; only changes are forwarded, and nothing is sent while the
+// window is hidden or minimized.
+let gazeCursorTimer: ReturnType<typeof setInterval> | null = null;
+function startGazeCursorPoller(win: BrowserWindow): void {
+  if (gazeCursorTimer) clearInterval(gazeCursorTimer);
+  let lastX = Number.NaN;
+  let lastY = Number.NaN;
+  gazeCursorTimer = setInterval(() => {
+    if (win.isDestroyed()) {
+      if (gazeCursorTimer) clearInterval(gazeCursorTimer);
+      gazeCursorTimer = null;
+      return;
+    }
+    if (!win.isVisible() || win.isMinimized()) return;
+    const p = screen.getCursorScreenPoint();
+    if (p.x === lastX && p.y === lastY) return;
+    lastX = p.x;
+    lastY = p.y;
+    win.webContents.send('gaze:cursor', { x: p.x, y: p.y });
+  }, 33);
+}
+
 function createWindow() {
   const primaryDisplay = screen.getPrimaryDisplay();
   const { width: screenW, height: screenH } = primaryDisplay.workAreaSize;
@@ -593,8 +619,11 @@ function createWindow() {
     }
   });
 
+  startGazeCursorPoller(mainWindow);
+
   mainWindow.on('closed', () => {
     directSurface.detach();
+    if (gazeCursorTimer) { clearInterval(gazeCursorTimer); gazeCursorTimer = null; }
     mainWindow = null;
     // Closing the main window quits the app, and it has to be said HERE
     // rather than left to window-all-closed, for two reasons that stack:
@@ -714,6 +743,42 @@ ipcMain.handle('mic:request', async () => {
   }
 });
 
+// Camera permission, same shape as the mic trio. Video call mode
+// (2026-09-15) calls getUserMedia({video}) from the renderer; on macOS that
+// hard-fails invisibly unless the OS has granted camera access, so the
+// renderer asks here first. NSCameraUsageDescription + the camera
+// entitlement were already provisioned in package.json / entitlements.mac.plist.
+ipcMain.handle('camera:get-status', () => {
+  if (process.platform !== 'darwin') return 'granted';
+  try {
+    return systemPreferences.getMediaAccessStatus('camera');
+  } catch {
+    return 'unknown';
+  }
+});
+
+ipcMain.handle('camera:request', async () => {
+  if (process.platform !== 'darwin') return true;
+  try {
+    return await systemPreferences.askForMediaAccess('camera');
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.handle('camera:open-settings', async () => {
+  try {
+    if (process.platform === 'darwin') {
+      await shell.openExternal(
+        'x-apple.systempreferences:com.apple.preference.security?Privacy_Camera',
+      );
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
 ipcMain.handle('mic:open-settings', async () => {
   try {
     if (process.platform === 'darwin') {
@@ -829,14 +894,27 @@ ipcMain.handle('update:start', async () => {
   if (!mainWindow) return getUpdateSnapshot();
   return runUpdateCheck(mainWindow);
 });
-ipcMain.handle('update:restart', () => {
+ipcMain.handle('update:restart', async () => {
   // If Squirrel has a staged app-shell update, go through quitAndInstall
   // so the bundle actually swaps. Otherwise a plain relaunch covers the
-  // content-only case (soul / UE re-spawn against new on-disk bits).
+  // content-only case (soul / UE re-spawn against new on-disk bits, or a
+  // changed UE graphics preset, which soul applies at UE launch).
   if (getAppShellState().state === 'ready') {
     quitAndInstallAppUpdate();
     return;
   }
+  // Tear the stack down BEFORE relaunching. app.exit() skips before-quit and
+  // will-quit, so without this the old soul + UE outlive the shell as
+  // orphans; the next instance then finds that soul on its health port and
+  // "attaches" to it, which means the new setting never reaches UE and the
+  // attach path's 100 ms ready tick can beat the renderer's subscription,
+  // leaving the user on a blank boot screen (seen 2026-09-03 after a
+  // graphics-quality change). Same bounded teardown as the quit path.
+  await Promise.race([
+    shutdownEverything().catch(() => { /* relaunching regardless */ }),
+    new Promise<void>((resolve) => { setTimeout(resolve, SHUTDOWN_DEADLINE_MS).unref?.(); }),
+  ]);
+  finalTeardown();
   app.relaunch();
   app.exit(0);
 });
@@ -1551,7 +1629,8 @@ ipcMain.handle('character-store:has-voices', async (_event, args: { characterId:
     // renderer short-circuits before the gated fetch and the new engine's file
     // never arrives. Adding pocket to this AND to characterVoicesPresent is
     // what makes 1.1.8 backfill it for characters bought before 1.1.8.
-    const complete = present.supertonic && present.kokoro && present.pocket;
+    // chatterbox joined 2026-09-14 for the same reason.
+    const complete = present.supertonic && present.kokoro && present.pocket && present.chatterbox;
     return { ok: true, present, complete };
   } catch (err) {
     return { ok: false, error: (err as Error).message };

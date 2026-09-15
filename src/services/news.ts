@@ -1,11 +1,8 @@
 // Soul.exe news REST client.
 //
-// Soul now sources headlines via Gemini-grounded search (replacing the
-// old Guardian proxy). BYOK strict — the user's Gemini key is read from
-// safeStorage and forwarded via the X-Gemini-Key header. When grounded
-// search isn't enabled the panel renders a hint pointing at Settings.
+// Soul serves headlines from Google News RSS in the user's locale, with
+// BBC World as the fallback. Free, keyless, no gate (2026-09-15).
 
-import { fetchApiKeys } from './apiKeys';
 
 import { getSoulBaseUrl } from './soulBase';
 
@@ -31,20 +28,18 @@ export interface NewsResult {
 }
 
 const HINT_DISABLED =
-  'Enable web search (Gemini) in Settings to fetch live news.';
+  'Live news could not be reached right now.';
 
 export async function getNews(topic?: string): Promise<NewsResult> {
-  const keys = await fetchApiKeys();
-  if (!keys.grounding_search_enabled || !keys.gemini_search_api_key) {
-    return { available: false, hint: HINT_DISABLED };
-  }
+  // No key, no gate (2026-09-15): soul serves this from free public
+  // sources (MET Norway, Google News / BBC RSS, Yahoo chart data) and
+  // caches it, so the widget works for every user from first run.
 
   const qs = topic ? `?topic=${encodeURIComponent(topic)}` : '';
   let res: Response;
   try {
     res = await fetch(`${getSoulBaseUrl()}/news${qs}`, {
       method: 'GET',
-      headers: { 'X-Gemini-Key': keys.gemini_search_api_key },
       signal: AbortSignal.timeout(15000),
     });
   } catch (err) {

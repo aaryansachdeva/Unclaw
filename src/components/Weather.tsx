@@ -32,25 +32,9 @@ export function WeatherPanel({ refreshKey = 0 }: WeatherPanelProps) {
 
   const refresh = useCallback(async () => {
     const myReq = ++reqIdRef.current;
-    // Resolve coords on first refresh; subsequent refreshes reuse
-    // them. Permission-denied / browser-unsupported → false; soul
-    // then falls back to whatever Gemini can infer from the prompt.
-    if (coordsRef.current === null) {
-      coordsRef.current = await new Promise<{lat:number;lon:number} | false>(
-        (resolve) => {
-          if (!navigator.geolocation) { resolve(false); return; }
-          navigator.geolocation.getCurrentPosition(
-            (pos) => resolve({
-              lat: pos.coords.latitude, lon: pos.coords.longitude,
-            }),
-            () => resolve(false),
-            // ~5 min cached fix is fine for a weather widget — the
-            // user's not moving between blocks during a refresh.
-            { maximumAge: 5 * 60 * 1000, timeout: 8000 },
-          );
-        },
-      );
-    }
+    // Never wait on geolocation here: soul locates by profile city or the
+    // machine's IP on its own, so the first paint is one round trip. If a
+    // precise fix arrives later (resolveCoords below) we refresh again.
     const c = coordsRef.current;
     const res = await getWeather(c ? c : undefined);
     if (myReq !== reqIdRef.current) return;
@@ -59,11 +43,33 @@ export function WeatherPanel({ refreshKey = 0 }: WeatherPanelProps) {
     setData(res.available && res.data ? res.data : null);
   }, []);
 
+  // Resolve coords once, in the background. Electron on macOS rarely gets a
+  // Chrome geolocation fix, and waiting 8 s for that failure was the whole
+  // delay this widget used to show; 4 s is plenty for the cases that work.
+  // Permission-denied / unsupported → false, and soul's fallback stands.
+  const resolveCoords = useCallback(
+    () => new Promise<{ lat: number; lon: number } | false>((resolve) => {
+      if (!navigator.geolocation) { resolve(false); return; }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+        () => resolve(false),
+        { maximumAge: 5 * 60 * 1000, timeout: 4000 },
+      );
+    }),
+    [],
+  );
+
   useEffect(() => {
     void refresh();
+    if (coordsRef.current === null) {
+      void resolveCoords().then((c) => {
+        coordsRef.current = c;
+        if (c) void refresh();
+      });
+    }
     const id = window.setInterval(() => { void refresh(); }, 10 * 60 * 1000);
     return () => window.clearInterval(id);
-  }, [refresh]);
+  }, [refresh, resolveCoords]);
 
   useEffect(() => {
     if (refreshKey > 0) void refresh();

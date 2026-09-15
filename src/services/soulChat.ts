@@ -20,7 +20,7 @@ import { fetchApiKeys, type ApiKeysProfile } from './apiKeys';
  *  non-streaming paths so the precedence lives in exactly one place. */
 function resolveVoiceId(
   keys: ApiKeysProfile,
-  voices: { elevenlabs?: string; supertonic?: string; kokoro?: string; qwen3?: string } | undefined,
+  voices: { elevenlabs?: string; supertonic?: string; kokoro?: string; qwen3?: string; pocket?: string; chatterbox?: string } | undefined,
 ): string | null {
   const p = keys.tts_provider;
   const perChar = voices?.[p as keyof NonNullable<typeof voices>] ?? null;
@@ -51,13 +51,16 @@ export interface SoulChatOptions {
    *  the user's saved settings) picks one; it wins over the global per-provider
    *  voice setting, so each agent speaks in its own voice. Falls back to the
    *  global setting when a character has no voice for the active provider. */
-  voices?: { elevenlabs?: string; supertonic?: string; kokoro?: string; qwen3?: string };
+  voices?: { elevenlabs?: string; supertonic?: string; kokoro?: string; qwen3?: string; pocket?: string; chatterbox?: string };
   lipsyncModel?: 'v6' | 'v6mini' | 'v4';
   /** Persona text + any user-profile facts to PREPEND to soul's
    *  built-in SYSTEM_PROMPT. Replaces the LLM's default voice with
    *  Grace/Mark/etc. without touching the server's structured-output
    *  formatting rules. */
   systemExtension?: string;
+  /** Video call mode: the images on this turn are live camera frames, not
+   *  attachments. Soul swaps the vision framing accordingly. */
+  videoCall?: boolean;
   /** One or more screenshots attached to this turn. Each entry is a
    *  base64-encoded PNG with NO data-URL prefix. Soul auto-routes
    *  any image-bearing request to the vision-capable escalation
@@ -139,6 +142,7 @@ export async function chatViaSoul(
   if (opts.lipsyncModel) body.lipsync_model = opts.lipsyncModel;
   if (opts.systemExtension) body.system_extension = opts.systemExtension;
   if (opts.images && opts.images.length > 0) body.images = opts.images;
+  if (opts.videoCall) body.video_call = true;
 
   // Pull the user's saved {provider, model, key, tts_provider...} so
   // soul routes the request to the backends they configured in
@@ -452,7 +456,7 @@ export interface SoulChatChunk extends SoulChatResult {
  *  it (via `for await ... of`). Honors AbortSignal so a fresh user
  *  turn / voice barge-in can cancel an in-flight stream cleanly.
  *
- *  tts_provider must be `kokoro` or `qwen3` — soul rejects the endpoint
+ *  tts_provider must be `kokoro`, `supertonic` or `chatterbox`; soul rejects the endpoint
  *  for cloud / custom-endpoint providers. Caller (App.tsx's
  *  `useStreaming` gate) is responsible for routing those to chatViaSoul. */
 export async function* streamChatViaSoul(
@@ -465,6 +469,7 @@ export async function* streamChatViaSoul(
   if (opts.lipsyncModel) body.lipsync_model = opts.lipsyncModel;
   if (opts.systemExtension) body.system_extension = opts.systemExtension;
   if (opts.images && opts.images.length > 0) body.images = opts.images;
+  if (opts.videoCall) body.video_call = true;
 
   try {
     const keys = await fetchApiKeys();
@@ -473,7 +478,7 @@ export async function* streamChatViaSoul(
       body.llm_api_key = keys.llm_api_key;
     }
     // Forward whichever local provider the user picked. Soul's
-    // /chat_stream_audio admits {kokoro, supertonic}; the App.tsx
+    // /chat_stream_audio admits {kokoro, supertonic, chatterbox}; the App.tsx
     // caller restricts streaming to local providers before calling
     // us, so anything else here is a bug upstream.
     body.tts_provider = keys.tts_provider;

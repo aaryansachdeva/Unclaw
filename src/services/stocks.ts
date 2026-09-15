@@ -1,17 +1,8 @@
 // Soul.exe stocks REST client.
 //
-// Soul now sources quotes via Gemini-grounded search (replacing the old
-// Twelve Data proxy). BYOK strict — the user's Gemini key is read from
-// safeStorage and forwarded via the X-Gemini-Key header. When grounded
-// search isn't enabled the panel renders a hint pointing at Settings.
-//
-// Trade-off vs the prior plumbing: prices and percent-changes are
-// paraphrased from search results, not pulled from a quote API. Fine
-// for a glance widget, not a trading dashboard. Cached server-side for
-// 60 min so a flurry of widget mounts doesn't burn the user's free
-// grounded quota.
+// Soul serves quotes from Yahoo Finance chart data: free, keyless,
+// unofficial, so soul keeps a stale-cache fallback. No gate (2026-09-15).
 
-import { fetchApiKeys } from './apiKeys';
 
 import { getSoulBaseUrl } from './soulBase';
 
@@ -37,13 +28,12 @@ export interface StocksResult {
 }
 
 const HINT_DISABLED =
-  'Enable web search (Gemini) in Settings to fetch live stock prices.';
+  'Live stock prices could not be reached right now.';
 
 export async function getStocks(symbols?: string[]): Promise<StocksResult> {
-  const keys = await fetchApiKeys();
-  if (!keys.grounding_search_enabled || !keys.gemini_search_api_key) {
-    return { available: false, hint: HINT_DISABLED };
-  }
+  // No key, no gate (2026-09-15): soul serves this from free public
+  // sources (MET Norway, Google News / BBC RSS, Yahoo chart data) and
+  // caches it, so the widget works for every user from first run.
 
   const qs = symbols && symbols.length > 0
     ? `?symbols=${encodeURIComponent(symbols.join(','))}`
@@ -52,7 +42,6 @@ export async function getStocks(symbols?: string[]): Promise<StocksResult> {
   try {
     res = await fetch(`${getSoulBaseUrl()}/stocks${qs}`, {
       method: 'GET',
-      headers: { 'X-Gemini-Key': keys.gemini_search_api_key },
       signal: AbortSignal.timeout(15000),
     });
   } catch (err) {

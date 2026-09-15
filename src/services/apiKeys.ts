@@ -54,7 +54,6 @@ type LocalFamilyInfo = {
   thinks?: boolean;
   /** Family accepts image input. Gates the wizard's "Vision" chip and
    *  the chat input bar's image-attach button. */
-  vision?: boolean;
   /** Name-parsed minimum-size floor (B) for reliable tool calls.
    *  Sub-floor variants drop out of the local-agentic picker. */
   toolMinB: number;
@@ -62,20 +61,20 @@ type LocalFamilyInfo = {
 
 const _LOCAL_FAMILIES: ReadonlyArray<readonly [string, LocalFamilyInfo]> = [
   // Qwen — `-vl` variants matched first so vision flag wins.
-  ['qwen3-vl',    { optimized: true, thinks: true, vision: true, toolMinB: 1.0 }],
-  ['qwen2.5-vl',  {                                vision: true, toolMinB: 3.0 }],
+  ['qwen3-vl',    { optimized: true, thinks: true, toolMinB: 1.0 }],
+  ['qwen2.5-vl',  {                                toolMinB: 3.0 }],
   ['qwen3.6',     { optimized: true, thinks: true,               toolMinB: 1.0 }],
   // qwen3.5: floor 2.0 + vision verified by 2026-05-13 sweep.
-  ['qwen3.5',     { optimized: true, thinks: true, vision: true, toolMinB: 2.0 }],
+  ['qwen3.5',     { optimized: true, thinks: true, toolMinB: 2.0 }],
   ['qwen3-coder', { optimized: true, thinks: true,               toolMinB: 8.0 }],
   ['qwen3',       { optimized: true, thinks: true,               toolMinB: 4.0 }],
   ['qwen2.5',     {                                              toolMinB: 7.0 }],
   // Gemma — entire Gemma 4 line multimodal; Gemma 3 multimodal at 4B+.
-  ['gemma4',      { optimized: true, thinks: true, vision: true, toolMinB: 4.0 }],
-  ['gemma3',      { optimized: true,               vision: true, toolMinB: 4.0 }],
+  ['gemma4',      { optimized: true, thinks: true, toolMinB: 4.0 }],
+  ['gemma3',      { optimized: true,               toolMinB: 4.0 }],
   // Llama — vision variants + `llama3-groq` before generic `llama3`.
-  ['llama3.2-vision', { optimized: true,           vision: true, toolMinB: 11.0 }],
-  ['llama4',      { optimized: true,               vision: true, toolMinB: 16.0 }],
+  ['llama3.2-vision', { optimized: true,           toolMinB: 11.0 }],
+  ['llama4',      { optimized: true,               toolMinB: 16.0 }],
   ['llama3.3',    { optimized: true,                             toolMinB: 70.0 }],
   ['llama3.2',    {                                              toolMinB: 3.0 }],
   ['llama3.1',    { optimized: true,                             toolMinB: 70.0 }],
@@ -91,22 +90,11 @@ const _LOCAL_FAMILIES: ReadonlyArray<readonly [string, LocalFamilyInfo]> = [
   ['mistral',     {                                              toolMinB: 7.0 }],
   ['command-r',   {                                              toolMinB: 7.0 }],
   // Vision-language families with no text-only sibling tag.
-  ['llava',       {                                vision: true, toolMinB: 7.0 }],
-  ['bakllava',    {                                vision: true, toolMinB: 7.0 }],
-  ['moondream',   {                                vision: true, toolMinB: 1.0 }],
+  ['llava',       {                                toolMinB: 7.0 }],
+  ['bakllava',    {                                toolMinB: 7.0 }],
+  ['moondream',   {                                toolMinB: 1.0 }],
 ];
 
-/** Cloud models with vision support — substring match of the
- *  wire-prefixed model id. Mirrors soul's `_CLOUD_VISION_PATTERNS`. */
-const _CLOUD_VISION_PATTERNS: ReadonlyArray<string> = [
-  'openai:gpt-4o',
-  'openai:gpt-5',
-  'llama-3.2-11b-vision',
-  'llama-3.2-90b-vision',
-  'meta-llama/llama-4',
-  'llama-4-scout',
-  'llama-4-maverick',
-];
 
 /** Resolve the local family for an Ollama-prefixed model id. Returns
  *  null for cloud / unknown / non-Ollama ids. */
@@ -228,17 +216,8 @@ export function isOptimizedLocalModel(modelId: string | null | undefined): boole
   return size === null || size >= family.toolMinB;
 }
 
-/** Does this model accept image input? Cloud via
- *  `_CLOUD_VISION_PATTERNS`; local via the family `vision` flag.
- *  Gates the chat input bar's image-attach button and the wizard's
- *  "Vision" chip. Soul's `_supports_vision` is the runtime authority. */
-export function modelSupportsVision(modelId: string | null | undefined): boolean {
-  if (!modelId) return false;
-  const tag = modelId.toLowerCase();
-  if (_CLOUD_VISION_PATTERNS.some((pat) => tag.includes(pat.toLowerCase()))) return true;
-  if (!modelId.startsWith('ollama:')) return false;
-  return !!_identifyLocalFamily(modelId)?.vision;
-}
+/* modelSupportsVision was retired 2026-09-15: image support is asked of the
+ * model itself through soul (services/visionCapability.ts), not read off a list. */
 
 
 export interface ProviderModel {
@@ -541,7 +520,12 @@ export type TtsProviderId =
   | 'qwen3'
   /** Kyutai Pocket-TTS: local 100M CPU-only clone engine; voices are
    *  per-character reference wavs in soul's data/pocket/refs/. No key. */
-  | 'pocket';
+  | 'pocket'
+  /** Resemble Chatterbox-Turbo: local 350M MLX clone engine that performs
+   *  inline sound tags ([laugh], [sigh], ...). Clones from the same
+   *  reference clips as Pocket, cached in soul's data/chatterbox/voices/.
+   *  No key. ~0.9 GB more resident memory than Pocket. */
+  | 'chatterbox';
 
 /** Sub-mode when `tts_provider === 'kokoro'`. `recommended` = soul
  *  downloads + runs Kokoro locally; `custom` = user has Kokoro
@@ -743,6 +727,12 @@ function migrateApiKeys(parsed: Partial<ApiKeysProfile>): ApiKeysProfile {
   if (!POCKET_TTS_ENABLED && merged.tts_provider === 'pocket') {
     merged.tts_provider = 'supertonic';
   }
+  // Same courtesy for Chatterbox: if the flag ever goes off, a saved pick
+  // falls back to Pocket (the like-for-like local clone engine) instead of
+  // silently speaking through an option the UI no longer lists.
+  if (!CHATTERBOX_TTS_ENABLED && merged.tts_provider === 'chatterbox') {
+    merged.tts_provider = 'pocket';
+  }
   // Retired engines (2026-08-27): Kokoro and Qwen3 leave the product.
   // Saved selections migrate to Pocket, the like-for-like local default
   // (keyless, cloned per-character voices), so nobody keeps a provider
@@ -858,6 +848,10 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
     // and the per-character voice states ship as cached safetensors.
     // (Missing from this chain when the engine landed 2026-08-16, so
     // selecting Pocket demanded an ElevenLabs key and blocked Save.)
+  } else if (profile.tts_provider === 'chatterbox') {
+    // Local, keyless, same shape as Pocket: weights ship in runtimeAssets
+    // (auto-download in dev), per-character voices are cloned on disk.
+    // Listed here so choosing it never demands an ElevenLabs key.
   } else {
     if (!profile.elevenlabs_api_key) missing.push('ElevenLabs API key');
   }
@@ -928,7 +922,7 @@ export function missingRequiredKeyFields(profile: ApiKeysProfile): string[] {
 // error during onboarding instead of as a 502 on first chat.
 
 import { getSoulBaseUrl } from './soulBase';
-import { POCKET_TTS_ENABLED } from '../features';
+import { POCKET_TTS_ENABLED, CHATTERBOX_TTS_ENABLED } from '../features';
 
 export interface KeyValidationOutcome {
   ok: boolean;

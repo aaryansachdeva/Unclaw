@@ -66,6 +66,7 @@ export function voiceForProvider(
     case 'supertonic': return v.supertonic;
     case 'kokoro': return v.kokoro;
     case 'pocket': return v.pocket;
+    case 'chatterbox': return v.chatterbox;
     default: return undefined; // qwen3 / unknown -> let global/default apply
   }
 }

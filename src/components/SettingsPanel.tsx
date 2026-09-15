@@ -41,7 +41,7 @@ import {
   type TtsProviderId,
 } from '../services/apiKeys';
 import { Dropdown } from './Onboarding/Dropdown';
-import { POCKET_TTS_ENABLED } from '../features';
+import { POCKET_TTS_ENABLED, CHATTERBOX_TTS_ENABLED } from '../features';
 import { usePassthroughPrefs } from '../hooks/usePassthroughPrefs';
 import { Slider } from './Onboarding/Slider';
 import { TZ_CATALOG } from './Onboarding/IdentityStep';
@@ -809,7 +809,7 @@ function VoiceFacet({ draft, update }: PaneContext) {
     <Composition
       eyebrow="the voice that speaks replies"
       title={ttsHeadline(draft.tts_provider)}
-      tagline="ElevenLabs renders in the cloud with high realism. Pocket, Supertonic, and Kokoro run on your machine, no key required. Each agent speaks in its own voice unless you override it below."
+      tagline="ElevenLabs renders in the cloud with high realism. Pocket, Chatterbox and Supertonic run on your machine, no key required. Chatterbox can laugh and sigh mid-sentence; Pocket is lighter and faster. Each agent speaks in its own voice unless you override it below."
       sigil={<Voiceprint />}
     >
       <Stack>
@@ -822,6 +822,11 @@ function VoiceFacet({ draft, update }: PaneContext) {
               // 2026-08-27 (saved selections migrate to Pocket).
               ...(POCKET_TTS_ENABLED
                 ? [{ id: 'pocket', label: 'Pocket (Default)' }]
+                : []),
+              // Chatterbox-Turbo: the expressive local clone (inline laughs
+              // and sighs), heavier than Pocket. Added 2026-09-14.
+              ...(CHATTERBOX_TTS_ENABLED
+                ? [{ id: 'chatterbox', label: 'Chatterbox (local, expressive, ~1 GB more memory)' }]
                 : []),
               { id: 'supertonic', label: 'Supertonic-3 (local, 31 languages, ~5× realtime)' },
               { id: 'elevenlabs', label: 'ElevenLabs (cloud, realistic)' },
@@ -966,6 +971,7 @@ function ttsHeadline(p: TtsProviderId): string {
   switch (p) {
     case 'elevenlabs': return 'ElevenLabs.';
     case 'pocket':     return 'Pocket, local cloned voices.';
+    case 'chatterbox': return 'Chatterbox, local cloned voices with laughs and sighs.';
     case 'supertonic': return 'Supertonic-3, local.';
     case 'kokoro':     return 'Kokoro, local.';
     case 'qwen3':      return 'Qwen3-TTS (disabled).';

@@ -377,8 +377,9 @@ const HAIR_COLOR_PARAMS: Record<HairColorName, { melanin: number; redness: numbe
 // explicit table so a rename on either side fails loudly here instead of
 // silently skipping the eye colour.
 type EyeColorName =
-  | 'darkBrown' | 'brown' | 'amber' | 'hazel' | 'green' | 'blue' | 'grey';
+  | 'black' | 'darkBrown' | 'brown' | 'amber' | 'hazel' | 'green' | 'blue' | 'grey';
 const EYE_COLOR_IRIS: Record<EyeColorName, string> = {
+  black: 'black',
   darkBrown: 'darkBrown',
   brown: 'brown',
   amber: 'amber',
@@ -435,7 +436,8 @@ export async function geminiPickGrooming(
       "  the bulk of the hair, not highlights or dye. If the hair is dyed an unnatural colour,",
       "  answer with the closest natural shade instead.",
       "eyeColor: their iris colour, closest name from the list. Look at the iris only, not the",
-      "  eyelid or lashes. If the eyes are not clearly visible, answer brown.",
+      "  eyelid or lashes. black = so dark the pupil barely separates from the iris.",
+      "  If the eyes are not clearly visible, answer brown.",
       `HAIRSTYLES: ${list(catalogs.hairs)}`,
       `EYEBROWS: ${list(catalogs.brows)}`,
       `EYELASHES: ${list(catalogs.lashes)}`,
@@ -465,7 +467,7 @@ export async function geminiPickGrooming(
                 'black', 'darkBrown', 'brown', 'lightBrown', 'dirtyBlonde',
                 'blonde', 'platinum', 'auburn', 'ginger', 'grey', 'white'] },
               eyeColor: { type: 'string', enum: [
-                'darkBrown', 'brown', 'amber', 'hazel', 'green', 'blue', 'grey'] },
+                'black', 'darkBrown', 'brown', 'amber', 'hazel', 'green', 'blue', 'grey'] },
               hairIndex: { type: 'integer' },
               browIndex: { type: 'integer' },
               lashIndex: { type: 'integer' },

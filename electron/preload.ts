@@ -410,6 +410,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('mic:open-settings'),
   },
 
+  /** Camera permission (macOS), same contract as `mic`. Video call mode asks
+   *  here before getUserMedia({video}) so a denied camera surfaces as a
+   *  notice instead of a silent failure. */
+  camera: {
+    getStatus: (): Promise<'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown'> =>
+      ipcRenderer.invoke('camera:get-status'),
+    request: (): Promise<boolean> => ipcRenderer.invoke('camera:request'),
+    openSettings: (): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('camera:open-settings'),
+  },
+
   // ----------------------------------------------------------------------
   // Screenshot, main-window facing.
   // The main React app calls `triggerScreenshot()` to fire the overlay
@@ -422,6 +433,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = () => cb();
     ipcRenderer.on('temp:toggle-ui', handler);
     return () => ipcRenderer.removeListener('temp:toggle-ui', handler);
+  },
+
+  // OS cursor position (screen DIP) for the character's gaze, ~30 Hz while it moves.
+  onGazeCursor: (cb: (p: { x: number; y: number }) => void): (() => void) => {
+    const handler = (_evt: IpcRendererEvent, p: { x: number; y: number }) => cb(p);
+    ipcRenderer.on('gaze:cursor', handler);
+    return () => ipcRenderer.removeListener('gaze:cursor', handler);
   },
 
   triggerScreenshot: () => ipcRenderer.send('screenshot:trigger'),
@@ -678,11 +696,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // and hands them here. hasVoices lets the renderer skip the fetch when the
     // files are already on disk (already-owned, warm case).
     hasVoices: (args: { characterId: string }): Promise<{
-      ok: boolean; present?: { supertonic: boolean; kokoro: boolean; pocket: boolean }; complete?: boolean; error?: string;
+      ok: boolean; present?: { supertonic: boolean; kokoro: boolean; pocket: boolean; chatterbox: boolean }; complete?: boolean; error?: string;
     }> => ipcRenderer.invoke('character-store:has-voices', args),
     downloadVoices: (args: {
       characterId: string;
-      files: { kind: 'supertonic' | 'kokoro' | 'pocket'; filename: string; url: string }[];
+      files: { kind: 'supertonic' | 'kokoro' | 'pocket' | 'chatterbox'; filename: string; url: string }[];
     }): Promise<{ ok: boolean; written?: number; error?: string }> =>
       ipcRenderer.invoke('character-store:download-voices', args),
     onPakProgress: (

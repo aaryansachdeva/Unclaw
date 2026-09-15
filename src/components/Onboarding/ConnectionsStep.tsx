@@ -29,7 +29,6 @@ import {
   getProvider,
   missingRequiredKeyFields,
   modelSupportsTools,
-  modelSupportsVision,
   isOptimizedLocalModel,
   validateKeys,
   filterChatModels,
@@ -283,12 +282,11 @@ export function ConnectionsStep({
   const models = useMemo(() => {
     if (provider?.dynamicModels) {
       return (ollamaModels ?? []).map((m) => {
-        // Stack the chips the model deserves. "Optimized" means we've
-        // validated tool calling + thinking + size floor end-to-end.
-        // "Vision" means the family accepts image input.
+        // "Optimized" means we've validated tool calling + thinking + size
+        // floor end-to-end. Image support is no longer a badge here: it is
+        // asked of the selected model itself (services/visionCapability).
         const badges: string[] = [];
         if (isOptimizedLocalModel(m.id)) badges.push('Optimized');
-        if (modelSupportsVision(m.id))   badges.push('Vision');
         return {
           id: m.id,
           label: m.tag ?? m.label ?? m.id,
@@ -308,7 +306,6 @@ export function ConnectionsStep({
     return filterChatModels(pid, rawLive).map((rawId) => {
       const fullId = `${pid}:${rawId}`;
       const badges: string[] = [];
-      if (modelSupportsVision(fullId)) badges.push('Vision');
       return {
         id: fullId,
         label: rawId,
@@ -814,6 +811,7 @@ function StatusRail({
   if (scope !== 'llm') {
     const voiceLabel =
       ttsProvider === 'pocket' ? 'Pocket'
+      : ttsProvider === 'chatterbox' ? 'Chatterbox'
       : ttsProvider === 'kokoro' ? 'Kokoro'
       : ttsProvider === 'supertonic' ? 'Supertonic'
       : ttsProvider === 'qwen3' ? 'Qwen3'
@@ -1039,6 +1037,7 @@ function VoiceSection({
             // cloned per character). Kokoro and Qwen3 retired 2026-08-27;
             // saved selections migrate to Pocket in migrateApiKeys.
             { id: 'pocket',     label: 'Pocket (Default)' },
+            { id: 'chatterbox', label: 'Chatterbox (expressive)' },
             { id: 'supertonic', label: 'Supertonic-3' },
             { id: 'elevenlabs', label: 'ElevenLabs' },
           ]}
@@ -1105,6 +1104,26 @@ function VoiceSection({
         >
           Cloned per character and runs on this Mac. Nothing to set up,
           no key needed, and it is the fastest voice Unclaw ships.
+        </div>
+      )}
+
+      {/* Chatterbox branch: same zero-config story as Pocket, with the
+          trade-off stated up front (memory + speed for expressiveness). */}
+      {values.tts_provider === 'chatterbox' && (
+        <div
+          style={{
+            padding: '10px 12px',
+            background: 'rgba(255, 255, 255, 0.025)',
+            border: '1px solid var(--glass-border)',
+            borderRadius: 10,
+            fontSize: 12.5,
+            color: 'var(--text-secondary)',
+            lineHeight: 1.5,
+          }}
+        >
+          Cloned per character and runs on this Mac, no key needed. This
+          one can laugh, sigh and gasp mid-sentence. It uses about a
+          gigabyte more memory than Pocket and speaks a little slower.
         </div>
       )}
     </div>

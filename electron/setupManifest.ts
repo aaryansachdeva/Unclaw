@@ -167,12 +167,21 @@ export const MANIFEST: SetupManifest = {
     // their paks and installed post-purchase. Verified: with HF_HUB_OFFLINE=1
     // and an empty data dir, soul loads these weights and speaks in Grace's
     // cloned voice, so a packaged install never needs the network to talk.
-    url: 'https://files.fotonlabs.com/mac/assets/runtime-2026.0820.01-mac.zip',
-    sha256: '5cec1cf3989019a9bec140a00dfe483dd3514d4bd3a118a3a6e60e6ee318b6b2',
-    sizeBytes: 997_529_686,
+    // 2026.0914.01: adds soul-models/chatterbox/ — the Chatterbox-Turbo
+    // 8-bit MLX weights + text tokenizer (~0.71 GB), the S3TokenizerV2
+    // speech tokenizer (~0.49 GB, mlx_audio hard-codes an HF download for it
+    // and chatterbox_runtime redirects that call to this file) and the FREE
+    // characters' conditioning (grace/kevin/mark, ~165 KB each). Paid
+    // characters' files are entitlement-gated next to their paks, same as
+    // pocket. Verified: HF_HUB_OFFLINE=1 + empty data dir + this tree loads
+    // from the bundle and speaks in Grace's cloned voice. Bundle doubles to
+    // 2.1 GB; Pocket stays the default engine, this is the expressive option.
+    url: 'https://files.fotonlabs.com/mac/assets/runtime-2026.0914.01-mac.zip',
+    sha256: '7a473c188c966abd7d775d4a7666ef64ecb9d4f5a57b681b348bd87362ab0ec8',
+    sizeBytes: 2_127_645_628,
     // Seeds the updater ledger (see unreal above). MUST equal the `assets`
     // version in remote latest.json.
-    version: '2026.0820.01',
+    version: '2026.0914.01',
   },
 
   // Paid character paks. Cooked as per-character chunks (chunk1=ava ..

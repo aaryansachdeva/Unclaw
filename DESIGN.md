@@ -351,7 +351,8 @@ The component philosophy is **refined and restrained**: small text, subtle borde
 ### Signature: The Input Bar
 
 - **Shape:** Full pill (24px radius), 36px tall content area, frosted-slate-base background that brightens to hover on focus.
-- **Right cluster (left to right):** the `+` image-attach button, the chat-pane toggle (PanelRight icons), the cross-fading Voice button / Send button.
+- **Left group (left to right):** the agent chip (its menu lists the roster with 22px portraits, the current one checked, and "Add character" as the last row behind a hairline), then the chat-history toggle (PanelRight icons).
+- **Right group (left to right):** the `+` image-attach button and the video call button as a tight pair (both 32px ghost squares; disabled with the reason as tooltip when the chat model cannot see images, never hidden), then the cross-fading Voice button / Send button.
 - **Voice button:** 36px white circle at rest with a dark wave glyph. Transitions to the transcribing wave (Ember Red bars) when voice mode is active. The single piece of chrome where saturated color is allowed at full intensity, because it IS the voice metaphor.
 - **Send button:** Cross-fades over the Voice button when the input has content. White circular with an arrow glyph. Spring transition: scale 0.94 to 1, opacity 0 to 1, 0.18s ease-out-quart.
 
