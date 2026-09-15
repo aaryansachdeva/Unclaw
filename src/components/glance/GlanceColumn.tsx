@@ -59,10 +59,13 @@ interface Props {
   /** A reminder was added or deleted inside the column; the owner refetches. */
   onRemindersChanged: () => void;
   refreshKey: number;
+  /** Fade the column out (chat pane open: the stream half is too narrow
+   *  for it to stay off the face). State is kept, nothing remounts. */
+  faded?: boolean;
 }
 
 export function GlanceColumn({
-  top, reminders, onCompleteReminder, onRemindersChanged, activeWidget, onOpen, onClose, refreshKey,
+  top, reminders, onCompleteReminder, onRemindersChanged, activeWidget, onOpen, onClose, refreshKey, faded = false,
 }: Props) {
   const reduce = useReducedMotion() ?? false;
   const [now, setNow] = useState(() => new Date());
@@ -157,10 +160,13 @@ export function GlanceColumn({
         paddingLeft: 8,
         marginLeft: -8,
         zIndex: 20,
-        pointerEvents: 'auto',
+        pointerEvents: faded ? 'none' : 'auto',
+        opacity: faded ? 0 : 1,
+        transition: reduce ? undefined : 'opacity 0.28s cubic-bezier(0.16, 1, 0.3, 1)',
         userSelect: 'none',
         overscrollBehavior: 'contain',
       }}
+      aria-hidden={faded || undefined}
     >
       {editing ? (
         /* Edit mode: headers only, drag to reorder, x to remove, hidden

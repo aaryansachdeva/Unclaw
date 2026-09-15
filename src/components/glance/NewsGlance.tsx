@@ -4,7 +4,7 @@
 // Data from soul's free Google News RSS path (services/news), every 30 min.
 
 import { forwardRef, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, type DragControls } from 'framer-motion';
 
 import { getNews, type NewsArticle } from '../../services/news';
 import { GlanceSection, GlanceRow, GLANCE_META_STYLE } from './GlanceSection';
@@ -19,6 +19,10 @@ interface Props {
   onClose: () => void;
   panel?: ReactNode;
   refreshKey: number;
+  /** Edit mode (GlanceColumn): header only, drag handle and remove. */
+  editing?: boolean;
+  dragControls?: DragControls;
+  onRemove?: () => void;
   onLayout?: () => void;
 }
 
@@ -43,7 +47,7 @@ function Headline({ a, lines = 2 }: { a: NewsArticle; lines?: number }) {
 }
 
 export const NewsGlance = forwardRef<HTMLDivElement, Props>(function NewsGlance(
-  { open, onOpen, onClose, refreshKey, onLayout },
+  { open, onOpen, onClose, refreshKey, onLayout, editing, dragControls, onRemove },
   ref,
 ) {
   const [articles, setArticles] = useState<NewsArticle[] | null>(null);
@@ -88,7 +92,7 @@ export const NewsGlance = forwardRef<HTMLDivElement, Props>(function NewsGlance(
   );
 
   return (
-    <GlanceSection ref={ref} label="News" open={open} onOpen={onOpen} onClose={onClose} panel={expanded ?? undefined}>
+    <GlanceSection ref={ref} label="News" open={open} onOpen={onOpen} onClose={onClose} panel={expanded ?? undefined} editing={editing} dragControls={dragControls} onRemove={onRemove}>
       {!articles && !off && ghost('Reading the headlines…')}
       {off && !articles && ghost('News unavailable')}
       {shown && (

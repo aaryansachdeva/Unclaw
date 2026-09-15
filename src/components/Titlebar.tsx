@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { Pin, PinOff, LogOut, Settings, Trash2, LogIn, UserCircle2, RotateCcw, Smartphone } from 'lucide-react';
+import { Pin, PinOff, LogOut, Settings, Trash2, LogIn, UserCircle2, RotateCcw, Smartphone, SlidersHorizontal } from 'lucide-react';
 import { getSoulBaseUrl } from '../services/soulBase';
 import { ClawsIcon } from './ClawsBalance';
 import { CompanionPanel } from './CompanionPanel';
@@ -769,7 +769,7 @@ export function Titlebar({
                         e.currentTarget.style.background = 'transparent';
                       }}
                     >
-                      <Settings size={14} strokeWidth={2} color="var(--text-secondary)" />
+                      <SlidersHorizontal size={14} strokeWidth={2} color="var(--text-secondary)" />
                       <span>Soul Settings</span>
                     </button>
                     {/* Reset session — sends a reset descriptor to the
@@ -871,7 +871,9 @@ export function Titlebar({
                         actual wipe across local + cloud). The popover
                         closes on the second click since the App will
                         re-render without an authToken anyway. */}
-                    {onResetAccount && (
+                    {/* Dev-only: a labelled "testing" row has no place in a
+                        shipped menu; the wipe stays reachable in dev builds. */}
+                    {onResetAccount && import.meta.env.DEV && (
                       <>
                         <div
                           aria-hidden

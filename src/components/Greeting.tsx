@@ -38,11 +38,17 @@ export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [now, setNow] = useState(() => new Date());
 
-  // Tick the time every second. Re-renders every second now (we show
-  // seconds in the time string), but the cost is just one cheap
-  // setState — no DOM thrash since the parent layout is stable.
+  // The clock shows hours and minutes (a ticking seconds counter at the
+  // top of a presence is noise, 2026-09-15). Poll each second but only
+  // commit a new Date when the minute turns, so nothing re-renders in
+  // between.
   useEffect(() => {
-    const id = window.setInterval(() => setNow(new Date()), 1000);
+    const id = window.setInterval(() => {
+      const d = new Date();
+      setNow((prev) =>
+        prev.getMinutes() === d.getMinutes() && prev.getHours() === d.getHours() ? prev : d,
+      );
+    }, 1000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -244,10 +250,8 @@ function greetingFor(d: Date): string {
 function formatClock(d: Date): string {
   const h = d.getHours();
   const m = d.getMinutes();
-  const s = d.getSeconds();
   const ampm = h >= 12 ? 'PM' : 'AM';
   const h12 = h % 12 === 0 ? 12 : h % 12;
   const mm = m.toString().padStart(2, '0');
-  const ss = s.toString().padStart(2, '0');
-  return `${h12}:${mm}:${ss} ${ampm}`;
+  return `${h12}:${mm} ${ampm}`;
 }

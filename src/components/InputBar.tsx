@@ -1395,8 +1395,12 @@ function AgentSwitcher({
                 bottom: menuPos.bottom,
                 left: menuPos.left,
                 minWidth: menuPos.minWidth,
-                maxHeight: 264,
-                overflowY: 'auto',
+                // The roster scrolls inside; "Add character" stays pinned at
+                // the foot so a long roster never hides it (it sat below the
+                // fold with nine instances, 2026-09-15).
+                maxHeight: Math.min(360, Math.max(160, window.innerHeight - menuPos.bottom - 24)),
+                display: 'flex', flexDirection: 'column',
+                overflow: 'hidden',
                 margin: 0, padding: 5, listStyle: 'none',
                 transformOrigin: 'bottom left',
                 background: 'rgba(30, 36, 50, 0.98)',
@@ -1406,6 +1410,8 @@ function AgentSwitcher({
                 zIndex: 1000,
               }}
             >
+            <li role="none" className="no-scrollbar" style={{ overflowY: 'auto', minHeight: 0, flex: '0 1 auto' }}>
+            <ul role="group" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
             {agents.map((a) => {
               const active = a.id === selectedAgentId;
               return (
@@ -1438,8 +1444,10 @@ function AgentSwitcher({
                 </li>
               );
             })}
+            </ul>
+            </li>
             {onAdd && (
-              <li role="none" style={{ marginTop: 4, paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+              <li role="none" style={{ marginTop: 4, paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
                 <button
                   type="button"
                   onClick={() => { setOpen(false); onAdd(); }}

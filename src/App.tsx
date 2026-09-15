@@ -4825,6 +4825,7 @@ function AppMain() {
         onClose={handleCloseSheet}
         onRemindersChanged={() => setRemindersCount((c) => c + 1)}
         refreshKey={refreshKey}
+        faded={chatPaneOpen}
       />
 
       {/* Ambient widget sheets are disabled until onboarding completes — they
@@ -5039,7 +5040,7 @@ function AppMain() {
               {/* Camera framing toggle, floats just above the input bar.
                   Only while a stream is up and not in customization (which owns
                   its own full-figure framing). */}
-              {isConnected && !customizationActive && (
+              {isConnected && !customizationActive && !chatPaneOpen && (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, marginBottom: 8, pointerEvents: 'auto' }}>
                   {/* Character controls, right-aligned: wardrobe beside the
                       framing toggle. The whole left side above the bar stays
@@ -5566,8 +5567,10 @@ function AppMain() {
         <div
           style={{
             position: 'absolute',
-            top: 18,
-            right: 140,
+            // Below the titlebar capsule (claws, Discord, phone, pin,
+            // avatar), which used to sit on top of this header.
+            top: 64,
+            right: 16,
             // Left edge of the pane region + 16 = where the header sits.
             left: Math.max(0, winWidth - chatPaneWidth) + 16,
             zIndex: 60,

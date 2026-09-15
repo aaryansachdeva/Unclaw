@@ -236,12 +236,11 @@ export function ChatPane({
             ref={scrollRef}
             className="chat-pane-scroll"
             style={{
-              // Header sits absolutely at top (z above titlebar);
-              // the scroll layer fills the rest of the pane. Top
-              // clears the roomier header (top:18 + ~32 stack +
-              // breathing room).
+              // Header sits absolutely below the titlebar capsule
+              // (top:64 + ~32 stack + breathing room); the scroll layer
+              // fills the rest of the pane.
               position: 'absolute',
-              top: 72,
+              top: 112,
               left: 0,
               right: 0,
               bottom: 0,

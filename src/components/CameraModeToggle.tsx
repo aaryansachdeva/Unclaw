@@ -33,22 +33,35 @@ export function CameraModeToggle({ mode, onChange }: {
       whileTap={{ scale: 0.92 }}
       title={`Switch to ${label} shot`}
       aria-label={`Switch camera to ${label} framing`}
+      className="glass-btn"
+      // Ambient control (2026-09-15): invisible at rest like the wardrobe
+      // button beside it, glass on hover. It used to be the one always-lit
+      // 44 px disc floating over the character's shoulder.
       style={{
-        width: 44,
-        height: 44,
-        borderRadius: 999,
+        width: 38,
+        height: 38,
+        borderRadius: 19,
         padding: 0,
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: 'var(--glass-bg, rgba(40,48,65,0.32))',
-        border: '1px solid var(--glass-border, rgba(255,255,255,0.12))',
-        backdropFilter: 'var(--glass-blur, blur(32px) saturate(1.6))',
-        WebkitBackdropFilter: 'var(--glass-blur, blur(32px) saturate(1.6))',
-        boxShadow: '0 4px 14px -6px rgba(0,0,0,0.5)',
-        color: 'var(--text-secondary, #d4cec7)',
+        background: 'transparent',
+        border: '1px solid transparent',
+        color: 'var(--text-primary)',
+        filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))',
         cursor: 'pointer',
+        transition: 'background 0.2s var(--ease-out-quart), border-color 0.2s var(--ease-out-quart), filter 0.2s var(--ease-out-quart)',
       } as React.CSSProperties}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = 'var(--glass-bg-hover)';
+        e.currentTarget.style.borderColor = 'var(--glass-border-focus)';
+        e.currentTarget.style.filter = 'none';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = 'transparent';
+        e.currentTarget.style.borderColor = 'transparent';
+        e.currentTarget.style.filter = 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))';
+      }}
     >
       <AnimatePresence mode="wait" initial={false}>
         <motion.span
@@ -59,7 +72,7 @@ export function CameraModeToggle({ mode, onChange }: {
           transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
           style={{ display: 'inline-flex' }}
         >
-          <Icon size={20} strokeWidth={1.9} />
+          <Icon size={17} strokeWidth={2} />
         </motion.span>
       </AnimatePresence>
     </motion.button>
