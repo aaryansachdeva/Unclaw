@@ -62,6 +62,8 @@ const SOUL_HEALTH_POLL_MS = 1500;
 // Total automatic respawns within one boot episode before we give up and
 // surface a failure. Self-heals transient first-run crashes (OOM on first
 // model load, a flaky import) without looping forever.
+/** Deadline for a respawned soul to reach READY (per respawn). */
+const SOUL_RESPAWN_WATCHDOG_MS = 90_000;
 const MAX_SOUL_RESPAWNS = 3;
 // Backoff between respawns (indexed by attempt-1), capped.
 const SOUL_RESPAWN_BACKOFF_MS = [1500, 3000, 6000];
@@ -712,6 +714,11 @@ function spawnSoul(window: BrowserWindow): boolean {
 
     // Intentional shutdown (quit / explicit restart) → never respawn.
     if (intentionalStop) return;
+    // The boot already failed and the user has the Retry screen: a late
+    // death of that child must not drop them into a respawn cycle whose
+    // health poll self-cancels on the latch and whose final failure is
+    // never re-emitted (the "retrying 3/3 forever" strand).
+    if (bootFailed) return;
 
     // Unexpected exit. Auto-respawn with backoff so a transient first-run
     // crash (OOM on a cold model load, a flaky import) self-heals instead
@@ -725,6 +732,15 @@ function spawnSoul(window: BrowserWindow): boolean {
       soulIsReady = false;
       alreadyReadyFired = false;
       livePorts = null;
+      // A respawn after the boot watchdog was cleared (post-ready crash)
+      // had no deadline at all: a respawn that hung before READY was polled
+      // forever. Arm one per respawn episode.
+      if (bootTimer) clearTimeout(bootTimer);
+      bootTimer = setTimeout(() => {
+        if (!soulIsReady && !intentionalStop) {
+          handleBootFailure(window, `soul respawn ${attempt}/${MAX_SOUL_RESPAWNS} did not come up within ${Math.round(SOUL_RESPAWN_WATCHDOG_MS / 1000)}s`);
+        }
+      }, SOUL_RESPAWN_WATCHDOG_MS);
       const backoff = SOUL_RESPAWN_BACKOFF_MS[Math.min(attempt - 1, SOUL_RESPAWN_BACKOFF_MS.length - 1)];
       log(window, 'meta',
         `[unclaw] respawning soul (attempt ${attempt}/${MAX_SOUL_RESPAWNS}) in ${backoff}ms`);
@@ -812,7 +828,12 @@ export async function startSoul(
   // "attach" to that dying corpse, mark ready, skip the fresh spawn+sweep, and
   // then strand the boot when it finishes dying. Skip the probe on a forced
   // restart so we always spawn a clean instance.
-  const existing = opts.skipProbe ? false : await probeExistingSoul();
+  // Packaged builds never attach: the only "existing" soul there is an
+  // orphan from a force-quit, and attaching to it left it with no exit
+  // handler, no health poll and no watchdog (a later death reported
+  // nothing). Sweep and spawn our own instead. Dev keeps the probe so a
+  // manually run soul can be reused.
+  const existing = (opts.skipProbe || app.isPackaged) ? false : await probeExistingSoul();
   if (existing) {
     log(window, 'meta', '[unclaw] soul already running externally, attaching');
     alreadyReadyFired = true;

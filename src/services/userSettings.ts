@@ -25,6 +25,7 @@ import type { EnvironmentSettings } from '../hooks/useEnvironment';
 import type { AgentInstance } from '../hooks/useAgentStack';
 
 import { getSoulBaseUrl } from './soulBase';
+import { fetchWithTimeout } from './soulBase';
 const CLOUD_URL = 'https://api.unclaw.io';
 
 export type UserSchedule = 'early_bird' | 'night_owl' | 'mixed';
@@ -189,7 +190,7 @@ export interface EyeColor {
 /** GET /user_settings — null when nothing has been saved yet. The wizard
  *  uses null as the trigger to mount on app start. */
 export async function fetchSettings(): Promise<UserSettings | null> {
-  const res = await fetch(`${getSoulBaseUrl()}/user_settings`);
+  const res = await fetchWithTimeout(`${getSoulBaseUrl()}/user_settings`);
   if (!res.ok) {
     const err = await res.text().catch(() => res.statusText);
     throw new Error(`soul /user_settings GET ${res.status}: ${err.slice(0, 200)}`);
@@ -200,7 +201,7 @@ export async function fetchSettings(): Promise<UserSettings | null> {
 
 /** PUT /user_settings — full replace. Used by the wizard's Finish button. */
 export async function saveSettings(settings: UserSettings): Promise<UserSettings> {
-  const res = await fetch(`${getSoulBaseUrl()}/user_settings`, {
+  const res = await fetchWithTimeout(`${getSoulBaseUrl()}/user_settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings),
@@ -216,7 +217,7 @@ export async function saveSettings(settings: UserSettings): Promise<UserSettings
 export async function patchSettings(
   updates: Partial<UserSettings>,
 ): Promise<UserSettings> {
-  const res = await fetch(`${getSoulBaseUrl()}/user_settings`, {
+  const res = await fetchWithTimeout(`${getSoulBaseUrl()}/user_settings`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -232,7 +233,7 @@ export async function patchSettings(
  *  After this resolves, the next /user_settings GET returns null and
  *  the wizard fires in firstRun mode. */
 export async function deleteSettings(): Promise<void> {
-  const res = await fetch(`${getSoulBaseUrl()}/user_settings`, { method: 'DELETE' });
+  const res = await fetchWithTimeout(`${getSoulBaseUrl()}/user_settings`, { method: 'DELETE' });
   if (!res.ok && res.status !== 404) {
     const err = await res.text().catch(() => res.statusText);
     throw new Error(`soul /user_settings DELETE ${res.status}: ${err.slice(0, 200)}`);
@@ -277,7 +278,7 @@ async function _onboardingBodyFromKeys(): Promise<Record<string, unknown>> {
  *  voice they actually selected (cache is keyed by provider+voice). */
 export async function fetchOnboardingWelcome(): Promise<SoulChatResult> {
   const body = await _onboardingBodyFromKeys();
-  const res = await fetch(`${getSoulBaseUrl()}/onboarding/welcome`, {
+  const res = await fetchWithTimeout(`${getSoulBaseUrl()}/onboarding/welcome`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -298,7 +299,7 @@ export async function fetchOnboardingGreet(
 ): Promise<SoulChatResult> {
   const body = await _onboardingBodyFromKeys();
   if (systemExtension) body.system_extension = systemExtension;
-  const res = await fetch(`${getSoulBaseUrl()}/onboarding/greet`, {
+  const res = await fetchWithTimeout(`${getSoulBaseUrl()}/onboarding/greet`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -359,7 +360,7 @@ export interface CloudSettingsRecord {
 /** GET /user_settings from the Worker. Returns null when no row is
  *  saved yet, or when the token has expired (caller should re-auth). */
 export async function fetchCloudSettings(token: string): Promise<CloudSettingsRecord | null> {
-  const res = await fetch(`${CLOUD_URL}/user_settings`, {
+  const res = await fetchWithTimeout(`${CLOUD_URL}/user_settings`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   // CRITICAL: a non-200 means we DON'T KNOW the cloud state — it must NOT be
@@ -393,7 +394,7 @@ export async function pushCloudSettings(
 ): Promise<PushCloudResult> {
   const body: Record<string, unknown> = { settings };
   if (typeof expectedVersion === 'number') body.expected_version = expectedVersion;
-  const res = await fetch(`${CLOUD_URL}/user_settings`, {
+  const res = await fetchWithTimeout(`${CLOUD_URL}/user_settings`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -420,7 +421,7 @@ export async function pushCloudSettings(
  *  the user isn't blocked when their network is down. */
 export async function deleteCloudSettings(token: string): Promise<boolean> {
   try {
-    const res = await fetch(`${CLOUD_URL}/user_settings`, {
+    const res = await fetchWithTimeout(`${CLOUD_URL}/user_settings`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -457,6 +458,8 @@ export interface ReconcileResult {
    *  authoritative — doing so would clobber the real cloud profile with stale
    *  local data. Retry on the next sign-in / connect cycle. */
   cloudUnavailable?: boolean;
+  /** Cloud row version after reconcile, for versioned pushes; null when unknown. */
+  cloudVersion?: number | null;
 }
 
 /** Reconcile settings for the account signing in, scoping the machine's local
@@ -505,7 +508,7 @@ export async function reconcileForAccount(
     // (it may be a different account's stale profile).
     try { await saveSettings(cloud.settings); }
     catch (err) { console.warn('[settings] mirror cloud→soul failed', err); }
-    return { profile: cloud.settings, ownerChanged: knownDifferentOwner };
+    return { profile: cloud.settings, ownerChanged: knownDifferentOwner, cloudVersion: cloud.version };
   }
 
   // Cloud has nothing for this account.
@@ -516,9 +519,10 @@ export async function reconcileForAccount(
     const local = await fetchSettings().catch(() => null);
     if (local) {
       // This account's own local-only settings (e.g. wizard finished offline).
-      try { await pushCloudSettings(token, local); }
+      let version: number | null = null;
+      try { version = (await pushCloudSettings(token, local)).record.version; }
       catch (err) { console.warn('[settings] migration soul→cloud failed', err); }
-      return { profile: local, ownerChanged: false };
+      return { profile: local, ownerChanged: false, cloudVersion: version };
     }
     return { profile: null, ownerChanged: false };
   }
@@ -543,13 +547,14 @@ export async function saveSettingsEverywhere(
   settings: UserSettings,
   token: string | null,
 ): Promise<UserSettings> {
-  const saved = await saveSettings(settings);
-  if (token) {
-    try {
-      await pushCloudSettings(token, saved);
-    } catch (err) {
-      console.warn('[settings] cloud push failed (will retry on next sync)', err);
-    }
-  }
-  return saved;
+  // soul and cloud independently: a dead or restarting soul used to throw
+  // here BEFORE the cloud write was attempted. Prefer services/settingsSync
+  // (queued, versioned, retried) for anything the user can lose.
+  const [soulRes, cloudRes] = await Promise.allSettled([
+    saveSettings(settings),
+    token ? pushCloudSettings(token, settings) : Promise.resolve(null),
+  ]);
+  if (soulRes.status === 'rejected') console.warn('[settings] soul save failed', soulRes.reason);
+  if (cloudRes.status === 'rejected') console.warn('[settings] cloud push failed', cloudRes.reason);
+  return soulRes.status === 'fulfilled' ? soulRes.value : settings;
 }

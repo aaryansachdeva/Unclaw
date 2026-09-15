@@ -1419,10 +1419,25 @@ function formatBytes(n: number): string {
 // runs both roles.
 // ---------------------------------------------------------------------
 
-const AGENTIC_OPENAI_MODELS: ReadonlyArray<{ id: string; label: string; hint?: string }> = [
+// Fallback only, for a key that has not validated yet. Once /validate_keys
+// returns the account's live /v1/models, the dropdown is built from that
+// (agenticOpenAiOptions) so a retired id never sits in the list.
+const AGENTIC_OPENAI_FALLBACK: ReadonlyArray<{ id: string; label: string; hint?: string }> = [
   { id: 'openai:gpt-5.4-mini',  label: 'GPT-5.4 Mini',  hint: 'recommended' },
   { id: 'openai:gpt-5.4-nano',  label: 'GPT-5.4 Nano',  hint: 'cheapest' },
 ];
+
+function agenticOpenAiOptions(live: string[]): Array<{ id: string; label: string; hint?: string }> {
+  const ids = filterChatModels('openai', live);
+  if (ids.length === 0) return [...AGENTIC_OPENAI_FALLBACK];
+  // Mini tiers first (the sensible agentic default), nano next, then the rest.
+  const rank = (id: string) => (/mini/.test(id) ? 0 : /nano/.test(id) ? 1 : 2);
+  return [...ids].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)).map((raw) => ({
+    id: `openai:${raw}`,
+    label: raw,
+    hint: /mini/.test(raw) ? 'recommended' : /nano/.test(raw) ? 'cheapest' : undefined,
+  }));
+}
 
 function AgenticSection({
   values,
@@ -1603,9 +1618,7 @@ function AgenticSection({
                       value={values.agentic_model ?? ''}
                       onChange={setModel}
                       placeholder="Choose a model"
-                      options={AGENTIC_OPENAI_MODELS.map((mm) => ({
-                        id: mm.id, label: mm.label, hint: mm.hint,
-                      }))}
+                      options={agenticOpenAiOptions(liveModelsByProvider.openai ?? [])}
                     />
                   ) : (
                     // Anthropic + Gemini live-model fetch isn't wired into

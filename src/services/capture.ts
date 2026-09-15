@@ -9,6 +9,8 @@
 // never sees the JWT — its uploads authenticate with the one-shot session
 // token embedded in the QR payload.
 
+import { fetchWithTimeout } from './soulBase';
+
 const STORE_URL = 'https://store.unclaw.io';
 
 function authHeaders(token: string): Record<string, string> {
@@ -38,7 +40,7 @@ export interface CaptureStatus {
 }
 
 export async function createCaptureSession(token: string): Promise<CaptureSession> {
-  const res = await fetch(`${STORE_URL}/capture/session`, {
+  const res = await fetchWithTimeout(`${STORE_URL}/capture/session`, {
     method: 'POST',
     headers: authHeaders(token),
   });
@@ -47,7 +49,7 @@ export async function createCaptureSession(token: string): Promise<CaptureSessio
 }
 
 export async function fetchCaptureStatus(token: string, sessionId: string): Promise<CaptureStatus> {
-  const res = await fetch(`${STORE_URL}/capture/session/${sessionId}`, {
+  const res = await fetchWithTimeout(`${STORE_URL}/capture/session/${sessionId}`, {
     headers: authHeaders(token),
   });
   if (!res.ok) throw new Error(`capture /status ${res.status}`);
@@ -55,7 +57,7 @@ export async function fetchCaptureStatus(token: string, sessionId: string): Prom
 }
 
 export async function cancelCaptureSession(token: string, sessionId: string): Promise<void> {
-  await fetch(`${STORE_URL}/capture/session/${sessionId}`, {
+  await fetchWithTimeout(`${STORE_URL}/capture/session/${sessionId}`, {
     method: 'DELETE',
     headers: authHeaders(token),
   }).catch(() => { /* best-effort */ });
@@ -68,7 +70,7 @@ export async function fetchCaptureFile(
   sessionId: string,
   name: 'preview.jpg' | 'matte.png' | 'capture.zip',
 ): Promise<Blob> {
-  const res = await fetch(`${STORE_URL}/capture/session/${sessionId}/file/${name}`, {
+  const res = await fetchWithTimeout(`${STORE_URL}/capture/session/${sessionId}/file/${name}`, {
     headers: authHeaders(token),
   });
   if (!res.ok) throw new Error(`capture /file/${name} ${res.status}`);

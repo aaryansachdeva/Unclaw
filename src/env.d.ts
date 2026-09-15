@@ -34,8 +34,6 @@ interface ElectronAPI {
     openSettings: () => Promise<{ ok: boolean; error?: string }>;
   };
 
-  /** TEMP(revert): Cmd+H all-chrome hide toggle. Returns an unsubscribe fn. */
-  onTempToggleUi?: (cb: () => void) => () => void;
 
   /** OS cursor position in screen DIP, pushed by main while it changes. Drives the
    *  character's gaze via useGazeCursorPublisher. Returns an unsubscribe fn. */

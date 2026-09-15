@@ -20,6 +20,7 @@
 import type { SoulChatResult } from './soulChat';
 
 import { getSoulBaseUrl } from './soulBase';
+import { fetchWithTimeout } from './soulBase';
 
 export type PreGenLine =
   | 'welcome'
@@ -76,7 +77,7 @@ export async function speakLiveLine(
   text: string,
 ): Promise<SoulChatResult> {
   const meta = META[line] ?? META['nice-to-meet-you'];
-  const res = await fetch(`${getSoulBaseUrl()}/speak`, {
+  const res = await fetchLong(`${getSoulBaseUrl()}/speak`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -128,7 +129,7 @@ export async function playPreGenAudio(line: PreGenLine): Promise<SoulChatResult>
   // resolves relative to `index.html` in both contexts. The audio MP3s
   // are siblings of index.html in the build output, so this lands them.
   const assetUrl = `./onboarding-audio/${line}.mp3`;
-  const fetched = await fetch(assetUrl);
+  const fetched = await fetchLong(assetUrl);
   if (!fetched.ok) {
     throw new Error(`onboarding audio missing: ${assetUrl} (${fetched.status})`);
   }
@@ -136,7 +137,7 @@ export async function playPreGenAudio(line: PreGenLine): Promise<SoulChatResult>
   const audio_base64 = await blobToBase64(blob);
 
   const meta = META[line];
-  const res = await fetch(`${getSoulBaseUrl()}/generate`, {
+  const res = await fetchLong(`${getSoulBaseUrl()}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -172,3 +173,6 @@ export async function playPreGenAudio(line: PreGenLine): Promise<SoulChatResult>
     ...data,
   } as SoulChatResult;
 }
+
+/** Longer deadline for this service's calls (sign-in, purchases, audio). */
+const fetchLong = (i: RequestInfo | URL, init: RequestInit = {}) => fetchWithTimeout(i, init, 20000);

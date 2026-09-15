@@ -11,6 +11,8 @@
 // The dedicated store Worker (Polar checkout + entitlements + gated downloads).
 // Separate from the auth host; it calls api.unclaw.io/me internally to resolve
 // the user from the bearer token.
+import { fetchWithTimeout } from './soulBase';
+
 const STORE_URL = 'https://store.unclaw.io';
 
 // Client-side store config. Owned truth always comes from the Worker
@@ -35,7 +37,7 @@ function authHeaders(token: string): Record<string, string> {
 
 /** Just the owned character ids (fast path for launch + post-purchase poll). */
 export async function fetchEntitlements(token: string): Promise<string[]> {
-  const res = await fetch(`${STORE_URL}/store/entitlements`, { headers: authHeaders(token) });
+  const res = await fetchLong(`${STORE_URL}/store/entitlements`, { headers: authHeaders(token) });
   if (!res.ok) throw new Error(`store /entitlements ${res.status}`);
   const data = (await res.json()) as { owned: string[] };
   return Array.isArray(data.owned) ? data.owned : [];
@@ -44,7 +46,7 @@ export async function fetchEntitlements(token: string): Promise<string[]> {
 /** Create a Polar checkout for a sku (characterId or 'all-access'); returns
  *  the hosted checkout URL to open in the system browser. */
 export async function createCheckout(token: string, sku: string): Promise<{ url: string; checkoutId?: string }> {
-  const res = await fetch(`${STORE_URL}/store/checkout`, {
+  const res = await fetchLong(`${STORE_URL}/store/checkout`, {
     method: 'POST',
     headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
     body: JSON.stringify({ sku }),
@@ -67,7 +69,7 @@ function storePlatform(): 'windows' | 'mac' {
 }
 
 export async function fetchDownloadUrl(token: string, characterId: string): Promise<string> {
-  const res = await fetch(
+  const res = await fetchLong(
     `${STORE_URL}/store/characters/${characterId}/download?platform=${storePlatform()}`,
     { headers: authHeaders(token) },
   );
@@ -90,10 +92,13 @@ export interface VoiceFile {
  *  in the private bucket so a voice is never downloadable without owning the
  *  character; the free characters (grace/mark) use the public CDN instead. */
 export async function fetchVoiceUrls(token: string, characterId: string): Promise<VoiceFile[]> {
-  const res = await fetch(`${STORE_URL}/store/characters/${characterId}/voice`, {
+  const res = await fetchLong(`${STORE_URL}/store/characters/${characterId}/voice`, {
     headers: authHeaders(token),
   });
   if (!res.ok) throw new Error(`store /voice ${res.status}`);
   const data = (await res.json()) as { files: VoiceFile[] };
   return data.files ?? [];
 }
+
+/** Longer deadline for this service's calls (sign-in, purchases, audio). */
+const fetchLong = (i: RequestInfo | URL, init: RequestInit = {}) => fetchWithTimeout(i, init, 30000);

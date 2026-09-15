@@ -445,13 +445,6 @@ textarea::placeholder {
   }
 }
 
-/* TEMP(revert): Cmd+H all-chrome hide. The root's first child is the workspace
-   wrapper, whose first child is StreamView (the avatar). Hide every other
-   sibling at both levels so only the stream remains. Remove this block + the
-   `unclaw-ui-hidden` class + the App.tsx/preload/main wiring to revert. */
-.unclaw-ui-hidden > *:not(:first-child) { display: none !important; }
-.unclaw-ui-hidden > *:first-child > *:not(:first-child) { display: none !important; }
-
 /* Direct IOSurface mode: Unreal's frames are composited by the window server on
    a native layer BEHIND the web contents, so every opaque surface above it has
    to become transparent or the user sees a black window with working frames

@@ -19,6 +19,7 @@
 //   3. GET soul /pair/connect_link -> the universal link the phone opens
 
 import { getSoulBaseUrl } from './soulBase';
+import { fetchWithTimeout } from './soulBase';
 
 const API_URL = 'https://api.unclaw.io';
 
@@ -54,13 +55,13 @@ interface IssuedCredential {
 }
 
 async function soulGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${getSoulBaseUrl()}${path}`);
+  const res = await fetchWithTimeout(`${getSoulBaseUrl()}${path}`);
   if (!res.ok) throw new Error(`soul ${path}: HTTP ${res.status}`);
   return res.json() as Promise<T>;
 }
 
 async function soulPost<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${getSoulBaseUrl()}${path}`, {
+  const res = await fetchWithTimeout(`${getSoulBaseUrl()}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -80,7 +81,7 @@ export function fetchConnectLink(): Promise<ConnectLink> {
 
 /** Mint a fresh desktop credential from the Worker (Bearer = signed-in JWT). */
 async function issueDesktopCredential(token: string): Promise<IssuedCredential> {
-  const res = await fetch(`${API_URL}/auth/desktop/credential/issue`, {
+  const res = await fetchWithTimeout(`${API_URL}/auth/desktop/credential/issue`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -127,7 +128,7 @@ export async function ensureConnectLink(
 export async function unpairPhone(token: string | null): Promise<void> {
   try {
     if (token) {
-      await fetch(`${API_URL}/auth/desktop/credential/revoke`, {
+      await fetchWithTimeout(`${API_URL}/auth/desktop/credential/revoke`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });

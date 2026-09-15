@@ -12,6 +12,8 @@
 // the token (auth:get-token) and either resumes the session or shows
 // the SignInScreen.
 
+import { fetchWithTimeout } from './soulBase';
+
 const API_URL = 'https://api.unclaw.io';
 // Loopback HTTP redirect — Google's Desktop OAuth client and Discord
 // both accept this pattern. Port + path must match what the Electron
@@ -82,7 +84,7 @@ function randomState(): string {
 async function jsonPost<T>(path: string, body: unknown, token?: string): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_URL}${path}`, {
+  const res = await fetchLong(`${API_URL}${path}`, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
@@ -126,7 +128,7 @@ async function clearStoredToken(): Promise<void> {
  *  is invalid/expired (and clears it). Used on app start. */
 export async function fetchCurrentUser(token: string): Promise<AuthUser | null> {
   try {
-    const res = await fetch(`${API_URL}/me`, {
+    const res = await fetchLong(`${API_URL}/me`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (res.status === 401) {
@@ -276,7 +278,7 @@ export async function loginWithEmail(
 export async function signOut(token: string | null): Promise<void> {
   if (token) {
     try {
-      await fetch(`${API_URL}/auth/logout`, {
+      await fetchLong(`${API_URL}/auth/logout`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -289,3 +291,6 @@ export async function signOut(token: string | null): Promise<void> {
 }
 
 export { API_URL, AuthError };
+
+/** Longer deadline for this service's calls (sign-in, purchases, audio). */
+const fetchLong = (i: RequestInfo | URL, init: RequestInit = {}) => fetchWithTimeout(i, init, 20000);

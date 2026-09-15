@@ -54,7 +54,6 @@ import { expressFace } from './services/express';
 import { getStocks } from './services/stocks';
 import {
   deleteSettings,
-  saveSettingsEverywhere,
   reconcileForAccount,
   firstName,
   type UserSettings,
@@ -67,6 +66,7 @@ import {
   type AuthUser,
 } from './services/auth';
 import { resetEverything } from './services/accountReset';
+import { requestPush as requestSettingsPush, flush as flushSettingsPush, retryPending as retrySettingsPush, readPending as readPendingSettings, noteCloudVersionNumber, onSyncStatus } from './services/settingsSync';
 import { fetchApiKeys } from './services/apiKeys';
 import { fetchVisionCapability, type VisionCapability } from './services/visionCapability';
 import { useCameraFeed } from './hooks/useCameraFeed';
@@ -612,7 +612,7 @@ function AppMain() {
   const [isSending, setIsSending] = useState(false);
   // Bumped after every chat round so the Reminders panel re-fetches.
   const [refreshKey, setRefreshKey] = useState(0);
-  // True while a gpt-5-mini escalation is running in the background. UI
+  // True while a gpt-5.4-mini escalation is running in the background. UI
   // can show a small "thinking" pill; input stays unblocked so the user
   // can still type. NOTE v1 limitation: a new chat round won't cancel
   // the escalation, so the background task may still queue an answer
@@ -748,17 +748,6 @@ function AppMain() {
   // button. Closed by default; the pane is opt-in.
   const [chatPaneOpen, setChatPaneOpen] = useState(false);
 
-  // TEMP(revert): Cmd+H toggles hiding ALL chrome (everything but the stream)
-  // for clean capture / debugging. Driven by main's globalShortcut -> IPC so it
-  // wins over the OS "Hide app" accelerator. Remove this state + effect + the
-  // `unclaw-ui-hidden` class on the root div + the CSS rule in styles.css.
-  const [uiHidden, setUiHidden] = useState(false);
-  useEffect(() => {
-    const off = window.electronAPI?.onTempToggleUi?.(() =>
-      setUiHidden((v) => !v),
-    );
-    return () => { off?.(); };
-  }, []);
 
   // Window width, drives the InputBar wrapper's animated left anchor
   // (it slides between the workspace bottom and the chat-pane bottom
@@ -928,6 +917,10 @@ function AppMain() {
   profileRef.current = profile;
   const authTokenRef = useRef(authToken);
   authTokenRef.current = authToken;
+  const authUserRef = useRef(authUser);
+  authUserRef.current = authUser;
+  // Filled once showVoiceNotice exists (declared later in this component).
+  const showVoiceNoticeRef = useRef<((text: string, kind: 'mic' | 'camera' | 'generic') => void) | null>(null);
   const stackRef = useRef(agentStack);
   stackRef.current = agentStack;
   // Set just before a cloud→local roster restore so the resulting roster
@@ -935,33 +928,57 @@ function AppMain() {
   const suppressRosterPushRef = useRef(false);
   // Skip the very first effect run (initial localStorage hydration) — only a
   // genuine user-driven roster change should push.
-  const rosterPushPrimedRef = useRef(false);
-  useEffect(() => {
-    if (!rosterPushPrimedRef.current) { rosterPushPrimedRef.current = true; return; }
-    if (suppressRosterPushRef.current) { suppressRosterPushRef.current = false; return; }
-    const token = authTokenRef.current;
-    const prof = profileRef.current;
-    // Only sync for a signed-in, onboarded account. Pre-onboarding the roster
-    // is just base Grace, and there's no profile to attach it to yet.
-    if (!token || !prof) return;
-    void saveSettingsEverywhere({ ...prof, roster: agentStack }, token);
-  }, [agentStack]);
-  // The environment (backdrop + key light + effect) follows the account the
-  // same way the roster does. Same three guards: skip the first run (that is
-  // just the localStorage hydration), skip an echo of a cloud restore, and
-  // only sync for a signed-in, onboarded account.
+  // ONE push for both. Built from LIVE refs (never a sign-in snapshot),
+  // debounced so a wardrobe save (which changes the roster and the room in
+  // the same tick) goes out as a single document, queued and versioned in
+  // services/settingsSync so nothing is blind or lost. The suppress flags
+  // are consumed per source, so a cloud hydrate of one never swallows a
+  // user's edit of the other.
   const envRef = useRef(environment);
   envRef.current = environment;
   const suppressEnvPushRef = useRef(false);
-  const envPushPrimedRef = useRef(false);
+  const lastSyncedStackRef = useRef(agentStack);
+  const lastSyncedEnvRef = useRef(environment);
+  const pushTimerRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!envPushPrimedRef.current) { envPushPrimedRef.current = true; return; }
-    if (suppressEnvPushRef.current) { suppressEnvPushRef.current = false; return; }
-    const token = authTokenRef.current;
-    const prof = profileRef.current;
-    if (!token || !prof) return;
-    void saveSettingsEverywhere({ ...prof, environment }, token);
-  }, [environment]);
+    let rosterChanged = agentStack !== lastSyncedStackRef.current;
+    let envChanged = environment !== lastSyncedEnvRef.current;
+    if (rosterChanged && suppressRosterPushRef.current) { suppressRosterPushRef.current = false; rosterChanged = false; }
+    if (envChanged && suppressEnvPushRef.current) { suppressEnvPushRef.current = false; envChanged = false; }
+    lastSyncedStackRef.current = agentStack;
+    lastSyncedEnvRef.current = environment;
+    if (!rosterChanged && !envChanged) return;
+    // Only sync for an onboarded account. Pre-onboarding the roster is just
+    // base Grace and there's no profile to attach it to yet. Signed-out
+    // edits still queue (the pending flag survives to the next sign-in).
+    if (!profileRef.current) return;
+    if (pushTimerRef.current != null) window.clearTimeout(pushTimerRef.current);
+    pushTimerRef.current = window.setTimeout(() => {
+      pushTimerRef.current = null;
+      const prof = profileRef.current;
+      if (!prof) return;
+      void requestSettingsPush(
+        { ...prof, roster: stackRef.current, environment: envRef.current },
+        authTokenRef.current ?? null,
+        authUserRef.current?.id ?? null,
+      );
+    }, 600);
+  }, [agentStack, environment]);
+  // Sync status: an expired session is told, not swallowed. The pending
+  // document stays and goes up after the next sign-in.
+  useEffect(() => onSyncStatus((st, d) => {
+    if (st === 'auth-lost') {
+      showVoiceNoticeRef.current?.('Your sign-in expired, so changes are only saved on this Mac. Sign in again to keep syncing.', 'generic');
+    } else if (st === 'error') {
+      console.warn('[settings] sync error', d);
+    }
+  }), []);
+  // Retry anything pending when the stream reconnects, and on a slow beat.
+  useEffect(() => {
+    if (connectionState === 'connected') retrySettingsPush(authTokenRef.current ?? null, authUserRef.current?.id ?? null);
+    const id = window.setInterval(() => retrySettingsPush(authTokenRef.current ?? null, authUserRef.current?.id ?? null), 60_000);
+    return () => window.clearInterval(id);
+  }, [connectionState]);
   // Wizard visibility + mode. 'first' = no profile yet, can't be cancelled.
   // 'edit' = user reopened to tweak; cancel returns to chat.
   // null = wizard closed.
@@ -2054,7 +2071,7 @@ function AppMain() {
   /** Start a 1.2s poll loop against /escalation/{id}/next. Each polled
    *  result is dispatched through the same UE pipeline a primary /chat
    *  result uses. Stops when the server says no more work AND the queue
-   *  is drained. The polling rate is conservative: gpt-5-mini + browser
+   *  is drained. The polling rate is conservative: gpt-5.4-mini + browser
    *  tools have multi-second loops and there's nothing to gain by
    *  hammering the endpoint faster. */
   const startEscalationPolling = useCallback((jobId: string) => {
@@ -2121,17 +2138,31 @@ function AppMain() {
     };
 
     let inFlight = false;
+    let misses = 0;
     const tick = async () => {
       if (inFlight) return;
       inFlight = true;
       try {
         const step = await pollNextEscalation(jobId);
-        if (!step) {
-          // Network error or 404 (e.g. server purged after TTL).
-          // Treat a 404-after-success as a graceful stop; transient
-          // network errors will resolve on the next tick.
+        if (step === 'gone') {
+          // Soul no longer knows this job (purged after TTL, or soul
+          // restarted). Final: stop polling instead of hammering a dead id.
+          stop();
+          setPipelineError('Lost contact with the task mid-way. Ask again and I will pick it up.');
           return;
         }
+        if (!step) {
+          // Transient network error: the next tick retries. After a run of
+          // them soul is gone or unreachable; stop, or the thinking pill and
+          // the idle gate stay stuck until the next send.
+          misses += 1;
+          if (misses >= 10) {
+            stop();
+            setPipelineError('Lost contact with soul while working on that.');
+          }
+          return;
+        }
+        misses = 0;
         if (step.status) {
           pushStatus(step.status);
         }
@@ -2637,6 +2668,7 @@ function AppMain() {
     },
     [],
   );
+  showVoiceNoticeRef.current = showVoiceNotice;
 
   const voice = useVoiceAgent({
     onTranscript: (text) => {
@@ -2963,6 +2995,8 @@ function AppMain() {
       pixelStreaming?.emitUIInteraction({ EventType: 'reset', Timestamp: new Date().toISOString() });
     } catch { /* ignore */ }
     setTimeout(() => setUeSessionEpoch((e) => e + 1), 150);
+    // Let an in-flight or queued settings push land before the local wipe.
+    await flushSettingsPush();
     await signOut(authToken ?? null);
 
     // Drop the ACCOUNT-SCOPED local data with the session. Clearing React
@@ -3913,18 +3947,24 @@ function AppMain() {
           } catch { /* fall through to localStorage */ }
           try { return localStorage.getItem(LOCAL_ACCOUNT_KEY); } catch { return null; }
         })();
-        const { profile: p, ownerChanged, cloudUnavailable } = await reconcileForAccount(accountId, authToken, localOwner);
+        // A local edit that never reached the cloud (offline, quit mid-push,
+        // expired session) goes up FIRST, merged on conflict, so the hydrate
+        // below cannot clobber it. Only this account's own pending document.
+        const pending = readPendingSettings();
+        if (pending && pending.accountId === accountId) {
+          await requestSettingsPush(pending.settings, authToken, accountId);
+        }
+        const { profile: p, ownerChanged, cloudUnavailable, cloudVersion } = await reconcileForAccount(accountId, authToken, localOwner);
         if (cancelled) return;
+        noteCloudVersionNumber(cloudVersion ?? null);
         // Cloud couldn't be read (expired token / network / Cloudflare edge).
         // `p` is the local read-cache shown for continuity, but we must change
         // NOTHING in the cloud and treat NOTHING local as authoritative — that
         // promotion is the bug that clobbers the real cloud profile with stale
         // local. Let it retry on the next connect/sign-in cycle.
         if (cloudUnavailable) {
-          if (p?.roster && Array.isArray(p.roster) && p.roster.length > 0) {
-            suppressRosterPushRef.current = true;
-            hydrateStack(p.roster);
-          }
+          // localStorage already holds the freshest roster; soul's copy can be
+          // older (a mirror that was skipped or failed), so do NOT hydrate it.
           setProfile(p && p.name ? { ...p, name: firstName(p.name) } : p);
           profileSyncedRef.current = false; // allow a retry once cloud is reachable
           return;
@@ -4013,9 +4053,10 @@ function AppMain() {
         // was folded into the blob). Best-effort, version-less; cheap no-op
         // for fresh accounts (just base Grace).
         if (p && (!p.roster || !p.environment) && authToken) {
-          void saveSettingsEverywhere(
+          void requestSettingsPush(
             { ...p, roster: stackRef.current, environment: envRef.current },
             authToken,
+            accountId,
           );
         }
 
@@ -4522,7 +4563,7 @@ function AppMain() {
   // doesn't need to know about the data layer.
 
   return (
-    <div className={`relative flex-1 min-h-0 overflow-hidden${uiHidden ? ' unclaw-ui-hidden' : ''}`}>
+    <div className="relative flex-1 min-h-0 overflow-hidden">
       {/* Another surface holds the stream. Covers the entire app (the native
           traffic lights sit above web content regardless, so they stay
           usable). Rendered first at the top level so no later sibling's
@@ -4754,7 +4795,14 @@ function AppMain() {
         onCompleteReminder={(id) => {
           // Optimistic: the row already ticked itself; drop it from the
           // list a beat later and let the count change refetch the truth.
-          void completeReminder(id).finally(() => {
+          void completeReminder(id).then((done) => {
+            if (!done) {
+              // Soul refused or was unreachable: refetch so the row comes
+              // back instead of vanishing on a lie.
+              showVoiceNoticeRef.current?.('Could not complete that reminder right now.', 'generic');
+              setRemindersCount((c) => c + 1);
+              return;
+            }
             window.setTimeout(() => {
               setReminders((prev) => prev.filter((r) => r.id !== id));
               setRemindersCount((c) => Math.max(0, c - 1));
@@ -4807,7 +4855,11 @@ function AppMain() {
             authUser={authUser}
             onSignedIn={handleSignedIn}
             personaPrompt={persona.prompt}
-            onSave={(p) => saveSettingsEverywhere({ ...p, roster: agentStack }, authToken ?? null)}
+            onSave={async (p) => {
+              const doc = { ...profileRef.current, ...p, roster: stackRef.current, environment: envRef.current };
+              await requestSettingsPush(doc, authToken ?? null, authUser?.id ?? null);
+              return doc;
+            }}
             onChatResult={dispatchChatResult}
             onComplete={(saved) => {
               setProfile(saved);

@@ -112,3 +112,17 @@ export function getSoulWsUrl(path: string): string {
   const clean = path.startsWith('/') ? path : `/${path}`;
   return `ws://127.0.0.1:${p.http}${clean}`;
 }
+
+
+/** fetch() with a deadline. Every request the user actively waits on goes
+ *  through here (2026-09-15): an untimed fetch against a wedged soul or a
+ *  stalled edge left spinners running forever. Honours a caller-supplied
+ *  signal; otherwise aborts after `ms`. */
+export function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  ms = 15_000,
+): Promise<Response> {
+  const signal = init.signal ?? AbortSignal.timeout(ms);
+  return fetch(input, { ...init, signal });
+}

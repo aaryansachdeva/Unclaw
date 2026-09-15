@@ -20,6 +20,7 @@
 // buffer pattern as soulSupervisor keeps the last 200 log lines for
 // renderer hydration on mount/refresh.
 
+import { pipeline } from 'node:stream';
 import { app, BrowserWindow } from 'electron';
 import { spawn } from 'child_process';
 import path from 'path';
@@ -559,7 +560,7 @@ export async function syncSoulVenv(
       '-r', requirementsFile,
       '--index-strategy', 'unsafe-best-match',
     ],
-    { stream: true, extraEnv: uvEnv },
+    { stream: true, extraEnv: uvEnv, timeoutMs: 20 * 60_000 },
   );
   // Same torch strip as the first-run install: mlx-whisper's metadata
   // re-drags torch on every resolve even though nothing imports it on
@@ -572,7 +573,7 @@ export async function syncSoulVenv(
       '--python', venvPython,
       'torch', 'torchaudio',
     ],
-    { stream: true, extraEnv: uvEnv },
+    { stream: true, extraEnv: uvEnv, timeoutMs: 3 * 60_000 },
   );
   pushLog(window, 'meta',
     `[venv-sync] pip install complete; new sha=${newSha.slice(0, 8)}`);
@@ -931,14 +932,30 @@ function downloadOnce(
           onProgress(received, total);
         }
       });
-      res.pipe(out);
-      out.on('finish', () => {
-        out.close();
-        fs.renameSync(partialPath, destPath);
+      // stream.pipeline (not res.pipe): a CDN that closes the socket before
+      // content-length used to leave the file stream open with no 'finish',
+      // no error and no timeout, and the wizard spun forever. pipeline
+      // rejects with ERR_STREAM_PREMATURE_CLOSE and destroys both ends.
+      pipeline(res, out, (err) => {
+        if (err) {
+          req.destroy();
+          reject(err);
+          return;
+        }
+        if (!res.complete) {
+          req.destroy();
+          reject(new Error('download ended before the body was complete'));
+          return;
+        }
+        try {
+          fs.renameSync(partialPath, destPath);
+        } catch (e) {
+          reject(e as Error);
+          return;
+        }
         onProgress(received, total);
         resolve();
       });
-      out.on('error', reject);
     });
     req.on('error', reject);
     req.setTimeout(60_000, () => {
@@ -1445,7 +1462,8 @@ export async function extractZip(
     // far more robust on multi-GB archives than PowerShell Expand-Archive.
     await runCommand(window, 'tar.exe', ['-xf', zipPath, '-C', destDir], { stream: true });
   } else {
-    await runCommand(window, '/usr/bin/ditto', ['-x', '-k', zipPath, destDir], { stream: true });
+    // 2 GB archives; a stalled disk or a corrupt zip must not hang the updater.
+    await runCommand(window, '/usr/bin/ditto', ['-x', '-k', zipPath, destDir], { stream: true, timeoutMs: 15 * 60_000 });
   }
 }
 

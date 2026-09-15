@@ -1,6 +1,6 @@
 // Polling client for soul.exe's escalation queue.
 //
-// When 20b decides a request needs gpt-5-mini + Playwright MCP, soul's
+// When 20b decides a request needs gpt-5.4-mini + Playwright MCP, soul's
 // /chat response carries an `escalation: {id}` marker on the (already
 // dispatched) transition reply. The client then polls /escalation/{id}/next
 // every ~1.2s to drain follow-ups: any narration lines voiced through TTS
@@ -22,7 +22,7 @@ export interface EscalationStep {
   /** True when the escalation task is still running OR there are
    *  more queued items to drain. False = polling can stop. */
   more: boolean;
-  /** Short human-readable label of what gpt-5-mini is currently doing
+  /** Short human-readable label of what gpt-5.4-mini is currently doing
    *  ("thinking", "navigating", "looking at the page", etc.). The UI
    *  shows this above the dock so the user has a live signal of what's
    *  happening between voiced narrations. */
@@ -33,7 +33,7 @@ export interface EscalationStep {
  *  trying without crashing the loop. */
 export async function pollNextEscalation(
   jobId: string,
-): Promise<EscalationStep | null> {
+): Promise<EscalationStep | null | 'gone'> {
   try {
     const r = await fetch(
       `${getSoulBaseUrl()}/escalation/${encodeURIComponent(jobId)}/next`,
@@ -42,6 +42,9 @@ export async function pollNextEscalation(
       // recovery. Timeout → reject → catch returns null → next tick advances.
       { signal: AbortSignal.timeout(20000) },
     );
+    // 404 = soul no longer knows this job (purged after TTL, or soul
+    // restarted). That is final; the caller must stop polling.
+    if (r.status === 404) return 'gone';
     if (!r.ok) return null;
     return (await r.json()) as EscalationStep;
   } catch {

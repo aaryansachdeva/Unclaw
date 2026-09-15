@@ -597,27 +597,21 @@ function createWindow() {
   // stdout so a headless check can reconstruct the connection story. Lives
   // OUTSIDE the direct-path gate: WebRTC-only runs need it just as much
   // (learned when a WebRTC-mode probe came back with a blind log).
-  mainWindow.webContents.on('console-message', (_e, level, message) => {
+  // Electron 41 deprecates the positional (level, message) arguments in
+  // favour of the event object; both are read so the handler survives the
+  // removal of the old form on the next major.
+  mainWindow.webContents.on('console-message', (event, legacyLevel?: number, legacyMessage?: string) => {
+    const e = event as unknown as { level?: 'info' | 'warning' | 'error' | 'debug'; message?: string };
+    const message = e.message ?? legacyMessage ?? '';
+    const warn = e.level != null
+      ? (e.level === 'warning' || e.level === 'error')
+      : (legacyLevel ?? 0) >= 2;
     if (message.includes('[direct-canvas]') || message.includes('[ps]')
-        || message.includes('[rtc-gpu]') || level >= 2) {
-      console.log(`[renderer${level >= 2 ? ':warn' : ''}] ${message}`);
+        || message.includes('[rtc-gpu]') || warn) {
+      console.log(`[renderer${warn ? ':warn' : ''}] ${message}`);
     }
   });
 
-  // Cmd+H hides all chrome (clean-capture / debug). Scoped to the FOCUSED
-  // Unclaw window via before-input-event: the old globalShortcut version
-  // hijacked Cmd+H system-wide, so no other app could hide itself while
-  // Unclaw ran. preventDefault also beats the app menu's "Hide" role, which
-  // is why the shortcut works at all. Lives inside createWindow so a
-  // recreated window (Dock-click after close) keeps the shortcut.
-  mainWindow.webContents.on('before-input-event', (event, input) => {
-    if (input.type === 'keyDown' && input.meta
-        && !input.alt && !input.control && !input.shift
-        && input.key.toLowerCase() === 'h') {
-      event.preventDefault();
-      mainWindow?.webContents.send('temp:toggle-ui');
-    }
-  });
 
   startGazeCursorPoller(mainWindow);
 
@@ -1692,6 +1686,24 @@ ipcMain.handle('character-store:list-installed', async () => {
     if (want && versions[id] !== want) stale.push(id);
   }
   return { ids: Array.from(ids), stale };
+});
+
+// Process-level safety nets (2026-09-15). Without these a renderer OOM left
+// a blank always-on-top window with soul + UE still running, and a main
+// process exception was fatal with no log line.
+process.on('uncaughtException', (err) => {
+  console.error('[main] uncaught exception', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[main] unhandled rejection', reason);
+});
+app.on('render-process-gone', (_event, contents, details) => {
+  console.error(`[main] renderer gone (${details.reason}, exit ${details.exitCode}); reloading`);
+  if (details.reason === 'clean-exit') return;
+  try { contents.reload(); } catch (err) { console.error('[main] reload after renderer loss failed', err); }
+});
+app.on('child-process-gone', (_event, details) => {
+  console.error(`[main] child process gone: ${details.type} ${details.name ?? ''} (${details.reason})`);
 });
 
 app.whenReady().then(() => {

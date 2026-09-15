@@ -107,7 +107,7 @@ export interface SoulChatResult {
    *  The client uses this to emit a UE animation event (kiss/dance/hello)
    *  or to refresh the reminders panel after a CRUD tool. */
   action?: SoulChatAction;
-  /** Set when 20b chose to escalate to gpt-5-mini + Playwright MCP. The
+  /** Set when 20b chose to escalate to gpt-5.4-mini + Playwright MCP. The
    *  current /chat result is the transition reply (already voiced); the
    *  client should poll /escalation/{id}/next for follow-up narrations
    *  and the final response. See services/escalation.ts. */
@@ -515,12 +515,23 @@ export async function* streamChatViaSoul(
     body.tts_provider = 'kokoro';
   }
 
+  // Deadlines (2026-09-15): a soul that accepted the request and then wedged
+  // (TTS or provider hang) used to hold the reader open forever, which kept
+  // isSending true and locked the input bar until reload. The caller's
+  // abort still wins; otherwise the whole reply is capped and each chunk
+  // must arrive within STREAM_IDLE_MS of the previous one.
+  const STREAM_TOTAL_MS = 180_000;
+  const STREAM_IDLE_MS = 45_000;
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort(opts.signal?.reason);
+  opts.signal?.addEventListener('abort', onAbort, { once: true });
+  const totalTimer = window.setTimeout(() => ctrl.abort(new Error('stream deadline')), STREAM_TOTAL_MS);
   const res = await fetch(`${getSoulBaseUrl()}/chat_stream_audio`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: opts.signal,
-  });
+    signal: ctrl.signal,
+  }).catch((err) => { window.clearTimeout(totalTimer); throw err; });
   if (!res.ok || !res.body) {
     const errText = await res.text().catch(() => res.statusText);
     throw new Error(`soul /chat_stream_audio ${res.status}: ${errText.slice(0, 200)}`);
@@ -532,9 +543,19 @@ export async function* streamChatViaSoul(
   const reader = res.body.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  const readWithIdleDeadline = () => {
+    let idle: number | undefined;
+    const idleP = new Promise<never>((_, reject) => {
+      idle = window.setTimeout(() => {
+        ctrl.abort(new Error('stream idle'));
+        reject(new Error('soul stream went quiet for 45s'));
+      }, STREAM_IDLE_MS);
+    });
+    return Promise.race([reader.read(), idleP]).finally(() => window.clearTimeout(idle));
+  };
   try {
     while (true) {
-      const { value, done } = await reader.read();
+      const { value, done } = await readWithIdleDeadline();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let nl = buffer.indexOf('\n');
@@ -560,6 +581,8 @@ export async function* streamChatViaSoul(
       }
     }
   } finally {
+    window.clearTimeout(totalTimer);
+    opts.signal?.removeEventListener('abort', onAbort);
     try { reader.releaseLock(); } catch { /* already released */ }
   }
 }

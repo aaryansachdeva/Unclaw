@@ -427,14 +427,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // (same effect as the global Ctrl+Shift+G). It then subscribes to
   // `onScreenshotCaptured` to receive the cropped PNG (base64) plus
   // the dimensions.
-  // Cmd+H all-chrome hide toggle (clean capture). Fired from main's
-  // before-input-event handler, so it only applies while Unclaw is focused.
-  onTempToggleUi: (cb: () => void): (() => void) => {
-    const handler = () => cb();
-    ipcRenderer.on('temp:toggle-ui', handler);
-    return () => ipcRenderer.removeListener('temp:toggle-ui', handler);
-  },
-
   // OS cursor position (screen DIP) for the character's gaze, ~30 Hz while it moves.
   onGazeCursor: (cb: (p: { x: number; y: number }) => void): (() => void) => {
     const handler = (_evt: IpcRendererEvent, p: { x: number; y: number }) => cb(p);

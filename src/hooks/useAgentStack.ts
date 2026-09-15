@@ -85,10 +85,15 @@ function migrateInstance(i: AgentInstance): AgentInstance | null {
  *  (localStorage) and `hydrateStack` (cloud restore) so both apply the same
  *  invariants. */
 function normalize(arr: unknown): AgentInstance[] {
-  if (Array.isArray(arr) && arr.every(isInstance) && arr.length > 0) {
-    const list = (arr as AgentInstance[])
+  // Per-entry validation: one malformed instance used to reset the WHOLE
+  // roster to the default (and the next edit then pushed that empty roster
+  // to the cloud, deleting every character). Drop only the bad entry.
+  if (Array.isArray(arr)) {
+    const list = (arr as unknown[])
+      .filter(isInstance)
       .map(migrateInstance)
       .filter((i): i is AgentInstance => i !== null);
+    if (list.length === 0) return defaultStack();
     // The permanent base instance always survives migration (grace -> grace_custom);
     // if it was somehow dropped, recreate it on the current base character.
     const base = list.find((i) => i.id === BASE_INSTANCE_ID)
