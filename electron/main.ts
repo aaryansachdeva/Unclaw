@@ -1329,17 +1329,29 @@ function apiKeysFilePath(): string {
   return path.join(app.getPath('userData'), API_KEYS_FILE);
 }
 
+// A blob that exists but would not decrypt (Keychain prompt denied, a
+// migrated user data dir, a corrupt file) used to read as "no keys": the
+// wizard ran again and the next save overwrote the only copy. It still
+// reads as no keys (the wizard is the right recovery), but the failure is
+// remembered so the save below backs the old blob up first.
+let apiKeysReadFailed = false;
+
 ipcMain.handle('apiKeys:get', () => {
   const p = apiKeysFilePath();
-  if (!fs.existsSync(p)) return null;
+  if (!fs.existsSync(p)) { apiKeysReadFailed = false; return null; }
   try {
+    let out: string;
     if (safeStorage.isEncryptionAvailable()) {
       const buf = fs.readFileSync(p);
-      return safeStorage.decryptString(buf);
+      out = safeStorage.decryptString(buf);
+    } else {
+      out = fs.readFileSync(p, 'utf-8');
     }
-    return fs.readFileSync(p, 'utf-8');
+    apiKeysReadFailed = false;
+    return out;
   } catch (err) {
-    console.warn('[apiKeys] get failed', err);
+    console.error('[apiKeys] blob present but unreadable; the wizard will ask again and the old blob is kept as a backup on save', err);
+    apiKeysReadFailed = true;
     return null;
   }
 });
@@ -1347,6 +1359,12 @@ ipcMain.handle('apiKeys:get', () => {
 ipcMain.handle('apiKeys:set', (_event, payload: string) => {
   if (typeof payload !== 'string') return false;
   try {
+    if (apiKeysReadFailed && fs.existsSync(apiKeysFilePath())) {
+      const bak = `${apiKeysFilePath()}.unreadable-${Date.now()}`;
+      try { fs.copyFileSync(apiKeysFilePath(), bak); console.warn('[apiKeys] kept unreadable blob at', bak); }
+      catch (e) { console.warn('[apiKeys] backup of unreadable blob failed', e); }
+      apiKeysReadFailed = false;
+    }
     if (safeStorage.isEncryptionAvailable()) {
       const buf = safeStorage.encryptString(payload);
       fs.writeFileSync(apiKeysFilePath(), buf);

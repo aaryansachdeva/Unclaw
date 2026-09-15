@@ -617,15 +617,6 @@ async function runStageUnreal(
     return;
   }
 
-  // Mismatch (or no version stamp from a pre-versioning install): wipe
-  // the old .app so the extract below lands cleanly into a fresh dir.
-  if (fs.existsSync(installedApp)) {
-    pushLog(window, 'meta',
-      `[unreal] installed ${installedSha?.slice(0, 12) ?? '(unstamped)'} ≠ ` +
-      `manifest ${wantSha.slice(0, 12)}, wiping for re-extract`);
-    fs.rmSync(installedApp, { recursive: true, force: true });
-  }
-
   setStage(window, {
     id: 'unreal',
     progress: 0,
@@ -647,6 +638,16 @@ async function runStageUnreal(
       });
     },
   );
+
+  // Only now, with the new zip downloaded and verified, replace the old
+  // .app. Wiping before the download (the old order) left the user with
+  // no character at all when the download failed or the app was quit.
+  if (fs.existsSync(installedApp)) {
+    pushLog(window, 'meta',
+      `[unreal] installed ${installedSha?.slice(0, 12) ?? '(unstamped)'} ≠ ` +
+      `manifest ${wantSha.slice(0, 12)}, replacing`);
+    fs.rmSync(installedApp, { recursive: true, force: true });
+  }
 
   setStage(window, {
     id: 'unreal',
@@ -719,17 +720,6 @@ async function runStageModels(
     return;
   }
 
-  // Mismatch or partial install, wipe the asset tree (preserving the
-  // dir itself so the extract below lands in place) and re-fetch.
-  if (allPresent) {
-    pushLog(window, 'meta',
-      `[models] installed ${installedSha?.slice(0, 12) ?? '(unstamped)'} ≠ ` +
-      `manifest ${wantSha.slice(0, 12)}, wiping for re-extract`);
-    for (const child of fs.readdirSync(paths.assets)) {
-      fs.rmSync(path.join(paths.assets, child), { recursive: true, force: true });
-    }
-  }
-
   setStage(window, {
     id: 'models',
     progress: 0,
@@ -751,6 +741,18 @@ async function runStageModels(
       });
     },
   );
+
+  // Replace the old asset tree only after the new zip is verified (same
+  // reasoning as the unreal stage); the dir itself is kept so the extract
+  // lands in place.
+  if (allPresent) {
+    pushLog(window, 'meta',
+      `[models] installed ${installedSha?.slice(0, 12) ?? '(unstamped)'} ≠ ` +
+      `manifest ${wantSha.slice(0, 12)}, replacing`);
+    for (const child of fs.readdirSync(paths.assets)) {
+      fs.rmSync(path.join(paths.assets, child), { recursive: true, force: true });
+    }
+  }
 
   setStage(window, {
     id: 'models',

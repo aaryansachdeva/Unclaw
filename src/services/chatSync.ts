@@ -9,6 +9,30 @@
 
 const STORE_URL = 'https://store.unclaw.io';
 const CHAT_PREFIX = 'unclaw.chat.';
+// Set the moment local chat changes, cleared only when the cloud says 200
+// (2026-09-15). Before this, a push that failed (or never fired because the
+// app quit inside the debounce) was forgotten, and the next sign-in restored
+// the cloud copy over the newer local turns. With the flag, reconcile merges
+// local over cloud and pushes instead.
+const DIRTY_KEY = 'unclaw.chatPending.v1';
+
+export function markChatDirty(): void {
+  try { localStorage.setItem(DIRTY_KEY, new Date().toISOString()); } catch { /* ignore */ }
+}
+
+export function isChatDirty(): boolean {
+  try { return localStorage.getItem(DIRTY_KEY) != null; } catch { return false; }
+}
+
+function clearChatDirty(): void {
+  try { localStorage.removeItem(DIRTY_KEY); } catch { /* ignore */ }
+}
+
+/** Local wins for every instance it holds (those are the turns the cloud
+ *  never acknowledged); instances only the cloud knows are kept. */
+export function mergeChat(local: CloudChatMap, cloud: CloudChatMap | null): CloudChatMap {
+  return { ...(cloud ?? {}), ...local };
+}
 
 /** The blob shape persisted to the cloud: instanceId -> serialized turns. The
  *  turns are whatever useChatMemory already wrote to localStorage (images are
@@ -81,18 +105,26 @@ export async function fetchCloudChat(token: string): Promise<CloudChatMap | null
   }
 }
 
-/** PUT /user_chat — push the local chat map. Best-effort; swallows failures so
- *  a flaky network never disrupts the conversation. */
-export async function pushCloudChat(token: string, map: CloudChatMap): Promise<void> {
+/** PUT /user_chat, push the local chat map. Never throws (a flaky network
+ *  must not disrupt the conversation) but reports the outcome and keeps the
+ *  dirty flag until the cloud acknowledges. */
+export async function pushCloudChat(token: string, map: CloudChatMap): Promise<boolean> {
   try {
-    await fetch(`${STORE_URL}/user_chat`, {
+    const res = await fetch(`${STORE_URL}/user_chat`, {
       method: 'PUT',
       headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat: map }),
       signal: AbortSignal.timeout(8000),
     });
+    if (!res.ok) {
+      console.warn('[chatSync] cloud push refused', res.status);
+      return false;
+    }
+    clearChatDirty();
+    return true;
   } catch (err) {
-    console.warn('[chatSync] cloud push failed (will retry on next change)', err);
+    console.warn('[chatSync] cloud push failed (kept as pending)', err);
+    return false;
   }
 }
 

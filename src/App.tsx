@@ -38,7 +38,7 @@ import { usePixelStreaming } from './hooks/usePixelStreaming';
 import { useVideoRectPublisher } from './hooks/useVideoRectPublisher';
 import { useGazeCursorPublisher } from './hooks/useGazeCursorPublisher';
 import { useChatMemory, type Turn } from './hooks/useChatMemory';
-import { fetchCloudChat, pushCloudChat, gatherLocalChat, restoreLocalChat, deleteCloudChat } from './services/chatSync';
+import { fetchCloudChat, pushCloudChat, gatherLocalChat, restoreLocalChat, deleteCloudChat, isChatDirty, markChatDirty, mergeChat } from './services/chatSync';
 import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
 import { detectEcho } from './voice/echoGuard';
@@ -1165,6 +1165,9 @@ function AppMain() {
   useEffect(() => {
     if (!chatSyncPrimedRef.current) { chatSyncPrimedRef.current = true; return; }
     if (suppressChatPushRef.current) { suppressChatPushRef.current = false; return; }
+    // Remember the edit before the debounce, so a quit inside the 4 s window
+    // (or a failed push) still gets reconciled on the next sign-in.
+    markChatDirty();
     const token = authTokenRef.current;
     if (!token || !profileRef.current) return; // signed-in + onboarded only
     const t = setTimeout(() => { void pushCloudChat(token, gatherLocalChat()); }, 4000);
@@ -4067,7 +4070,15 @@ function AppMain() {
         // from echoing back up to the cloud.
         const cloudChat = await fetchCloudChat(authToken);
         if (cancelled) return;
-        if (cloudChat && Object.keys(cloudChat).length > 0) {
+        if (!ownerChanged && isChatDirty()) {
+          // Local turns the cloud never acknowledged: merge them over the
+          // cloud copy and push, instead of letting the cloud wipe them.
+          const merged = mergeChat(gatherLocalChat(), cloudChat);
+          suppressChatPushRef.current = true;
+          restoreLocalChat(merged);
+          setChatReloadNonce((n) => n + 1);
+          void pushCloudChat(authToken, merged);
+        } else if (cloudChat && Object.keys(cloudChat).length > 0) {
           suppressChatPushRef.current = true;
           restoreLocalChat(cloudChat);
           setChatReloadNonce((n) => n + 1);
