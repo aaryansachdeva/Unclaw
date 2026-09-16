@@ -28,11 +28,13 @@ function resolveVoiceId(
     p === 'elevenlabs' ? keys.elevenlabs_voice
     : p === 'kokoro' ? keys.kokoro_voice
     : p === 'supertonic' ? keys.supertonic_voice
+    : (p === 'pocket' || p === 'chatterbox') ? keys.local_voice
     : null;
   const overrideOn =
     p === 'elevenlabs' ? keys.elevenlabs_voice_override
     : p === 'kokoro' ? keys.kokoro_voice_override
     : p === 'supertonic' ? keys.supertonic_voice_override
+    : (p === 'pocket' || p === 'chatterbox') ? keys.local_voice_override
     : false;
   return overrideOn ? (globalVoice || perChar) : perChar;
 }

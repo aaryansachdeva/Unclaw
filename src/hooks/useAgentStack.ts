@@ -30,6 +30,10 @@ export interface AgentInstance {
   /** Photo-identity files (custom characters on the generic host). Re-sent
    *  as an applyIdentity descriptor after every spawn/reconcile of this
    *  instance, exactly like wardrobe. Paths are local absolute paths. */
+  /** A cloned voice stem (Settings > Voice > Your voices) this instance speaks
+   *  with on the local clone engines, overriding the character's own. Set by
+   *  the voice picker or by a character import that bundled a clip. */
+  voice?: string;
   identity?: {
     /** The capture/build session id — also the identity folder name under
      *  /Identity/. Older saves lack it; readers fall back to parsing
@@ -167,6 +171,14 @@ export function useAgentStack() {
     });
   }, []);
 
+  const setInstanceVoice = useCallback((id: string, voice: string | undefined) => {
+    setStack((prev) => {
+      const next = prev.map((i) => (i.id === id ? { ...i, voice: voice || undefined } : i));
+      save(next);
+      return next;
+    });
+  }, []);
+
   const setInstanceWardrobe = useCallback((id: string, wardrobe: WardrobeSettings) => {
     setStack((prev) => {
       const next = prev.map((i) => (i.id === id ? { ...i, wardrobe } : i));
@@ -195,5 +207,5 @@ export function useAgentStack() {
     setStack(next);
   }, []);
 
-  return { stack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, resetStack, hydrateStack };
+  return { stack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, setInstanceVoice, resetStack, hydrateStack };
 }

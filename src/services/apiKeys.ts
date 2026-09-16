@@ -472,6 +472,11 @@ export interface ApiKeysProfile {
   elevenlabs_voice_override: boolean;
   kokoro_voice_override: boolean;
   supertonic_voice_override: boolean;
+  /** One cloned voice for every agent on the local clone engines (Pocket,
+   *  Chatterbox). `local_voice` is a stem from Settings > Voice > Your
+   *  voices; off (the default) keeps each agent's own voice. 2026-09-16. */
+  local_voice: string | null;
+  local_voice_override: boolean;
   /** Tools on or off. One model does everything (2026-09-15): when a
    *  question needs the web, a browser, files or code, the SAME model
    *  the user picked above takes its time with tools. Off = every reply
@@ -561,6 +566,8 @@ export const DEFAULT_API_KEYS: ApiKeysProfile = {
   elevenlabs_voice_override: false,
   kokoro_voice_override:    false,
   supertonic_voice_override: false,
+  local_voice:              null,
+  local_voice_override:     false,
   agentic_enabled:          false,
   gemini_search_api_key:    null,
   grounding_search_enabled: false,

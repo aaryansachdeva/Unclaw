@@ -562,7 +562,7 @@ function AppMain() {
   // switcher carousel is selected. The carousel is [...stack, ADD_SLOT]; the
   // ADD_SLOT opens the picker over a blank stage. `selectedInstanceId` holds a
   // real roster instance id or ADD_SLOT.
-  const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, resetStack, hydrateStack } = useAgentStack();
+  const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, setInstanceVoice, resetStack, hydrateStack } = useAgentStack();
   // Global environment — backdrop + key light + post effect (persists across
   // agents, NOT per-instance). See src/hooks/useEnvironment.ts. Applied on every
   // switch + whenever it changes.
@@ -1129,8 +1129,13 @@ function AppMain() {
   // Voice follows the photo-read gender for generated characters: feminine ->
   // Grace's voice, masculine -> Mark's. Preset agents have no identity gender,
   // so they keep their own.
-  const personaVoices = voicesForInstance(
+  const personaVoicesBase = voicesForInstance(
     activeAgentId, currentInstance?.identity?.gender ?? null, personaCustomName);
+  // A cloned voice assigned to this instance replaces the character's stem
+  // on the local clone engines; the cloud engines keep the character's ids.
+  const personaVoices = currentInstance?.voice
+    ? { ...personaVoicesBase, pocket: currentInstance.voice, chatterbox: currentInstance.voice }
+    : personaVoicesBase;
   // Companion surfaces (the Chrome panel, the phone) chat through soul's
   // RPC path, which knows nothing about the renderer's character profiles:
   // without this push they spoke with the globally-saved BYOK voice and the
@@ -4924,6 +4929,12 @@ function AppMain() {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         onSaved={() => void refreshActiveLlmModel()}
+        voiceAgents={agentStack.map((i) => ({
+          id: i.id,
+          label: characterFor(i.agentId, i.name).displayName,
+          voice: i.voice,
+        }))}
+        onAssignVoice={setInstanceVoice}
       />
 
       {/* Greeting + ambient widgets. Gated only on a connected stream

@@ -44,6 +44,7 @@ import {
 import { Dropdown } from './Onboarding/Dropdown';
 import { fetchOllamaModels, type SoulProviderModel } from '../services/providers';
 import { McpServersSection } from './settings/McpServersSection';
+import { VoiceCloneSection, type VoiceAgentRow } from './settings/VoiceCloneSection';
 import { POCKET_TTS_ENABLED, CHATTERBOX_TTS_ENABLED } from '../features';
 import { usePassthroughPrefs } from '../hooks/usePassthroughPrefs';
 import { Slider } from './Onboarding/Slider';
@@ -68,6 +69,9 @@ interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
   onSaved?: (next: ApiKeysProfile) => void;
+  /** Roster instances for the cloned-voice picker (Settings > Voice). */
+  voiceAgents?: VoiceAgentRow[];
+  onAssignVoice?: (instanceId: string, slug: string | undefined) => void;
 }
 
 type SaveState =
@@ -141,7 +145,7 @@ interface PaneContext {
 // Root
 // =============================================================================
 
-export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
+export function SettingsPanel({ open, onClose, onSaved, voiceAgents, onAssignVoice }: SettingsPanelProps) {
   const [draft, setDraft] = useState<ApiKeysProfile>(DEFAULT_API_KEYS);
   const [original, setOriginal] = useState<ApiKeysProfile>(DEFAULT_API_KEYS);
   const [loading, setLoading] = useState(true);
@@ -488,7 +492,7 @@ export function SettingsPanel({ open, onClose, onSaved }: SettingsPanelProps) {
                     >
                       {active === 'profile'  && <ProfileFacet  {...ctx} />}
                       {active === 'chat'     && <ChatFacet     {...ctx} />}
-                      {active === 'voice'    && <VoiceFacet    {...ctx} />}
+                      {active === 'voice'    && <VoiceFacet    {...ctx} voiceAgents={voiceAgents} onAssignVoice={onAssignVoice} />}
                       {active === 'agentic'  && <ToolsFacet    {...ctx} />}
                       {active === 'graphics' && <GraphicsFacet {...ctx} />}
                       {active === 'about'    && <AboutFacet    />}
@@ -763,7 +767,7 @@ function GroundingSection({
 // VOICE, TTS
 // =============================================================================
 
-function VoiceFacet({ draft, update }: PaneContext) {
+function VoiceFacet({ draft, update, voiceAgents, onAssignVoice }: PaneContext & { voiceAgents?: VoiceAgentRow[]; onAssignVoice?: (instanceId: string, slug: string | undefined) => void }) {
   return (
     <Composition
       eyebrow="the voice that speaks replies"
@@ -883,6 +887,16 @@ function VoiceFacet({ draft, update }: PaneContext) {
               </FieldStack>
             )}
           </>
+        )}
+
+        {(draft.tts_provider === 'pocket' || draft.tts_provider === 'chatterbox') && (
+          <VoiceCloneSection
+            overrideVoice={draft.local_voice}
+            overrideOn={draft.local_voice_override}
+            onOverrideChange={(voice, on) => { update('local_voice', voice); update('local_voice_override', on); }}
+            agents={voiceAgents}
+            onAssignVoice={onAssignVoice}
+          />
         )}
 
         <PassthroughVoiceControls />
