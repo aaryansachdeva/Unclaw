@@ -43,6 +43,7 @@ import {
 } from '../services/apiKeys';
 import { Dropdown } from './Onboarding/Dropdown';
 import { fetchOllamaModels, type SoulProviderModel } from '../services/providers';
+import { McpServersSection } from './settings/McpServersSection';
 import { POCKET_TTS_ENABLED, CHATTERBOX_TTS_ENABLED } from '../features';
 import { usePassthroughPrefs } from '../hooks/usePassthroughPrefs';
 import { Slider } from './Onboarding/Slider';
@@ -994,6 +995,15 @@ function ToolsFacet({ draft, update, thinkingCapsByModel }: PaneContext) {
               onChange={(v) => update('agentic_thinking_effort', (v as ThinkingEffort) || 'medium')}
               options={thinkingOptionsFor(cap)}
             />
+          </FieldStack>
+        )}
+
+        {draft.agentic_enabled && canRunTools && (
+          <FieldStack
+            label="MCP servers"
+            aside={<InlineHint>yours, loaded on demand</InlineHint>}
+          >
+            <McpServersSection />
           </FieldStack>
         )}
       </Stack>

@@ -28,7 +28,8 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { SoulBootScreen } from './components/SoulBootScreen';
 import { SetupWizard } from './components/SetupWizard';
 import { UpdateOverlay } from './components/UpdateOverlay';
-import type { GlancePrefs, WardrobeSettings } from './services/userSettings';
+import { readGlancePrefs, type GlancePrefs, type WardrobeSettings } from './services/userSettings';
+import { listCustomWidgets, restoreCustomWidget, specForAccount, type CustomWidget } from './services/customWidgets';
 import {
   initSoulBase,
   getSoulBaseUrl,
@@ -615,6 +616,11 @@ function AppMain() {
   const [isSending, setIsSending] = useState(false);
   // Bumped after every chat round so the Reminders panel re-fetches.
   const [refreshKey, setRefreshKey] = useState(0);
+  // Custom widgets the model built (soul owns the specs, services/
+  // customWidgets): polled on a slow beat and after every chat round, so
+  // a widget_create in the tool loop shows up as a draft within seconds.
+  const [customWidgets, setCustomWidgets] = useState<CustomWidget[]>([]);
+  const customRestoredRef = useRef(false);
   // True while a gpt-5.4-mini escalation is running in the background. UI
   // can show a small "thinking" pill; input stays unblocked so the user
   // can still type. NOTE v1 limitation: a new chat round won't cancel
@@ -4212,6 +4218,34 @@ function AppMain() {
   // shouldn't distract during first-run setup. Reopening onboarding to edit
   // keeps them enabled (profile already exists).
   const onboardingComplete = !!profile && wizardMode !== 'first';
+  // Custom widgets: soul is the source of truth on this Mac; the account
+  // keeps a copy of the active specs (glance.custom) so another Mac can
+  // restore them on first sight. Drafts stay local until kept.
+  const refreshCustomWidgets = useCallback(async () => {
+    let list = await listCustomWidgets();
+    const prefs = readGlancePrefs(profileRef.current?.glance);
+    const saved = prefs.custom ?? [];
+    if (!customRestoredRef.current && profileRef.current) {
+      customRestoredRef.current = true;
+      const have = new Set(list.map((w) => w.spec.id));
+      const missing = saved.filter((s) => !have.has(s.id));
+      if (missing.length > 0) {
+        await Promise.all(missing.map((s) => restoreCustomWidget(s)));
+        list = await listCustomWidgets();
+      }
+    }
+    setCustomWidgets(list);
+    const mirror = list.filter((w) => w.spec.status === 'active').map((w) => specForAccount(w.spec));
+    if (profileRef.current && JSON.stringify(mirror) !== JSON.stringify(saved)) {
+      handleGlanceChange({ ...prefs, custom: mirror });
+    }
+  }, [handleGlanceChange]);
+  useEffect(() => {
+    if (!onboardingComplete) return undefined;
+    void refreshCustomWidgets();
+    const id = window.setInterval(() => { void refreshCustomWidgets(); }, 60_000);
+    return () => window.clearInterval(id);
+  }, [onboardingComplete, refreshKey, refreshCustomWidgets]);
 
   useEffect(() => {
     if (connectionState !== 'connected') return;
@@ -4951,6 +4985,8 @@ function AppMain() {
           if (voice.isListening) void voice.stop();
           inputBarRef.current?.insertTemplate(buildReminderTemplate({ day }));
         }}
+        customWidgets={customWidgets}
+        onCustomWidgetsChanged={() => { void refreshCustomWidgets(); }}
       />
 
       {/* Ambient widget sheets are disabled until onboarding completes — they

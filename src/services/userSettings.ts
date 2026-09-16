@@ -20,6 +20,7 @@
 // This module replaces the old `services/profile.ts`. Everything that
 // previously consumed `UserProfile` should switch to `UserSettings`.
 
+import type { WidgetSpec } from './customWidgets';
 import type { SoulChatResult } from './soulChat';
 import type { EnvironmentSettings } from '../hooks/useEnvironment';
 import type { AgentInstance } from '../hooks/useAgentStack';
@@ -118,6 +119,9 @@ export interface GlancePrefs {
   /** Weather places in cycle order. The first one also feeds the chat
    *  tier's cached weather. */
   places?: WeatherPlace[];
+  /** Custom widget specs (services/customWidgets), active ones only, with
+   *  header values blanked; soul on each machine keeps the real copy. */
+  custom?: WidgetSpec[];
 }
 
 /** Defensive read of `glance`: drops malformed entries, never throws. */
@@ -137,6 +141,14 @@ export function readGlancePrefs(raw: unknown): GlancePrefs {
       return typeof o.id === 'string' && typeof o.name === 'string'
         && typeof o.lat === 'number' && Number.isFinite(o.lat)
         && typeof o.lon === 'number' && Number.isFinite(o.lon);
+    });
+  }
+  if (Array.isArray(g.custom)) {
+    out.custom = g.custom.filter((w): w is WidgetSpec => {
+      if (!w || typeof w !== 'object') return false;
+      const o = w as Record<string, unknown>;
+      return typeof o.id === 'string' && typeof o.label === 'string'
+        && !!o.source && typeof o.source === 'object' && !!o.view && typeof o.view === 'object';
     });
   }
   return out;

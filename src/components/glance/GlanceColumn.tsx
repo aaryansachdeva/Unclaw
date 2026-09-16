@@ -36,9 +36,15 @@ import type { Reminder } from '../../services/reminders';
 import type { NewsArticle } from '../../services/news';
 import { readGlancePrefs, type GlancePrefs } from '../../services/userSettings';
 import {
-  ALL_GLANCES, GLANCE_LABELS, hiddenGlances, loadGlanceLayout, saveGlanceLayout,
+  ALL_GLANCES,  hiddenGlances, loadGlanceLayout, saveGlanceLayout,
   type GlanceKey, type GlanceLayout,
+  visibleGlances, removeGlance, addGlance, glanceLabel,
 } from '../../services/glanceLayout';
+import {
+  customKey, setWidgetStatus, deleteCustomWidget, refreshCustomWidget,
+  type CustomWidget,
+} from '../../services/customWidgets';
+import { CustomGlance } from './CustomGlance';
 import { RemindersGlance } from './RemindersGlance';
 import { WeatherGlance } from './WeatherGlance';
 import { StocksGlance } from './StocksGlance';
@@ -75,11 +81,16 @@ interface Props {
   onSummarizeArticle?: (article: NewsArticle) => void;
   /** Reminders +: start a reminder in the input bar (on a picked day). */
   onAddReminder?: (day?: string) => void;
+  /** Custom widgets the model built (services/customWidgets); drafts included. */
+  customWidgets?: CustomWidget[];
+  /** A draft was kept or discarded, or a widget refreshed; the owner refetches. */
+  onCustomWidgetsChanged?: () => void;
 }
 
 export function GlanceColumn({
   top, reminders, onCompleteReminder, onRemindersChanged, activeWidget, onOpen, onClose, refreshKey, faded = false,
   glance, onGlanceChange, onSummarizeArticle, onAddReminder,
+  customWidgets = [], onCustomWidgetsChanged,
 }: Props) {
   const reduce = useReducedMotion() ?? false;
   const [now, setNow] = useState(() => new Date());
@@ -123,9 +134,16 @@ export function GlanceColumn({
   const bootedRef = useRef(false);
   useEffect(() => { const t = window.setTimeout(() => { bootedRef.current = true; }, 1500); return () => window.clearTimeout(t); }, []);
 
-  const hidden = useMemo(() => hiddenGlances(layout), [layout]);
-  const remove = (key: GlanceKey) => updateLayout({ order: layout.order.filter((k) => k !== key) });
-  const add = (key: GlanceKey) => updateLayout({ order: [...layout.order, key] });
+  const customKeys = useMemo(() => customWidgets.map((w) => customKey(w.spec.id)), [customWidgets]);
+  const customLabels = useMemo(
+    () => Object.fromEntries(customWidgets.map((w) => [customKey(w.spec.id), w.spec.label])),
+    [customWidgets],
+  );
+  const hidden = useMemo(() => hiddenGlances(layout, customKeys), [layout, customKeys]);
+  const shownOrder = useMemo(() => visibleGlances(layout, customKeys), [layout, customKeys]);
+  const remove = (key: GlanceKey) => updateLayout(removeGlance(layout, key));
+  const add = (key: GlanceKey) => updateLayout(addGlance(layout, key));
+  const customFor = (key: GlanceKey) => customWidgets.find((w) => customKey(w.spec.id) === key);
 
   const noop = useCallback(() => {}, []);
   const prefs = useMemo(() => readGlancePrefs(glance), [glance]);
@@ -162,10 +180,24 @@ export function GlanceColumn({
           />
         );
       case 'news': return <NewsGlance refreshKey={refreshKey} onSummarize={onSummarizeArticle} {...p} />;
+      default: {
+        const w = customFor(key);
+        if (!w) return null;
+        const id = w.spec.id;
+        return (
+          <CustomGlance
+            widget={w}
+            onKeep={() => { void setWidgetStatus(id, 'active').then(() => onCustomWidgetsChanged?.()); }}
+            onDiscard={() => { void deleteCustomWidget(id).then(() => onCustomWidgetsChanged?.()); }}
+            onRefresh={() => { void refreshCustomWidget(id).then(() => onCustomWidgetsChanged?.()); }}
+            {...p}
+          />
+        );
+      }
     }
   };
 
-  const visible: GlanceKey[] = !reminders ? [] : expanded ? layout.order.filter((k) => k === expanded) : layout.order;
+  const visible: GlanceKey[] = !reminders ? [] : expanded ? shownOrder.filter((k) => k === expanded) : shownOrder;
 
   const baseDelay = reduce ? 0 : 0.15;
   const stagger = reduce ? 0 : 0.18;
@@ -204,12 +236,12 @@ export function GlanceColumn({
            widgets offered back below, Done at the foot. */
         <Reorder.Group
           axis="y"
-          values={layout.order}
-          onReorder={(order) => updateLayout({ order: order as GlanceKey[] })}
+          values={shownOrder}
+          onReorder={(order) => updateLayout({ ...layout, order: order as GlanceKey[] })}
           as="div"
           style={{ listStyle: 'none', margin: 0, padding: 0 }}
         >
-          {layout.order.map((key) => (
+          {shownOrder.map((key) => (
             <EditableItem key={key} value={key}>
               {(controls) => nodeFor(key, { dragControls: controls })}
             </EditableItem>
@@ -265,13 +297,13 @@ export function GlanceColumn({
                 <div style={{ ...GLANCE_LABEL_STYLE, padding: '6px 8px 3px' }}>Add</div>
                 {hidden.map((key) => (
                   <FootButton key={key} onClick={() => add(key)} icon={<Plus size={12} strokeWidth={2.5} />} tone="secondary">
-                    {GLANCE_LABELS[key]}
+                    {glanceLabel(key, customLabels)}
                   </FootButton>
                 ))}
               </motion.div>
             )}
           </AnimatePresence>
-          {layout.order.length === 0 && !editing ? (
+          {shownOrder.length === 0 && !editing ? (
             <FootButton onClick={() => setEditing(true)} icon={<Plus size={12} strokeWidth={2.5} />}>
               Add widgets
             </FootButton>
