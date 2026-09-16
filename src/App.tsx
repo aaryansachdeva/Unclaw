@@ -2436,21 +2436,22 @@ function AppMain() {
     // carries images.
     // The staged article rides on the user turn (useChatMemory expands it
     // into the history the model reads, for this turn and follow-ups).
-    // Its read started when it was staged; wait a moment for one still in
-    // flight, else send the headline alone.
+    // Its read started when it was staged; wait for one still in flight
+    // (a bot-walled site goes through soul's reader proxy, several seconds),
+    // else send the headline alone.
     let turnArticle: { title: string; source: string; url: string; text?: string } | undefined;
     if (stagedArticle) {
       const read = stagedArticle.read !== undefined
         ? stagedArticle.read
         : await Promise.race([
             articleReadRef.current ?? Promise.resolve(null),
-            new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 4000)),
+            new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 15000)),
           ]);
       turnArticle = {
         title: stagedArticle.article.title,
         source: stagedArticle.article.source,
         url: read?.resolved_url || stagedArticle.article.url,
-        ...(read?.text ? { text: read.text.slice(0, 6000) } : {}),
+        ...(read?.text ? { text: read.text.slice(0, 12000) } : {}),
       };
       setAttachedArticle(null);
       articleReadRef.current = null;

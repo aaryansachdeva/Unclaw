@@ -68,7 +68,9 @@ export interface ArticleRead {
   title: string;
   /** Readable article text, capped; empty when the site could not be read. */
   text: string;
-  text_from: 'jsonld' | 'paragraphs' | 'description' | 'none';
+  /** reader_* when the publisher blocked soul and the page came through the reader proxy. */
+  text_from: 'jsonld' | 'paragraphs' | 'description' | 'none'
+    | 'reader_jsonld' | 'reader_paragraphs' | 'reader_description';
 }
 
 /** Read one article through soul for the News glance's Summarize. null on
