@@ -3181,6 +3181,8 @@ function AppMain() {
   // `agentIdForWardrobe` is the instance being dressed, passed explicitly
   // rather than read off the active instance: this runs right after a swap,
   // when "active" may still be the character we just left.
+  const currentInstanceRef = useRef(currentInstance);
+  currentInstanceRef.current = currentInstance;
   const applyInstanceWardrobe = useCallback(async (
     w: WardrobeSettings | null | undefined,
     agentIdForWardrobe?: string | null,
@@ -3192,10 +3194,14 @@ function AppMain() {
     // switch instead of letting the previous character's outfit bleed through.
     const epoch = opts?.epoch ?? ++dressEpochRef.current;
     const isAlive = () => dressEpochRef.current === epoch;
+    // The instance being dressed: the one whose wardrobe object this is, else
+    // the one on stage. An imported MetaHuman keeps its own grooms.
+    const dressed = agentStackRef.current.find((i) => w && i.wardrobe === w) ?? currentInstanceRef.current;
     await dressCharacter({
       wardrobe: w ?? {},
       agentId: agentIdForWardrobe,
       scope: opts?.scope ?? 'full',
+      skipGrooms: !!dressed?.identity?.groomsDir,
       emit: (payload) => {
         pixelStreaming.emitUIInteraction({
           ...payload,

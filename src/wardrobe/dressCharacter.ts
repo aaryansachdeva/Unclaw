@@ -73,6 +73,8 @@ export interface DressCharacterOptions {
   emit: (payload: DescriptorPayload) => void;
   /** Arm a waiter for UE's ack of `eventType`. Resolves false on silence. */
   waitForAck: (eventType: string, timeoutMs?: number) => Promise<boolean>;
+  /** Leave hair/brows/lashes alone (imported grooms own them). */
+  skipGrooms?: boolean;
   /** False once this run is superseded; checked before every send. */
   isAlive: () => boolean;
 }
@@ -80,7 +82,7 @@ export interface DressCharacterOptions {
 /** Build the ordered descriptor list for a wardrobe + scope. Exported for
  *  tests; the order IS the contract (garments before their colors). */
 export function buildDressPayloads(
-  w: WardrobeSettings, agentId: string | null | undefined, scope: DressScope,
+  w: WardrobeSettings, agentId: string | null | undefined, scope: DressScope, skipGrooms = false,
 ): DescriptorPayload[] {
   const out: DescriptorPayload[] = [];
 
@@ -116,11 +118,15 @@ export function buildDressPayloads(
     item('top',    w.topIndex,    def.top);
     item('bottom', w.bottomIndex, def.bottom);
     item('shoes',  w.shoesIndex,  def.shoes);
-    item('hair',   w.hairIndex,   def.hair);
-    if (isCustomCharacter(agentId)) {
-      // Base/legacy characters have no selectable brows/lashes (one baked each).
-      item('eyebrow', w.browIndex, def.brow);
-      item('eyelash', w.lashIndex, def.lash);
+    // An imported MetaHuman brings its own grooms (applied with the identity);
+    // the catalog hair/brows/lashes must not land on top of them.
+    if (!skipGrooms) {
+      item('hair',   w.hairIndex,   def.hair);
+      if (isCustomCharacter(agentId)) {
+        // Base/legacy characters have no selectable brows/lashes (one baked each).
+        item('eyebrow', w.browIndex, def.brow);
+        item('eyelash', w.lashIndex, def.lash);
+      }
     }
   }
 
@@ -145,10 +151,10 @@ export function buildDressPayloads(
 }
 
 export async function dressCharacter(
-  { wardrobe, agentId, scope = 'full', emit, waitForAck, isAlive }: DressCharacterOptions,
+  { wardrobe, agentId, scope = 'full', emit, waitForAck, isAlive, skipGrooms = false }: DressCharacterOptions,
 ): Promise<'done' | 'aborted'> {
   const t0 = performance.now();
-  const payloads = buildDressPayloads(wardrobe, agentId, scope);
+  const payloads = buildDressPayloads(wardrobe, agentId, scope, skipGrooms);
   if (payloads.length === 0) return 'done';
 
   const fireAll = (): boolean => {
