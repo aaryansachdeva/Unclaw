@@ -3227,6 +3227,9 @@ function AppMain() {
       jointsPath: identity.jointsPath ?? '',
       baseColorPath: identity.baseColorPath ?? '',
       normalPath: identity.normalPath ?? '',
+      // Exported grooms staged next to the .dna (Unreal import). The Level BP
+      // hands the folder to ApplyGroomsFromFolder after the identity apply.
+      groomsPath: identity.groomsDir ?? '',
       weight: 1.0,
       Timestamp: new Date().toISOString(),
     });
@@ -4881,7 +4884,7 @@ function AppMain() {
             key="add-custom"
             authToken={authToken ?? null}
             onClose={() => setAddCustomOpen(false)}
-            onIdentityReady={({ dnaPath, blobPath, baseColorPath, jointsPath, normalPath, grooming }) => {
+            onIdentityReady={({ dnaPath, blobPath, baseColorPath, jointsPath, normalPath, groomsDir, grooming }) => {
               // The local pipeline produced the identity artifacts: create the
               // custom instance on the generic host and switch to it. The
               // characterReady handler sends applyIdentity once UE reports the
@@ -4889,7 +4892,7 @@ function AppMain() {
               // lands the user in the customization UI to name + style it.
               const id = addInstance(UNIFIED_AGENT.agentId);
               setInstanceIdentity(id, {
-                dnaPath, blobPath, baseColorPath, jointsPath, normalPath,
+                dnaPath, blobPath, baseColorPath, jointsPath, normalPath, groomsDir,
                 gender: grooming?.gender, build: grooming?.build,
               });
               // Vision-picked grooming becomes the instance's starting

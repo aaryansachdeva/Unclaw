@@ -741,6 +741,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         hairColorParams?: { melanin: number; redness: number }; irisVariant?: string };
       error?: string;
     }> => ipcRenderer.invoke('identity:run-h3d', args),
+    /** Bring-your-own MetaHuman: pick the folder the Unreal exporter wrote and
+     *  stage it for the character host. */
+    importUnreal: (args: { localId: string }): Promise<{
+      ok: boolean; error?: string; name?: string;
+      dnaPath?: string; jointsPath?: string; tablePath?: string; baseColorPath?: string; normalPath?: string;
+      groomsDir?: string; grooms?: string[];
+    }> => ipcRenderer.invoke('identity:import-unreal', args),
     /** Re-roll ONLY the skin texture for a character that already exists.
      *  Seconds, one image call, no Rodin credit and no headless UE boot. */
     regenBasecolor: (args: { localId: string }): Promise<{

@@ -13,7 +13,7 @@ import {
   desktopCapturer,
   systemPreferences,
   Display,
-  IpcMainEvent, Notification } from 'electron';
+  IpcMainEvent, Notification, dialog } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { spawnSync } from 'child_process';
@@ -23,7 +23,7 @@ import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPa
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { runLocalIdentityInference, runLocalPhotoInference, type GroomArgs } from './identityInference';
-import { listBasecolors, regenerateBasecolor, runH3DPhotoToCharacter } from './h3dPipeline';
+import { listBasecolors, regenerateBasecolor, runH3DPhotoToCharacter, importUnrealExport } from './h3dPipeline';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
 import * as directSurface from './directSurface';
 import * as streamLease from './streamLease';
@@ -1586,6 +1586,22 @@ ipcMain.handle(
 // H3D tier: photo -> Gemini hair removal -> Rodin bust -> local UE chain ->
 // .dna + .ujnt. Long-running (Rodin plus a headless UE boot), progress arrives
 // on the same identity:progress channel.
+// Bring-your-own MetaHuman: the user picks the folder the Unreal exporter
+// wrote; main stages it into the UE container and returns the identity paths.
+ipcMain.handle('identity:import-unreal', async (_event, args: { localId: string }) => {
+  if (!args?.localId) return { ok: false, error: 'invalid_args' };
+  const res = await dialog.showOpenDialog(mainWindow ?? undefined as never, {
+    title: 'Choose the folder exported from Unreal',
+    properties: ['openDirectory'],
+  });
+  if (res.canceled || !res.filePaths[0]) return { ok: false, error: 'cancelled' };
+  try {
+    return importUnrealExport(args.localId, res.filePaths[0]);
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+});
+
 ipcMain.handle(
   'identity:run-h3d',
   async (_event, args: {

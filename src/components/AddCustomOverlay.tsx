@@ -406,6 +406,8 @@ export function AddCustomOverlay({
     jointsPath?: string;
     /** MetaHuman Creator's skin-detail normal, H3D tier only. */
     normalPath?: string;
+    /** Exported grooms folder, Unreal import only. */
+    groomsDir?: string;
     grooming?: { gender: 'm' | 'f'; build?: 'skinny' | 'fit' | 'fat'; hairIndex: number; browIndex: number; lashIndex: number; hairColor?: string; eyeColor?: string;
       hairColorParams?: { melanin: number; redness: number }; irisVariant?: string };
   }) => void;
@@ -430,6 +432,31 @@ export function AddCustomOverlay({
   // Photo-only tier: user picked a flat picture instead of scanning the QR.
   // The particle reveal plays on the raw photo (no person matte locally) while
   // the synthesized-depth pipeline runs.
+  /** Bring-your-own MetaHuman: the main process shows a folder picker, stages
+   *  the export into the UE container, and the identity lands on the generic
+   *  host exactly like a photo-built one. Grooms in the export are staged too;
+   *  the host applies them once the runtime groom path ships. */
+  const importFromUnreal = useCallback(async () => {
+    const api = window.electronAPI?.identity;
+    if (!api?.importUnreal) { setError('This build cannot import Unreal exports.'); return; }
+    setError(null);
+    const localId = `ue_${Date.now().toString(36)}`;
+    const res = await api.importUnreal({ localId });
+    if (!res.ok || !res.dnaPath) {
+      if (res.error !== 'cancelled') setError(res.error ?? 'import failed');
+      return;
+    }
+    onIdentityReadyRef.current?.({
+      sessionId: localId,
+      dnaPath: res.dnaPath,
+      jointsPath: res.jointsPath,
+      baseColorPath: res.baseColorPath,
+      normalPath: res.normalPath,
+      groomsDir: res.grooms && res.grooms.length ? res.groomsDir : undefined,
+      blobPath: '',
+    });
+  }, []);
+
   const startPhotoInference = useCallback(async (file: File) => {
     const api = window.electronAPI?.identity;
     if (!api?.runH3D) { setInferLine('local inference unavailable'); return; }
@@ -881,6 +908,25 @@ export function AddCustomOverlay({
                 ? 'Drop to use this photo.'
                 : 'One front-on photo, face clearly visible and evenly lit. Click or drag one in.'}
             </Hint>
+            <button
+              type="button"
+              onClick={() => void importFromUnreal()}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 7,
+                padding: '7px 14px',
+                borderRadius: 999,
+                background: 'transparent',
+                border: '1px dashed rgba(255,255,255,0.18)',
+                color: 'var(--text-ghost)',
+                fontFamily: 'inherit',
+                fontSize: 12,
+                cursor: 'pointer',
+              }}
+            >
+              Import a MetaHuman exported from Unreal
+            </button>
             <button
               type="button"
               onClick={() => { setError(null); setWantQr(true); }}

@@ -48,6 +48,9 @@ export interface AgentInstance {
     jointsPath?: string;
     /** Vision-read body build, replayed as setBlendsUnified axes. */
     build?: 'skinny' | 'fit' | 'fat';
+    /** Folder of exported grooms (<slot>.ustrand + .json) staged beside the
+     *  .dna by an Unreal import; the host rebuilds and binds them at runtime. */
+    groomsDir?: string;
   };
 }
 

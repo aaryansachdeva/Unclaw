@@ -757,6 +757,50 @@ function stageForUE(
   return { dnaPath, jointsPath, tablePath, baseColorPath, normalPath };
 }
 
+/**
+ * Bring-your-own MetaHuman: a folder written by the editor-side export
+ * (manifest.json + head.dna + joints.ujnt + basecolor/normal PNGs + grooms/).
+ * Stage the identity files the way the H3D tier does (the sandboxed UE cannot
+ * read userData) and copy the grooms next to them, so one Identity/<id>/
+ * folder inside the container holds everything the character needs.
+ */
+export function importUnrealExport(localId: string, folder: string): {
+  ok: boolean; error?: string; name?: string;
+  dnaPath?: string; jointsPath?: string; tablePath?: string; baseColorPath?: string; normalPath?: string;
+  groomsDir?: string; grooms?: string[];
+} {
+  const manifestPath = path.join(folder, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) return { ok: false, error: 'no manifest.json in that folder' };
+  let man: { name?: string; files?: Record<string, string | null>; grooms?: Record<string, { strand: string; settings: string }> };
+  try {
+    man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  } catch (e) {
+    return { ok: false, error: `manifest unreadable: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  const f = man.files ?? {};
+  if (!f.dna || !fs.existsSync(path.join(folder, f.dna))) return { ok: false, error: 'the export has no head.dna' };
+  const staged = stageForUE(localId, {
+    dna: path.join(folder, f.dna),
+    ujnt: f.ujnt ? path.join(folder, f.ujnt) : undefined,
+    basecolor: f.basecolor ? path.join(folder, f.basecolor) : undefined,
+    normal: f.normal ? path.join(folder, f.normal) : undefined,
+  });
+  const dir = path.dirname(staged.dnaPath);
+  const grooms: string[] = [];
+  if (man.grooms && Object.keys(man.grooms).length) {
+    const dst = path.join(dir, 'grooms');
+    fs.mkdirSync(dst, { recursive: true });
+    for (const [slot, g] of Object.entries(man.grooms)) {
+      for (const rel of [g.strand, g.settings]) {
+        const src = path.join(folder, rel);
+        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dst, path.basename(src)));
+      }
+      grooms.push(slot);
+    }
+  }
+  return { ok: true, name: man.name, ...staged, groomsDir: path.join(dir, 'grooms'), grooms };
+}
+
 export interface H3DResult {
   ok: boolean;
   dnaPath?: string;
