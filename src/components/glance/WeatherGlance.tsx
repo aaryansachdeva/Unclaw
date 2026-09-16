@@ -160,7 +160,6 @@ export const WeatherGlance = forwardRef<HTMLDivElement, Props>(function WeatherG
     const Icon = iconFor(cur.icon);
     const today = d.daily?.[0];
     const meta = [
-      opts.place,
       today ? `H ${deg(today.hi_c)} L ${deg(today.lo_c)}` : null,
       opts.detail && cur.wind_kph ? `wind ${Math.round(cur.wind_kph)} km/h` : null,
     ].filter(Boolean).join(' · ');
@@ -175,10 +174,15 @@ export const WeatherGlance = forwardRef<HTMLDivElement, Props>(function WeatherG
               <span style={{ color: 'var(--text-secondary)', opacity: 0.85 }}>, feels {deg(cur.feels_like_c)}</span>
             )}
           </span>
-          {meta && (
+          {(opts.place || meta) && (
             /* The cycling line names its place, so it truncates; the
-               expanded detail wraps instead (wind can be long). */
+               expanded detail wraps instead (wind can be long). The place
+               keeps its own capitals; the rest is the usual caps meta. */
             <span style={!opts.detail ? { ...GLANCE_META_STYLE, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 190 } : GLANCE_META_STYLE}>
+              {opts.place && (
+                <span style={{ textTransform: 'none', letterSpacing: '0.02em' }}>{opts.place}</span>
+              )}
+              {opts.place && meta ? ' · ' : ''}
               {meta}
             </span>
           )}
@@ -258,7 +262,7 @@ export const WeatherGlance = forwardRef<HTMLDivElement, Props>(function WeatherG
               onRemove={onPlacesChange ? () => removePlace(p.id) : undefined}
             />
           ))}
-          <div style={{ ...GLANCE_LABEL_STYLE, padding: '10px 8px 3px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <div style={{ ...GLANCE_LABEL_STYLE, textTransform: 'none', letterSpacing: '0.02em', fontSize: 11, color: 'var(--text-secondary)', padding: '10px 8px 3px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {[nameOf(selected), isAuto(selected) ? subOf(selected) : null].filter(Boolean).join(' · ')}
           </div>
         </div>
@@ -360,7 +364,7 @@ function PlaceRow({
             {name}
           </span>
           {sub && (
-            <span style={{ ...GLANCE_META_STYLE, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sub}</span>
+            <span style={{ ...GLANCE_META_STYLE, textTransform: 'none', letterSpacing: '0.02em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sub}</span>
           )}
         </span>
       </button>

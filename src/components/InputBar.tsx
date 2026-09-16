@@ -18,7 +18,8 @@ import {
   useRef,
   useState,
 } from 'react';
-import { DETAILS_LABEL, DETAILS_LINE, SLOT_OPEN, finalizeReminderTemplate, missingSubject, nextSlot, slotRanges, templateSegments } from '../services/reminderTemplate';
+import { DETAILS_LABEL, DETAILS_LINE, boxContent, clampIntoSubject, field, fieldContentRanges, fieldKind, fieldRanges, fieldValue, finalizeReminderTemplate, hasBlanks, missingSubject, nextSlot, subjectCaret, templateSegments } from '../services/reminderTemplate';
+import { TemplateFieldPicker } from './TemplateFieldPicker';
 import { createPortal } from 'react-dom';
 import {
   AnimatePresence,
@@ -197,15 +198,18 @@ export interface InputBarHandle {
   insertTemplate(text: string): void;
 }
 
-/** A template blank in the mirror; brighter while it holds the selection. */
-function slotBlockStyle(active: boolean) {
-  const bg = active ? 'rgba(255, 255, 255, 0.18)' : 'rgba(255, 255, 255, 0.09)';
+/** A value block (a date, a time) in the mirror: text on a quiet fill,
+ *  brighter while it holds the selection. The side room is real text (a
+ *  clear guillemet and a no-break space each side, which the textarea lays
+ *  out too, so the caret stays aligned); the vertical room is inline
+ *  padding, which never moves a line. */
+function blankStyle(_value: boolean, active: boolean) {
   return {
-    background: bg,
-    boxShadow: `0 0 0 2px ${bg}`,
-    borderRadius: 5,
-    color: active ? 'rgba(255, 255, 255, 0.66)' : 'rgba(255, 255, 255, 0.46)',
-    transition: 'background 0.15s var(--ease-out-quart), box-shadow 0.15s var(--ease-out-quart), color 0.15s var(--ease-out-quart)',
+    borderRadius: 7,
+    padding: '3px 0',
+    background: active ? 'rgba(255, 255, 255, 0.2)' : 'rgba(255, 255, 255, 0.1)',
+    color: 'var(--text-primary)',
+    transition: 'background 0.15s var(--ease-out-quart)',
   } as const;
 }
 
@@ -307,7 +311,9 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       const next = prefix + text;
       templateActiveRef.current = true;
       setMessage(next);
-      pendingSelectionRef.current = nextSlot(next, prefix.length) ?? [next.length, next.length];
+      // No placeholder: the caret waits where the subject goes.
+      const caret = subjectCaret(next) ?? next.length;
+      pendingSelectionRef.current = [caret, caret];
       window.requestAnimationFrame(applyPendingSelection);
     },
   }), []);
@@ -322,14 +328,74 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     const el = e.currentTarget;
     const start = el.selectionStart;
     const end = el.selectionEnd;
-    if (start === end && el.value.includes(SLOT_OPEN)) {
-      const inside = slotRanges(el.value).find(([a, b]) => start > a && start < b);
-      if (inside) { el.setSelectionRange(inside[0], inside[1]); return; }
+    if (start === end && hasBlanks(el.value)) {
+      const clamped = clampIntoSubject(el.value, start);
+      if (clamped != null) { el.setSelectionRange(clamped, clamped); setSelection([clamped, clamped]); return; }
     }
     setSelection([start, end]);
   }, []);
-  const blankSelected = message.includes(SLOT_OPEN)
-    && slotRanges(message).some(([a, b]) => a === selection[0] && b === selection[1]);
+  const blankSelected = hasBlanks(message)
+    && fieldContentRanges(message).some(([a, b]) => a === selection[0] && b === selection[1]);
+  // The template's next step, shown as a quiet trailing hint: Tab to the
+  // next blank, Tab to add details once past the last one, then Enter.
+  const templateHint = templateActiveRef.current && message && !voiceActive
+    ? nextSlot(message, selection[0], selection[1])
+      ? { key: 'Tab', label: 'next' }
+      : !message.includes(DETAILS_LABEL)
+        ? { key: 'Tab', label: 'add details' }
+        : { key: 'Enter', label: 'add reminder' }
+    : null;
+
+  // Date / time picker for a clicked value blank. Opened on mouseup once the
+  // click has settled into a selection; any key in the box or a click
+  // outside closes it; picking rewrites the blank and keeps it a block.
+  const [picker, setPicker] = useState<{ start: number; end: number; kind: 'date' | 'time'; value: string; anchor: DOMRect } | null>(null);
+  const pickerRef = useRef(picker);
+  pickerRef.current = picker;
+  const openPickerAtSelection = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el || !templateActiveRef.current) return;
+    const { selectionStart, selectionEnd } = el;
+    const hit = fieldRanges(el.value).find(([a, b]) => selectionStart >= a && selectionEnd <= b);
+    if (!hit) { setPicker(null); return; }
+    const [from, to] = boxContent(hit);
+    if (selectionStart !== from || selectionEnd !== to) el.setSelectionRange(from, to);
+    setSelection([from, to]);
+    const [a, b] = hit;
+    const block = el.parentElement?.querySelector<HTMLElement>(`[data-blank-start="${a}"]`);
+    if (!block) return;
+    const value = fieldValue(el.value.slice(a, b));
+    setPicker({ start: a, end: b, kind: fieldKind(value), value, anchor: block.getBoundingClientRect() });
+  }, []);
+  const applyPick = useCallback((label: string) => {
+    const p = pickerRef.current;
+    if (!p) return;
+    const current = messageRef.current;
+    const token = field(label);
+    const next = current.slice(0, p.start) + token + current.slice(p.end);
+    setPicker(null);
+    setMessage(next);
+    // Leave the caret inside the box, so it stays a box and can be typed in.
+    const caret = p.start + token.length - 2;
+    pendingSelectionRef.current = [caret, caret];
+    window.requestAnimationFrame(applyPendingSelection);
+  }, []);
+  useEffect(() => { if (!message) setPicker(null); }, [message]);
+  // Escape voids the template from anywhere, even with focus elsewhere (on
+  // the stream, in a widget): it closes an open picker first, then clears.
+  // Capture phase on window, and stopped there, so no other Escape handler
+  // (the glance column's collapse) acts on the same press.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || !templateActiveRef.current || !messageRef.current) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (pickerRef.current) { setPicker(null); textareaRef.current?.focus(); return; }
+      setMessage('');
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
 
   // Cycling placeholder (typewriter).
   const [currentPrompt, setCurrentPrompt] = useState('');
@@ -514,7 +580,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       // say yet: select that blank instead of sending.
       if (missingSubject(text)) {
         const el = textareaRef.current;
-        const slot = el ? nextSlot(el.value, 0) : null;
+        const at = el ? subjectCaret(el.value) : null;
+        const slot: [number, number] | null = at == null ? null : [at, at];
         if (el && slot) { el.focus(); el.setSelectionRange(slot[0], slot[1]); setSelection(slot); }
         return;
       }
@@ -533,6 +600,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   }, [slash, message, hasAttachments, inputLocked, isSending, onSendMessage]);
 
   const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (pickerRef.current && !['Shift', 'Meta', 'Control', 'Alt'].includes(e.key)) setPicker(null);
     if (slash.active) {
       if (e.key === 'ArrowDown') { e.preventDefault(); slash.navigateDown(); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); slash.navigateUp(); return; }
@@ -573,13 +641,13 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       e.preventDefault();
       const el = e.currentTarget;
       const text = el.value;
-      const slot = nextSlot(text, e.shiftKey ? el.selectionStart : el.selectionEnd, e.shiftKey);
+      const slot = nextSlot(text, el.selectionStart, el.selectionEnd, e.shiftKey);
       if (slot) { el.setSelectionRange(slot[0], slot[1]); setSelection(slot); return; }
       if (e.shiftKey) return;
       if (!text.includes(DETAILS_LABEL)) {
         const next = `${text.replace(/\s+$/, '')}\n${DETAILS_LINE}`;
         setMessage(next);
-        pendingSelectionRef.current = slotRanges(next).pop() ?? [next.length, next.length];
+        pendingSelectionRef.current = [next.length, next.length];
         window.requestAnimationFrame(applyPendingSelection);
       } else {
         el.setSelectionRange(text.length, text.length);
@@ -1052,13 +1120,16 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               zIndex: 1,
             }}
           >
-            {message.includes(SLOT_OPEN)
+            {templateActiveRef.current && hasBlanks(message)
               ? templateSegments(message).map((seg) => (seg.slot ? (
-                  /* A template blank: a soft block with its hint. Background plus
-                     a same-colour spread shadow, never padding, so the block adds
-                     no width and the textarea's caret stays aligned; the angle
-                     brackets are painted transparent and read as the padding. */
-                  <span key={seg.start} style={slotBlockStyle(selection[0] < seg.end && selection[1] > seg.start)}>
+                  /* A template blank as a soft block; the guillemets are painted
+                     clear and read as its padding. data-blank-start lets a click
+                     find the block to anchor the date or time picker. */
+                  <span
+                    key={seg.start}
+                    data-blank-start={seg.start}
+                    style={blankStyle(seg.field, selection[0] < seg.end && selection[1] > seg.start)}
+                  >
                     <span style={{ color: 'transparent' }}>{seg.text.slice(0, 1)}</span>
                     {seg.text.slice(1, -1)}
                     <span style={{ color: 'transparent' }}>{seg.text.slice(-1)}</span>
@@ -1095,6 +1166,17 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
           {/* A selected template blank shows as a brighter block in the mirror,
               not as the native selection wash. */}
           <style>{'.unclaw-blank-selected::selection { background: transparent; }'}</style>
+          {picker && createPortal(
+            <TemplateFieldPicker
+              kind={picker.kind}
+              value={picker.value}
+              anchor={picker.anchor}
+              onPick={applyPick}
+              onClose={() => setPicker(null)}
+              ignore={textareaRef.current}
+            />,
+            document.body,
+          )}
           <textarea
             ref={textareaRef}
             value={message}
@@ -1104,6 +1186,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             }}
             onKeyDown={handleKeyDown}
             onSelect={handleSelect}
+            onMouseUp={() => { window.requestAnimationFrame(openPickerAtSelection); }}
             className={blankSelected ? 'unclaw-blank-selected' : undefined}
             onPaste={handlePaste}
             onFocus={() => setIsFocused(true)}
@@ -1234,8 +1317,19 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             </button>
           )}
 
-          {/* Spacer */}
-          <div style={{ flex: 1 }} />
+          {/* Spacer; while a reminder template is in the box it carries the
+              quiet next-step caption ("Tab next · Esc cancel"). */}
+          {templateHint ? (
+            <div style={{ flex: 1, minWidth: 0, display: 'flex', justifyContent: 'flex-end', padding: '0 6px', overflow: 'hidden' }}>
+              <span style={{ fontSize: 11.5, letterSpacing: '0.01em', color: 'var(--text-ghost)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>{templateHint.key}</span> {templateHint.label}
+                <span style={{ padding: '0 7px', opacity: 0.6 }}>·</span>
+                <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>Esc</span> cancel
+              </span>
+            </div>
+          ) : (
+            <div style={{ flex: 1 }} />
+          )}
 
           {/* Right group, "compose": + attach, video call, then the mic/send
               circle. Attach and video sit in their own sub-flex with a tight

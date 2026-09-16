@@ -99,7 +99,14 @@ export const GlanceSection = forwardRef<HTMLDivElement, Props>(function GlanceSe
           </span>
         )}
         <span style={{ ...GLANCE_LABEL_STYLE, ...(editing ? { color: 'var(--text-secondary)', fontSize: 11 } : {}) }}>
-          {label}{!editing && note ? ` · ${note}` : ''}
+          {label}
+          {!editing && note && (
+            /* The note is usually a name (a place, a count): it keeps its own
+               capitals rather than shouting in the label's caps. */
+            <span style={{ textTransform: 'none', letterSpacing: '0.02em', fontWeight: 500 }}>
+              {' · '}{note}
+            </span>
+          )}
         </span>
         {!editing && action}
         {editing && onRemove && (

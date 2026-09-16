@@ -38,7 +38,7 @@ import {
 import { usePixelStreaming } from './hooks/usePixelStreaming';
 import { useVideoRectPublisher } from './hooks/useVideoRectPublisher';
 import { useGazeCursorPublisher } from './hooks/useGazeCursorPublisher';
-import { useChatMemory, type Turn } from './hooks/useChatMemory';
+import { articleForModel, useChatMemory, type Turn } from './hooks/useChatMemory';
 import { fetchCloudChat, pushCloudChat, gatherLocalChat, restoreLocalChat, deleteCloudChat, isChatDirty, markChatDirty, mergeChat } from './services/chatSync';
 import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
@@ -48,7 +48,6 @@ import { chatViaSoul, streamChatViaSoul, fireIdle, fetchCurrentBodyIdle, SoulBod
 import { startPassthroughBridge } from './services/passthrough';
 import { useReminderAlerts } from './hooks/useReminderAlerts';
 import { buildReminderTemplate } from './services/reminderTemplate';
-import { dayKey } from './services/reminderSchedule';
 import { usePassthroughPrefs } from './hooks/usePassthroughPrefs';
 import { pollNextEscalation } from './services/escalation';
 import { sendListeningEvent } from './services/listening';
@@ -2461,6 +2460,17 @@ function AppMain() {
       );
     }
     const history = memory.getHistory();
+    // A shared article rides in the message itself, not only in the history
+    // copy of this turn: soul's Claude Code path sends `history` only when
+    // it opens a fresh session, so on a warm one the article would never
+    // reach the model (it answered about its working folder instead).
+    // The turn's own history entry drops back to the plain question so the
+    // article is not sent twice; follow-ups still see it, from the session
+    // (warm) or from the expanded history (fresh).
+    const outgoing = turnArticle ? `${articleForModel(turnArticle)}\n\n${trimmed}` : trimmed;
+    if (turnArticle && history.length > 0) {
+      history[history.length - 1] = { role: 'user', content: trimmed };
+    }
 
     // Snapshot the screenshot stack at send time and immediately
     // clear so the user can start staging the next batch without
@@ -2537,7 +2547,7 @@ function AppMain() {
         }
       };
       try {
-        for await (const chunk of streamChatViaSoul(trimmed, {
+        for await (const chunk of streamChatViaSoul(outgoing, {
           systemExtension: systemExt,
           voices: personaVoices,
           history,
@@ -2604,7 +2614,7 @@ function AppMain() {
         // chatViaSoul (the streaming pipeline doesn't host the
         // escalation orchestrator yet).
         if (escalationFallback) {
-          const fallback = await chatViaSoul(trimmed, {
+          const fallback = await chatViaSoul(outgoing, {
             systemExtension: systemExt,
             voices: personaVoices,
             history,
@@ -2661,7 +2671,7 @@ function AppMain() {
     }
 
     try {
-      const result = await chatViaSoul(trimmed, {
+      const result = await chatViaSoul(outgoing, {
         systemExtension: systemExt,
         voices: personaVoices,
         history,
@@ -4939,7 +4949,7 @@ function AppMain() {
           // reminderTemplate). Pressing + means typing, and voice mode keeps
           // the box read-only for its transcript, so it steps aside first.
           if (voice.isListening) void voice.stop();
-          inputBarRef.current?.insertTemplate(buildReminderTemplate(day, dayKey(new Date())));
+          inputBarRef.current?.insertTemplate(buildReminderTemplate({ day }));
         }}
       />
 

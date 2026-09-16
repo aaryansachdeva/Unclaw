@@ -2,7 +2,8 @@
 // in caps under it. Expanded, every headline as a row in the same
 // language with source and age, spaced apart; clicking a headline opens
 // the article, and Summarize under each one stages it in the input bar so
-// the next message (a question, or nothing) is about that article.
+// the next message (a question, or nothing) is about that article. The
+// cycling headline carries the same button.
 // Data from soul's free Google News RSS path (services/news), every 30 min.
 
 import { forwardRef, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
@@ -118,6 +119,10 @@ export const NewsGlance = forwardRef<HTMLDivElement, Props>(function NewsGlance(
               <GlanceRow onClick={() => openArticle(shown, onOpen)} ariaLabel={`Open article: ${shown.title}`} align="flex-start">
                 <Headline a={shown} />
               </GlanceRow>
+              {/* Summarize the headline on screen. It lives inside the
+                  hover wrapper, so pointing at it pauses the cycle and the
+                  article cannot change under the click. */}
+              {onSummarize && <SummarizeButton title={shown.title} onClick={() => onSummarize(shown)} />}
             </motion.div>
           </AnimatePresence>
         </div>
