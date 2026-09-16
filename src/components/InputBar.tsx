@@ -36,6 +36,7 @@ import {
 import { SheetKey } from '../hooks/useSheet';
 import { SlashItem, useSlashCommands } from '../hooks/useSlashCommands';
 import { SlashMenu } from './SlashMenu';
+import { ModelEffortPicker } from './ModelEffortPicker';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -174,6 +175,12 @@ interface InputBarProps {
   /** A static placeholder that replaces the cycling prompts while set
    *  (e.g. a staged news article: "Ask about this article"). */
   placeholderOverride?: string;
+  /** The saved chat model; with `onChatModelChanged` it shows the model +
+   *  thinking effort picker in row 2 (hidden in passthrough, where no chat
+   *  model runs). */
+  chatModel?: string | null;
+  /** A pick from that picker was saved. */
+  onChatModelChanged?: () => void;
 }
 
 /** Imperative API for the parent — used by App.tsx to drive the
@@ -240,6 +247,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   selectedAgentId,
   onSelectAgent,
   onAddAgent,
+  chatModel = null,
+  onChatModelChanged,
   personaDisabled = false,
   onPasteImage,
   onAttachImages,
@@ -1328,7 +1337,11 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               </span>
             </div>
           ) : (
-            <div style={{ flex: 1 }} />
+            <div style={{ flex: 1, minWidth: 0, display: 'flex', justifyContent: 'flex-end' }}>
+              {onChatModelChanged && !passthrough && (
+                <ModelEffortPicker activeModel={chatModel} onChanged={onChatModelChanged} reduce={reduce} />
+              )}
+            </div>
           )}
 
           {/* Right group, "compose": + attach, video call, then the mic/send

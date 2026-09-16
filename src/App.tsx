@@ -5273,6 +5273,8 @@ function AppMain() {
                   hasAttachments={attachedImages.length > 0 || !!attachedArticle}
                   placeholderOverride={attachedArticle ? 'Ask about this article, or just send' : undefined}
                   attachHint={canAttachImages ? null : visionHint}
+                  chatModel={activeLlmModel}
+                  onChatModelChanged={() => void refreshActiveLlmModel()}
                   onSendMessage={handleSendMessage}
                   onOpenSheet={handleToggleWidget}
                   onDispatchAnimation={dispatchAnimation}
