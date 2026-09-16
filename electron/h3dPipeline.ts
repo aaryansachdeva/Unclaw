@@ -13,10 +13,11 @@
 // Keys live outside any repo at modal-mh/p1/secrets/*.txt, chmod 600, same
 // convention as the OpenAI pipeline key.
 
-import { BrowserWindow, nativeImage } from 'electron';
+import { BrowserWindow, nativeImage, app } from 'electron';
 import { spawn } from 'child_process';
 import { ueContainerSavedDir } from './identityInference';
 import * as fs from 'node:fs';
+import { extractZip } from './setupCoordinator';
 import * as path from 'node:path';
 
 const SECRETS = '/Users/foton/Documents/Unclaw-Mac/modal-mh/p1/secrets';
@@ -764,6 +765,23 @@ function stageForUE(
  * read userData) and copy the grooms next to them, so one Identity/<id>/
  * folder inside the container holds everything the character needs.
  */
+/** A .unclawchar (zip) from the exporter plugin: extract it under userData
+ *  and hand the folder to importUnrealExport. The manifest may sit at the
+ *  root or one folder down. */
+export async function importUnrealPackage(
+  window: BrowserWindow | null, localId: string, zipPath: string,
+): Promise<ReturnType<typeof importUnrealExport>> {
+  const dest = path.join(app.getPath('userData'), 'identities', localId, 'unpacked');
+  fs.rmSync(dest, { recursive: true, force: true });
+  await extractZip(window as BrowserWindow, zipPath, dest);
+  let folder = dest;
+  if (!fs.existsSync(path.join(folder, 'manifest.json'))) {
+    const sub = fs.readdirSync(dest).find((d) => fs.existsSync(path.join(dest, d, 'manifest.json')));
+    if (sub) folder = path.join(dest, sub);
+  }
+  return importUnrealExport(localId, folder);
+}
+
 export function importUnrealExport(localId: string, folder: string): {
   ok: boolean; error?: string; name?: string;
   dnaPath?: string; jointsPath?: string; tablePath?: string; baseColorPath?: string; normalPath?: string;
@@ -776,6 +794,11 @@ export function importUnrealExport(localId: string, folder: string): {
     man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   } catch (e) {
     return { ok: false, error: `manifest unreadable: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  // A package from the exporter plugin carries its own compatibility verdict.
+  const compat = (man as { compat?: { ok?: boolean; errors?: string[] } }).compat;
+  if (compat && compat.ok === false) {
+    return { ok: false, error: `the exporter reported: ${(compat.errors ?? []).join('; ') || 'incompatible character'}` };
   }
   const f = man.files ?? {};
   if (!f.dna || !fs.existsSync(path.join(folder, f.dna))) return { ok: false, error: 'the export has no head.dna' };

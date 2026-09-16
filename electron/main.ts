@@ -23,7 +23,7 @@ import { getSetupSnapshot, runSetup, downloadAndExtractCharacterPak, characterPa
 import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { runLocalIdentityInference, runLocalPhotoInference, type GroomArgs } from './identityInference';
-import { listBasecolors, regenerateBasecolor, runH3DPhotoToCharacter, importUnrealExport } from './h3dPipeline';
+import { listBasecolors, regenerateBasecolor, runH3DPhotoToCharacter, importUnrealExport, importUnrealPackage } from './h3dPipeline';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
 import * as directSurface from './directSurface';
 import * as streamLease from './streamLease';
@@ -1591,12 +1591,17 @@ ipcMain.handle(
 ipcMain.handle('identity:import-unreal', async (_event, args: { localId: string }) => {
   if (!args?.localId) return { ok: false, error: 'invalid_args' };
   const res = await dialog.showOpenDialog(mainWindow ?? undefined as never, {
-    title: 'Choose the folder exported from Unreal',
-    properties: ['openDirectory'],
+    title: 'Choose the .unclawchar file or the folder exported from Unreal',
+    properties: ['openFile', 'openDirectory'],
+    filters: [{ name: 'Unclaw character', extensions: ['unclawchar', 'zip'] }, { name: 'All files', extensions: ['*'] }],
   });
   if (res.canceled || !res.filePaths[0]) return { ok: false, error: 'cancelled' };
   try {
-    return importUnrealExport(args.localId, res.filePaths[0]);
+    const picked = res.filePaths[0];
+    const isFile = fs.statSync(picked).isFile();
+    return isFile
+      ? await importUnrealPackage(mainWindow, args.localId, picked)
+      : importUnrealExport(args.localId, picked);
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
