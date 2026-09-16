@@ -50,6 +50,7 @@ import { WeatherGlance } from './WeatherGlance';
 import { StocksGlance } from './StocksGlance';
 import { NewsGlance } from './NewsGlance';
 import { GLANCE_LABEL_STYLE } from './GlanceSection';
+import { useGlanceScale } from '../../hooks/useGlanceScale';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 export const GLANCE_COLUMN_LEFT = 22;
@@ -88,13 +89,17 @@ interface Props {
 }
 
 export function GlanceColumn({
-  top, reminders, onCompleteReminder, onRemindersChanged, activeWidget, onOpen, onClose, refreshKey, faded = false,
+  top: topProp, reminders, onCompleteReminder, onRemindersChanged, activeWidget, onOpen, onClose, refreshKey, faded = false,
   glance, onGlanceChange, onSummarizeArticle, onAddReminder,
   customWidgets = [], onCustomWidgetsChanged,
 }: Props) {
   const reduce = useReducedMotion() ?? false;
   const [now, setNow] = useState(() => new Date());
   const columnRef = useRef<HTMLDivElement>(null);
+  // Grows with the window (hooks/useGlanceScale): the column widens and its
+  // content is zoomed, so every widget keeps its default-size proportions.
+  const scale = useGlanceScale();
+  const top = topProp + 28 * (scale - 1);
   const [layout, setLayout] = useState<GlanceLayout>(() => loadGlanceLayout());
   const [editing, setEditing] = useState(false);
 
@@ -210,7 +215,7 @@ export function GlanceColumn({
         position: 'absolute',
         top,
         left: GLANCE_COLUMN_LEFT,
-        width: GLANCE_COLUMN_WIDTH,
+        width: GLANCE_COLUMN_WIDTH * scale,
         maxWidth: 'calc(100% - 44px)',
         maxHeight: `calc(100% - ${top + BOTTOM_CLEARANCE}px)`,
         overflowY: 'auto',
@@ -220,8 +225,10 @@ export function GlanceColumn({
         WebkitMaskImage: 'linear-gradient(to bottom, #000 calc(100% - 28px), transparent)',
         maskImage: 'linear-gradient(to bottom, #000 calc(100% - 28px), transparent)',
         paddingBottom: 28,
-        paddingLeft: 8,
-        marginLeft: -8,
+        // The rows' -8 px hover bleed is zoomed with them, so the room kept
+        // for it scales too and the text stays at x = 22 under the greeting.
+        paddingLeft: 8 * scale,
+        marginLeft: -8 * scale,
         zIndex: 20,
         pointerEvents: faded ? 'none' : 'auto',
         opacity: faded ? 0 : 1,
@@ -231,6 +238,7 @@ export function GlanceColumn({
       }}
       aria-hidden={faded || undefined}
     >
+      <div style={{ zoom: scale }}>
       {editing ? (
         /* Edit mode: headers only, drag to reorder, x to remove, hidden
            widgets offered back below, Done at the foot. */
@@ -318,6 +326,7 @@ export function GlanceColumn({
           )}
         </motion.div>
       )}
+      </div>
     </div>
   );
 }

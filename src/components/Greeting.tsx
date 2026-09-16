@@ -9,6 +9,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+import { useGlanceScale } from '../hooks/useGlanceScale';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -36,6 +37,10 @@ export const GREETING_TOP = 72;
 export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
   const reduce = useReducedMotion() ?? false;
   const rootRef = useRef<HTMLDivElement>(null);
+  // Grows with the window like the glance column under it (hooks/
+  // useGlanceScale). The anchor stays put; the content is zoomed, and the
+  // reported offsetHeight is the zoomed height, so the column still clears it.
+  const scale = useGlanceScale();
   const [now, setNow] = useState(() => new Date());
 
   // The clock shows hours and minutes (a ticking seconds counter at the
@@ -93,12 +98,13 @@ export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
         top: GREETING_TOP,
         left: 22,
         right: 22,
-        maxWidth: 520,
+        maxWidth: 520 * scale,
         zIndex: 5,
         pointerEvents: 'none',
         userSelect: 'none',
       }}
     >
+      <div style={{ zoom: scale }}>
       {/* Time + date row. Time is the lead; date sits beside it in a
           quieter tone with a hairline dot separator. Tabular numerics
           on both so the row never reflows tick to tick. */}
@@ -224,6 +230,7 @@ export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
           </motion.p>
         </AnimatePresence>
       </motion.div>
+      </div>
     </div>
   );
 }
