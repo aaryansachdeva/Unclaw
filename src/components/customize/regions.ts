@@ -67,18 +67,22 @@ export const REGION_LABEL: Record<RegionId, string> = {
 /** Which side of her a region's label sits on. Chosen so neighbours alternate
  *  and no two labels on one side land within ~90 px of each other. */
 export const REGION_SIDE: Record<RegionId, 'left' | 'right'> = {
+  // Body level, measured on Grace in the pulled-back shot: left carries Top
+  // (245), Body (363) and the light (620), right carries Face (140), Legs (413)
+  // and Shoes (657). Every pair on a side clears 100 px.
   face: 'right',
+  top: 'left',
+  body: 'left',
+  legs: 'right',
+  shoes: 'right',
+  scene: 'left',
+  // Face level.
   hair: 'right',
   brows: 'left',
   lashes: 'right',
   mustache: 'left',
   beard: 'right',
   shape: 'left',
-  top: 'left',
-  legs: 'right',
-  shoes: 'left',
-  body: 'right',
-  scene: 'left',
 };
 
 /** The face level is the close shot; the body level is the whole figure. */

@@ -691,7 +691,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             <HotspotLayer
               spots={spots}
               width={box.w}
-              light={{ ...lp, hex: lightHex, detail: sideName(lightingAngle) }}
+              light={level === 'body' ? { ...lp, hex: lightHex, detail: sideName(lightingAngle) } : null}
               onOpen={openRegion}
               quiet={!!region}
               active={region}
