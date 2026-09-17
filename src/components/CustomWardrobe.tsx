@@ -607,7 +607,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
                   />
                   <Caption
                     name={activeItem?.name ?? ''}
-                    position={selected + 1}
+                    position={Math.max(0, items.findIndex((i) => i.index === selected)) + 1}
                     total={items.length}
                   />
                   {CUSTOM_COLORABLE.includes(pane as CustomCategory) && (
