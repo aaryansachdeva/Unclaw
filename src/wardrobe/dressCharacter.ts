@@ -73,7 +73,7 @@ export interface DressCharacterOptions {
   emit: (payload: DescriptorPayload) => void;
   /** Arm a waiter for UE's ack of `eventType`. Resolves false on silence. */
   waitForAck: (eventType: string, timeoutMs?: number) => Promise<boolean>;
-  /** Leave hair/brows/lashes alone (imported grooms own them). */
+  /** Leave hair/brows/lashes/beard/mustache alone (imported grooms own them). */
   skipGrooms?: boolean;
   /** False once this run is superseded; checked before every send. */
   isAlive: () => boolean;
@@ -126,6 +126,10 @@ export function buildDressPayloads(
         // Base/legacy characters have no selectable brows/lashes (one baked each).
         item('eyebrow', w.browIndex, def.brow);
         item('eyelash', w.lashIndex, def.lash);
+        // Always sent (999 when none): a same-class switch keeps the actor, so
+        // BeginPlay's clean-shaven default never runs for the next instance.
+        item('beard',    w.beardIndex,    def.beard);
+        item('mustache', w.mustacheIndex, def.mustache);
       }
     }
   }
@@ -191,7 +195,7 @@ export async function dressCharacter(
   // already-correct groom is visually idempotent.
   const groomPayloads = payloads.filter(
     (p) => p.EventType === 'changeWardrobeItem'
-      && ['hair', 'eyebrow', 'eyelash'].includes(String(p.wardrobeCategory)),
+      && ['hair', 'eyebrow', 'eyelash', 'beard', 'mustache'].includes(String(p.wardrobeCategory)),
   );
   if (groomPayloads.length > 0 && isAlive()) {
     await new Promise((r) => setTimeout(r, 1400));

@@ -100,7 +100,7 @@ interface CustomWardrobeProps {
   /** Live-preview a post effect. Separate from onEmit because effects are
    *  composited in the renderer and never reach UE. */
   onEffect?: (fx: { effectId: string; effectStrength: number }) => void;
-  /** True when the active pane is a face-region edit (hair / eyebrow / eyelash)
+  /** True when the active pane is a face-region edit (hair / brows / lashes / beard / mustache)
    *  and the camera should sit at the close resting shot instead of the
    *  full-figure customization pull-back. App drives the camera from this. */
   onCloseUpChange?: (closeUp: boolean) => void;
@@ -151,13 +151,16 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   useEffect(() => {
     const faceTab = pane === 'body' && isUnifiedHost(agentId) && tuneTab !== 'body';
     onCloseUpChange?.(
-      pane === 'hair' || pane === 'eyebrow' || pane === 'eyelash' || faceTab,
+      pane === 'hair' || pane === 'eyebrow' || pane === 'eyelash'
+        || pane === 'beard' || pane === 'mustache' || faceTab,
     );
   }, [pane, tuneTab, agentId, onCloseUpChange]);
 
   const [hair,    setHair]    = useState(() => clampAgentIndex(wardrobe.items.hair,    initial?.hairIndex));
   const [eyebrow, setEyebrow] = useState(() => clampAgentIndex(wardrobe.items.eyebrow, initial?.browIndex));
   const [eyelash, setEyelash] = useState(() => clampAgentIndex(wardrobe.items.eyelash, initial?.lashIndex));
+  const [beard,    setBeard]    = useState(() => clampAgentIndex(wardrobe.items.beard,    initial?.beardIndex));
+  const [mustache, setMustache] = useState(() => clampAgentIndex(wardrobe.items.mustache, initial?.mustacheIndex));
   const [top,     setTop]     = useState(() => clampAgentIndex(wardrobe.items.top,     initial?.topIndex));
   const [bottom,  setBottom]  = useState(() => clampAgentIndex(wardrobe.items.bottom,  initial?.bottomIndex));
   const [shoes,   setShoes]   = useState(() => clampAgentIndex(wardrobe.items.shoes,   initial?.shoesIndex));
@@ -202,12 +205,14 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   const touchedRef = useRef<Set<string>>(new Set());
   const touch = (key: string) => { touchedRef.current.add(key); };
 
-  const value = (cat: CustomCategory) => ({ hair, eyebrow, eyelash, top, bottom, shoes })[cat];
+  const value = (cat: CustomCategory) => ({ hair, eyebrow, eyelash, beard, mustache, top, bottom, shoes })[cat];
   const setValue = (cat: CustomCategory, n: number) => {
     switch (cat) {
       case 'hair':    setHair(n); break;
       case 'eyebrow': setEyebrow(n); break;
       case 'eyelash': setEyelash(n); break;
+      case 'beard':    setBeard(n); break;
+      case 'mustache': setMustache(n); break;
       case 'top':     setTop(n); break;
       case 'bottom':  setBottom(n); break;
       case 'shoes':   setShoes(n); break;
@@ -247,8 +252,10 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return;
       e.preventDefault();
       const step = e.key === 'ArrowRight' ? 1 : -1;
-      const next = (selected + step + items.length) % items.length;
-      pickItem(pane, next);
+      // Step through positions, not index numbers: the facial-hair None tile
+      // carries index 999 and base hair lists can skip numbers.
+      const pos = Math.max(0, items.findIndex((i) => i.index === selected));
+      pickItem(pane, items[(pos + step + items.length) % items.length].index);
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -388,6 +395,8 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     if (touched.has('hair'))    out.hairIndex   = hair;
     if (touched.has('eyebrow')) out.browIndex   = eyebrow;
     if (touched.has('eyelash')) out.lashIndex   = eyelash;
+    if (touched.has('beard'))    out.beardIndex    = beard;
+    if (touched.has('mustache')) out.mustacheIndex = mustache;
     if (touched.has('heightBlend')) out.heightBlend = heightBlend;
     if (touched.has('weightBlend')) out.weightBlend = weightBlend;
     if (touched.has('blendAxes')) out.blendAxes = axes;
@@ -415,7 +424,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
       for (const cat of ccTouched) out.clothingColors[cat] = clothingColors[cat];
     }
     onSave(out);
-  }, [onSave, initial, top, bottom, shoes, hair, eyebrow, eyelash, heightBlend, weightBlend,
+  }, [onSave, initial, top, bottom, shoes, hair, eyebrow, eyelash, beard, mustache, heightBlend, weightBlend,
       axes, hairColor, eyeColor,
       lightingAngle, lightIntensity,
       accentIndex, accentHex, bgIndex, bgHex, bgGlow, clothingColors,

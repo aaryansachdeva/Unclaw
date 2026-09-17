@@ -1,6 +1,6 @@
 // Wardrobe catalog for the CUSTOM characters (grace_custom / kevin_custom).
 // These builds expose far more than the legacy characters: 34 hair, 18
-// brows, 6 lashes, plus the original clothing slots.
+// brows, 6 lashes, 16 beards, 16 mustaches, plus the original clothing slots.
 //
 // `index` is the ONLY thing UE cares about — it's the array index into the
 // wardrobe DataAsset, sent verbatim as changeWardrobeItem's `wardrobeIndex`.
@@ -18,7 +18,12 @@
 //     they need index numbers from the DataAsset first.
 
 export type CustomCategory =
-  | 'hair' | 'eyebrow' | 'eyelash' | 'top' | 'bottom' | 'shoes';
+  | 'hair' | 'eyebrow' | 'eyelash' | 'beard' | 'mustache' | 'top' | 'bottom' | 'shoes';
+
+/** Beard and mustache "none": an index past the end of the DataAsset arrays.
+ *  The Blueprint's Is Valid Index check clears the groom for it, and 999 is
+ *  also the BP_CharacterBase default, so a fresh character is clean shaven. */
+export const GROOM_NONE_INDEX = 999;
 
 export interface WardrobeItem {
   /** Array index into the UE DataAsset. Sent as `wardrobeIndex`. */
@@ -160,6 +165,50 @@ export const BROWS: WardrobeItem[] = groom('brows', [
   ['Eyebrows_S_Shaded', 'Short Shaded'],
 ]);
 
+// ---- Facial hair (2026-09-16) ------------------------------------------
+// Built on M_Base into _Blend_Data/BeardLib + MustacheLib; DA_Wardrobe_M/F
+// BeardGrooms / MustacheGrooms carry exactly this order (goatees live in the
+// Beard slot). The None tile leads each list and sends GROOM_NONE_INDEX.
+const NO_FACIAL_HAIR = (): WardrobeItem => ({ index: GROOM_NONE_INDEX, key: 'none', name: 'None' });
+
+export const BEARDS: WardrobeItem[] = [NO_FACIAL_HAIR(), ...groom('beards', [
+  ['Beard_L_Full', 'Full'],
+  ['Beard_L_Messy', 'Messy'],
+  ['Beard_M_Curly', 'Curly'],
+  ['Beard_M_MuttonChops', 'Mutton Chops'],
+  ['Beard_M_Stubble', 'Stubble'],
+  ['Beard_S_Curly', 'Short Curly'],
+  ['Beard_S_Full', 'Short Full'],
+  ['Beard_S_PencilThin', 'Pencil Thin'],
+  ['Beard_S_Stubble', 'Light Stubble'],
+  ['Beard_S_Uneven', 'Uneven'],
+  ['Goatee_L_Scraggly', 'Scraggly Goatee'],
+  ['Goatee_L_Wavy', 'Wavy Goatee'],
+  ['Goatee_M_Pointed', 'Pointed Goatee'],
+  ['Goatee_M_Soulpatch', 'Soul Patch Goatee'],
+  ['Goatee_S_ChinStrap', 'Chin Strap'],
+  ['Goatee_S_SoulpatchStrip', 'Soul Patch'],
+])];
+
+export const MUSTACHES: WardrobeItem[] = [NO_FACIAL_HAIR(), ...groom('mustaches', [
+  ['Mustache_L_Full', 'Full'],
+  ['Mustache_L_Handlebar', 'Handlebar'],
+  ['Mustache_L_Messy', 'Messy'],
+  ['Mustache_L_Scraggly', 'Scraggly'],
+  ['Mustache_L_Stubble', 'Long Stubble'],
+  ['Mustache_L_Wavy', 'Wavy'],
+  ['Mustache_M_Curly', 'Curly'],
+  ['Mustache_M_Gunslinger', 'Gunslinger'],
+  ['Mustache_M_Stubble', 'Stubble'],
+  ['Mustache_S_ChinStrap', 'Chin Strap'],
+  ['Mustache_S_Curly', 'Short Curly'],
+  ['Mustache_S_Full', 'Short Full'],
+  ['Mustache_S_Horseshoe', 'Horseshoe'],
+  ['Mustache_S_PencilThin', 'Pencil Thin'],
+  ['Mustache_S_Stubble', 'Light Stubble'],
+  ['Mustache_S_Uneven', 'Uneven'],
+])];
+
 export const LASHES: WardrobeItem[] = groom('lashes', [
   ['Eyelashes_L_Curl', 'Long Curl'],
   ['Eyelashes_L_SlightCurl', 'Slight Curl'],
@@ -174,6 +223,8 @@ export const CUSTOM_WARDROBE: Record<CustomCategory, WardrobeItem[]> = {
   hair: HAIR,
   eyebrow: BROWS,
   eyelash: LASHES,
+  beard: BEARDS,
+  mustache: MUSTACHES,
   top: TOPS,
   bottom: BOTTOMS,
   shoes: SHOES,
@@ -181,12 +232,14 @@ export const CUSTOM_WARDROBE: Record<CustomCategory, WardrobeItem[]> = {
 
 /** Ordered head-to-toe, so the rail reads like a body diagram. */
 export const CUSTOM_CATEGORY_ORDER: CustomCategory[] =
-  ['hair', 'eyebrow', 'eyelash', 'top', 'bottom', 'shoes'];
+  ['hair', 'eyebrow', 'eyelash', 'beard', 'mustache', 'top', 'bottom', 'shoes'];
 
 export const CUSTOM_CATEGORY_LABELS: Record<CustomCategory, string> = {
   hair:    'Hair',
   eyebrow: 'Brows',
   eyelash: 'Lashes',
+  beard:   'Beard',
+  mustache: 'Mustache',
   top:     'Top',
   bottom:  'Bottom',
   shoes:   'Shoes',
@@ -202,9 +255,7 @@ export function itemsFor(cat: CustomCategory): WardrobeItem[] {
 
 /** Clamp a saved index back into range — the catalog can shrink between builds. */
 export function clampCustomIndex(cat: CustomCategory, value: number | undefined): number {
-  const max = itemsFor(cat).length;
-  if (value == null || !Number.isFinite(value) || max === 0) return 0;
-  return Math.max(0, Math.min(max - 1, Math.floor(value)));
+  return clampAgentIndex(itemsFor(cat), value);
 }
 
 /** The photo-identity hosts. Neither carries a `_custom` suffix, because
@@ -305,7 +356,7 @@ export interface AgentWardrobe {
 }
 
 const EMPTY_ITEMS: Record<CustomCategory, WardrobeItem[]> = {
-  hair: [], eyebrow: [], eyelash: [], top: [], bottom: [], shoes: [],
+  hair: [], eyebrow: [], eyelash: [], beard: [], mustache: [], top: [], bottom: [], shoes: [],
 };
 
 /** Resolve the wardrobe surface for an agent. Custom characters get the full
@@ -332,8 +383,17 @@ export function wardrobeForAgent(agentId: string | null | undefined): AgentWardr
 /** Clamp a saved index into a resolved item list (per-agent bounds). */
 export function clampAgentIndex(items: WardrobeItem[], value: number | undefined): number {
   const max = items.length;
-  if (value == null || !Number.isFinite(value) || max === 0) return 0;
-  return Math.max(0, Math.min(max - 1, Math.floor(value)));
+  if (max === 0) return 0;
+  // Unset: the list's first entry (index 0, or the None tile for facial hair).
+  if (value == null || !Number.isFinite(value)) return items[0].index;
+  const v = Math.floor(value);
+  // An exact match wins, so sentinel indices like GROOM_NONE_INDEX survive.
+  if (items.some((i) => i.index === v)) return v;
+  // Otherwise clamp into the real (non-sentinel) index range, so a stale index
+  // from a longer catalog lands on the nearest real item, never past the end.
+  const real = items.map((i) => i.index).filter((i) => i !== GROOM_NONE_INDEX);
+  if (real.length === 0) return items[0].index;
+  return Math.max(Math.min(...real), Math.min(Math.max(...real), v));
 }
 
 /** The authored DEFAULT wardrobe indices a character ships with, per slot. Used
@@ -343,16 +403,19 @@ export function clampAgentIndex(items: WardrobeItem[], value: number | undefined
  *  custom builds carry a specific default groom + brow + lash. */
 export interface WardrobeDefaults {
   top: number; bottom: number; shoes: number; hair: number; brow: number; lash: number;
+  /** Facial hair: GROOM_NONE_INDEX everywhere, nobody spawns bearded. */
+  beard: number; mustache: number;
 }
-const LEGACY_WARDROBE_DEFAULTS: WardrobeDefaults = { top: 0, bottom: 0, shoes: 0, hair: 0, brow: 0, lash: 0 };
+const NONE = GROOM_NONE_INDEX;
+const LEGACY_WARDROBE_DEFAULTS: WardrobeDefaults = { top: 0, bottom: 0, shoes: 0, hair: 0, brow: 0, lash: 0, beard: NONE, mustache: NONE };
 const WARDROBE_DEFAULTS: Record<string, WardrobeDefaults> = {
-  grace_custom: { top: 0, bottom: 0, shoes: 0, hair: 31, brow: 1, lash: 2 },
-  kevin_custom: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0 },
+  grace_custom: { top: 0, bottom: 0, shoes: 0, hair: 31, brow: 1, lash: 2, beard: NONE, mustache: NONE },
+  kevin_custom: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0, beard: NONE, mustache: NONE },
   // Same male grooming baseline as kevin until the generic gets authored looks.
-  m_generic: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0 },
+  m_generic: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0, beard: NONE, mustache: NONE },
   // BP_Unified, the DNA-native identity host. Same baseline: the vision
   // grooming pick overrides these per character anyway.
-  unified: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0 },
+  unified: { top: 0, bottom: 0, shoes: 0, hair: 19, brow: 1, lash: 0, beard: NONE, mustache: NONE },
 };
 export function wardrobeDefaultsFor(agentId?: string | null): WardrobeDefaults {
   return (agentId && WARDROBE_DEFAULTS[agentId]) || LEGACY_WARDROBE_DEFAULTS;

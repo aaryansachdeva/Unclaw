@@ -183,6 +183,11 @@ export interface WardrobeSettings {
   browIndex?: number;
   /** Custom characters only: lash groom index (wardrobeCategory 'eyelash'). */
   lashIndex?: number;
+  /** Custom characters only: beard groom index (wardrobeCategory 'beard').
+   *  999 (GROOM_NONE_INDEX) = clean shaven; absent = the default, also none. */
+  beardIndex?: number;
+  /** Custom characters only: mustache groom index (wardrobeCategory 'mustache'). */
+  mustacheIndex?: number;
   /** Custom characters only. Bipolar body-blend axes, -1..+1, 0 = authored
    *  proportions. Stored as ONE signed number per axis rather than UE's four
    *  unsigned blends, because tall and short are the same lever: you can't be
