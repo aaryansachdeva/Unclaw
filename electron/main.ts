@@ -1588,16 +1588,26 @@ ipcMain.handle(
 // on the same identity:progress channel.
 // Bring-your-own MetaHuman: the user picks the folder the Unreal exporter
 // wrote; main stages it into the UE container and returns the identity paths.
-ipcMain.handle('identity:import-unreal', async (_event, args: { localId: string }) => {
+ipcMain.handle('identity:import-unreal', async (_event, args: { localId: string; path?: string }) => {
   if (!args?.localId) return { ok: false, error: 'invalid_args' };
-  const res = await dialog.showOpenDialog(mainWindow ?? undefined as never, {
-    title: 'Choose the .unclawchar file or the folder exported from Unreal',
-    properties: ['openFile', 'openDirectory'],
-    filters: [{ name: 'Unclaw character', extensions: ['unclawchar', 'zip'] }, { name: 'All files', extensions: ['*'] }],
-  });
-  if (res.canceled || !res.filePaths[0]) return { ok: false, error: 'cancelled' };
+  // A file dropped on the import screen arrives as a path; without one, ask.
+  let picked = typeof args.path === 'string' ? args.path : '';
+  if (picked) {
+    if (!fs.existsSync(picked)) return { ok: false, error: 'That file is no longer there.' };
+    const isDir = fs.statSync(picked).isDirectory();
+    if (!isDir && !/\.(unclawchar|zip)$/i.test(picked)) {
+      return { ok: false, error: 'That is not a character file. Look for a .unclawchar file.' };
+    }
+  } else {
+    const res = await dialog.showOpenDialog(mainWindow ?? undefined as never, {
+      title: 'Choose the .unclawchar file or the folder exported from Unreal',
+      properties: ['openFile', 'openDirectory'],
+      filters: [{ name: 'Unclaw character', extensions: ['unclawchar', 'zip'] }, { name: 'All files', extensions: ['*'] }],
+    });
+    if (res.canceled || !res.filePaths[0]) return { ok: false, error: 'cancelled' };
+    picked = res.filePaths[0];
+  }
   try {
-    const picked = res.filePaths[0];
     const isFile = fs.statSync(picked).isFile();
     return isFile
       ? await importUnrealPackage(mainWindow, args.localId, picked)

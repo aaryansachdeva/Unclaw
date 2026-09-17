@@ -224,12 +224,15 @@ interface ElectronAPI {
       grooming?: { gender: 'm' | 'f'; build: 'skinny' | 'fit' | 'fat'; hairIndex: number; browIndex: number; lashIndex: number };
       error?: string;
     }>;
-    /** Bring-your-own MetaHuman: folder picker + staging of an Unreal export. */
-    importUnreal: (args: { localId: string }) => Promise<{
+    /** Bring-your-own MetaHuman: stage a .unclawchar or exporter folder. `path`
+     *  = a dropped file; absent = the file dialog. */
+    importUnreal: (args: { localId: string; path?: string }) => Promise<{
       ok: boolean; error?: string; name?: string;
       dnaPath?: string; jointsPath?: string; tablePath?: string; baseColorPath?: string; normalPath?: string;
       groomsDir?: string; grooms?: string[];
     }>;
+    /** Real filesystem path of a dropped File. */
+    pathForFile?: (file: File) => string;
     /** Re-roll ONLY the skin texture for an existing character. */
     regenBasecolor: (args: { localId: string }) => Promise<{
       ok: boolean; baseColorPath?: string;

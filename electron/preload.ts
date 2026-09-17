@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
+import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron';
 
 /** Shape of the port mapping the supervisor learns from soul's [ports]
  *  banner (or from ports.json when attaching to an external soul). Kept
@@ -741,13 +741,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
         hairColorParams?: { melanin: number; redness: number }; irisVariant?: string };
       error?: string;
     }> => ipcRenderer.invoke('identity:run-h3d', args),
-    /** Bring-your-own MetaHuman: pick the folder the Unreal exporter wrote and
-     *  stage it for the character host. */
-    importUnreal: (args: { localId: string }): Promise<{
+    /** Bring-your-own MetaHuman: stage a .unclawchar (or the exporter's folder)
+     *  for the character host. `path` = a dropped file; absent = file dialog. */
+    importUnreal: (args: { localId: string; path?: string }): Promise<{
       ok: boolean; error?: string; name?: string;
       dnaPath?: string; jointsPath?: string; tablePath?: string; baseColorPath?: string; normalPath?: string;
       groomsDir?: string; grooms?: string[];
     }> => ipcRenderer.invoke('identity:import-unreal', args),
+    /** Real filesystem path of a File from a drop (File.path is gone in Electron 32+). */
+    pathForFile: (file: File): string => {
+      try { return webUtils.getPathForFile(file); } catch { return ''; }
+    },
     /** Re-roll ONLY the skin texture for a character that already exists.
      *  Seconds, one image call, no Rodin credit and no headless UE boot. */
     regenBasecolor: (args: { localId: string }): Promise<{

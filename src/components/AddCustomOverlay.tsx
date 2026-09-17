@@ -19,6 +19,7 @@ import QRCodeStyling from 'qr-code-styling';
 import { ArrowLeft, ImageUp, RefreshCw } from 'lucide-react';
 import logoUrl from '../assets/logo.png';
 import { PersonParticles } from './PersonParticles';
+import { ChooseMethod, ImportCharacter } from './AddCustomChoose';
 import { HAIR, HAIR_GENDER, BROWS, LASHES } from '../wardrobe/catalog';
 import {
   createCaptureSession,
@@ -416,6 +417,11 @@ export function AddCustomOverlay({
   }) => void;
 }) {
   const [phase, setPhase] = useState<Phase>(authToken ? 'photo' : 'signin');
+  // Which path the user picked on the first screen. The photo phases below
+  // only render under 'photo'; 'import' has its own screen.
+  const [mode, setMode] = useState<'choose' | 'photo' | 'import'>('choose');
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
   /** Drag-over highlight for the drop target. */
   const [dragging, setDragging] = useState(false);
   // The QR rendezvous needs the capture Worker deployed. Photo upload needs
@@ -439,26 +445,33 @@ export function AddCustomOverlay({
    *  the export into the UE container, and the identity lands on the generic
    *  host exactly like a photo-built one. Grooms in the export are staged too;
    *  the host applies them once the runtime groom path ships. */
-  const importFromUnreal = useCallback(async () => {
+  const importFromUnreal = useCallback(async (droppedPath?: string) => {
     const api = window.electronAPI?.identity;
-    if (!api?.importUnreal) { setError('This build cannot import Unreal exports.'); return; }
-    setError(null);
+    if (!api?.importUnreal) { setImportError('This build cannot import character files.'); return; }
+    setImportError(null);
+    setImporting(true);
     const localId = `ue_${Date.now().toString(36)}`;
-    const res = await api.importUnreal({ localId });
-    if (!res.ok || !res.dnaPath) {
-      if (res.error !== 'cancelled') setError(res.error ?? 'import failed');
-      return;
+    try {
+      const res = await api.importUnreal({ localId, ...(droppedPath ? { path: droppedPath } : {}) });
+      if (!res.ok || !res.dnaPath) {
+        if (res.error !== 'cancelled') setImportError(res.error ?? 'The import failed.');
+        return;
+      }
+      onIdentityReadyRef.current?.({
+        sessionId: localId,
+        dnaPath: res.dnaPath,
+        jointsPath: res.jointsPath,
+        baseColorPath: res.baseColorPath,
+        normalPath: res.normalPath,
+        groomsDir: res.grooms && res.grooms.length ? res.groomsDir : undefined,
+        unrealName: res.name || 'New character',
+        blobPath: '',
+      });
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setImporting(false);
     }
-    onIdentityReadyRef.current?.({
-      sessionId: localId,
-      dnaPath: res.dnaPath,
-      jointsPath: res.jointsPath,
-      baseColorPath: res.baseColorPath,
-      normalPath: res.normalPath,
-      groomsDir: res.grooms && res.grooms.length ? res.groomsDir : undefined,
-      blobPath: '',
-      unrealName: res.name || 'New character',
-    });
   }, []);
 
   const startPhotoInference = useCallback(async (file: File) => {
@@ -763,7 +776,11 @@ export function AddCustomOverlay({
       {/* back */}
       <motion.button
         type="button"
-        onClick={onClose}
+        onClick={() => {
+          const photoBusy = mode === 'photo' && (phase === 'fetching' || phase === 'reveal');
+          if (mode !== 'choose' && !photoBusy && !importing) { setMode('choose'); setImportError(null); return; }
+          onClose();
+        }}
         aria-label="Back"
         title="Back"
         initial={{ opacity: 0, x: -4 }}
@@ -806,23 +823,43 @@ export function AddCustomOverlay({
           textShadow: '0 1px 3px rgba(0,0,0,0.6)',
         }}
       >
-        {phase === 'reveal' || phase === 'fetching' ? 'Creating your agent' : 'Add a custom agent'}
+        {mode === 'choose' ? 'New character'
+          : mode === 'import' ? 'Import a character'
+          : phase === 'reveal' || phase === 'fetching' ? 'Creating your agent' : 'Create from a photo'}
       </motion.span>
 
       <AnimatePresence mode="wait">
-        {phase === 'signin' && (
+        {mode === 'choose' && (
+          <Stage key="choose">
+            <ChooseMethod onPhoto={() => setMode('photo')} onImport={() => setMode('import')} />
+          </Stage>
+        )}
+
+        {mode === 'import' && (
+          <Stage key="import">
+            <ImportCharacter
+              busy={importing}
+              error={importError}
+              onPickFile={() => void importFromUnreal()}
+              onDropPath={(path) => void importFromUnreal(path)}
+              onDropError={setImportError}
+            />
+          </Stage>
+        )}
+
+        {mode === 'photo' && phase === 'signin' && (
           <Stage key="signin">
             <Hint>Sign in to create a custom agent.</Hint>
           </Stage>
         )}
 
-        {phase === 'loading' && (
+        {mode === 'photo' && phase === 'loading' && (
           <Stage key="loading">
             <Hint>Preparing your capture session…</Hint>
           </Stage>
         )}
 
-        {(phase === 'error' || phase === 'expired') && (
+        {mode === 'photo' && (phase === 'error' || phase === 'expired') && (
           <Stage key="error">
             <Hint>
               {phase === 'expired'
@@ -854,7 +891,7 @@ export function AddCustomOverlay({
           </Stage>
         )}
 
-        {phase === 'photo' && (
+        {mode === 'photo' && phase === 'photo' && (
           <Stage
             key="photo"
             onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
@@ -914,25 +951,6 @@ export function AddCustomOverlay({
             </Hint>
             <button
               type="button"
-              onClick={() => void importFromUnreal()}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 7,
-                padding: '7px 14px',
-                borderRadius: 999,
-                background: 'transparent',
-                border: '1px dashed rgba(255,255,255,0.18)',
-                color: 'var(--text-ghost)',
-                fontFamily: 'inherit',
-                fontSize: 12,
-                cursor: 'pointer',
-              }}
-            >
-              Import a MetaHuman exported from Unreal
-            </button>
-            <button
-              type="button"
               onClick={() => { setError(null); setWantQr(true); }}
               style={{
                 display: 'inline-flex',
@@ -967,7 +985,7 @@ export function AddCustomOverlay({
           </Stage>
         )}
 
-        {phase === 'qr' && (
+        {mode === 'photo' && phase === 'qr' && (
           <Stage key="qr">
             {/* Light tile so the dark modules scan reliably — same treatment
                 as the phone-connect QR. */}
@@ -1020,7 +1038,7 @@ export function AddCustomOverlay({
           </Stage>
         )}
 
-        {(phase === 'fetching' || phase === 'reveal') && (
+        {mode === 'photo' && (phase === 'fetching' || phase === 'reveal') && (
           <Stage key="reveal">
             <div style={{
               position: 'relative',
