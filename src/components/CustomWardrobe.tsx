@@ -1,84 +1,45 @@
-// CustomWardrobe — customization for the custom-pipeline characters
-// (grace_custom / kevin_custom), which carry 34 hair, 18 brows and 6 lashes
-// with real thumbnails. A blind stepper can't browse that; you need to see
-// them. (The legacy characters reuse this same UI with a restricted set.)
+// CustomWardrobe: customization for every character (custom builds get the
+// full catalog, the base six a restricted set; see wardrobeForAgent).
 //
-// THE SHAPE: A REEL, NOT A DRAWER
-// First attempt was a 336px drawer with a 4-column grid. Wrong on both counts:
-// it ate 44% of a 760px window (she's the product, not the chrome), and a grid
-// forces tiles big enough to fill a row. A reel inverts that. One horizontal
-// row of small frames, scrubbed sideways, is how you actually browse a set:
-// film contact sheets, camera rolls, the macOS Dock. It costs ~150px instead of
-// 336, the tiles get SMALLER as the set gets bigger, and she stays whole.
+// SPLIT ISLANDS (2026-09-16 redesign). The old bottom bar put eleven tabs in
+// one scrolling strip, 52 px tiles, and grew to cover the face on Body. Now:
+// a slim group rail floats on the left (Hair, Facial, Outfit, Body, Scene), the
+// group's options sit in a column island on the right as big named tiles, and
+// a dock at the foot names what is on the character. She stays centred and
+// whole. Scene drops the column entirely: the key light becomes a body you
+// drag around an orbit ring on the stage, and colour, brightness, backdrop and
+// effects share one deck (customize/SceneStage).
 //
-// The selected frame grows and lifts out of the reel and the strip centers it.
-// That's the entire selection affordance: motion and scale, not a heavy ring.
-// It reads at a glance and it's the one bit of delight this surface gets.
-//
-// THE BAR FLOATS AND BREATHES
-// Not a full-bleed drawer pinned to the edge (that reads as a slab and competes
-// with the stream). A frosted bar inset 10px on three sides, so it's an object
-// in the room rather than a wall of it. Its height animates per pane: a reel
-// needs 150px, the backdrop needs 100, light needs 140. Chrome takes what it
-// needs and gives the rest back.
+// State, emits and the touched-only save are unchanged from the bar version.
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, Check, ChevronLeft, ChevronRight } from 'lucide-react';
+import { ArrowLeft, Check, Pencil } from 'lucide-react';
 import type { WardrobeSettings, ClothingColor } from '../services/userSettings';
 import { ColorPickerPanel, hexToRgb01, round3 } from './ColorPickerPanel';
-import { LightingDial } from './LightingDial';
 import {
-  ValueSlider, ACCENT_COLORS, CLOTHING_COLORS, BG_COLORS, HAIR_COLORS, EYE_COLORS,
+  ACCENT_COLORS, CLOTHING_COLORS, BG_COLORS, HAIR_COLORS, EYE_COLORS,
   LIGHT_INTENSITY_MIN, LIGHT_INTENSITY_MAX, LIGHT_INTENSITY_DEFAULT,
-  BG_GLOW_MIN, BG_GLOW_MAX, BG_GLOW_DEFAULT, BackdropStylePicker,
+  BG_GLOW_MIN, BG_GLOW_MAX, BG_GLOW_DEFAULT,
 } from './CustomizationOverlay';
 import { clampBgMode } from '../wardrobe/backgrounds';
 import {
   CUSTOM_CATEGORY_LABELS, CUSTOM_COLORABLE,
   wardrobeForAgent, clampAgentIndex, type CustomCategory, type WardrobeItem,
 } from '../wardrobe/catalog';
+import { DEFAULT_EFFECT_ID, DEFAULT_EFFECT_STRENGTH } from './StreamEffects';
 import {
-  STREAM_EFFECTS, EffectSwatch, effectFor,
-  DEFAULT_EFFECT_ID, DEFAULT_EFFECT_STRENGTH,
-} from './StreamEffects';
+  CustomizeStyles, EASE_OUT_EXPO, GROUP_META, GROUP_OF, GROUP_ORDER, ISLAND, NamedTile, Tabs,
+  type GroupId, type Pane,
+} from './customize/kit';
+import { ColumnIsland, Dock, GroupRail } from './customize/Islands';
+import { LightOrbit, SceneDeck, type SceneTab } from './customize/SceneStage';
 
-const EASE_OUT_EXPO = [0.16, 1, 0.3, 1] as const;
-
-// Body and Environment are not garment slots, so they ride alongside the
-// wardrobe categories rather than inside the category order (which is the UE
-// wardrobeCategory contract). Which categories/panes exist is per-character
-// now: custom builds carry the full set + brows/lashes + body; the base six
-// get their restricted set (own hair, shared clothing, no brows/lashes, no
-// body). See wardrobeForAgent in catalog.ts.
-// Effects is its own pane again (2026-07-20): a horizontal reel like the
-// wardrobe, so the full set is scrubbable. Environment holds just light +
-// backdrop.
-type Pane = CustomCategory | 'body' | 'environment' | 'effects';
 const PANE_LABELS: Record<Pane, string> = {
   ...CUSTOM_CATEGORY_LABELS,
   body: 'Body',
-  environment: 'Environment',
-  effects: 'Effects',
+  scene: 'Scene',
 };
-
-// Frame geometry. 52px is deliberately small: the reel is scrubbed, not
-// scanned, and the selected frame blows up to 1.22x anyway. Smaller frames mean
-// more of the set visible at once, which is the whole point of a reel.
-const FRAME = 52;
-const FRAME_SELECTED = 1.22;
-
-/** Per-pane bar height. The bar animates between these. */
-function barHeight(pane: Pane, unified = false): number {
-  // Unified exposes eight levers plus a tab bar, so it needs real height; the
-  // preset two-lever pane stays compact.
-  if (pane === 'body') return unified ? 300 : 182;
-  // Environment holds light + backdrop (+ style) side by side.
-  if (pane === 'environment') return 200;
-  // Effects is a reel + a single name/strength row (no blurb).
-  if (pane === 'effects') return 150;
-  return CUSTOM_COLORABLE.includes(pane as CustomCategory) ? 178 : 146;
-}
 
 interface CustomWardrobeProps {
   /** Active character TYPE id (grace/mark/ava/goblin/chris/joi/*_custom).
@@ -124,9 +85,16 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   // Panes = this character's garment categories, then Body (custom only), then
   // the global Environment. Divider is rendered before Environment.
   const panes = useMemo<Pane[]>(
-    () => [...wardrobe.categories, ...(wardrobe.body ? ['body' as const] : []), 'environment', 'effects'],
+    () => [...wardrobe.categories, ...(wardrobe.body ? ['body' as const] : []), 'scene'],
     [wardrobe],
   );
+  // Groups present for this character, and the pane each one last showed so
+  // hopping between groups returns to where you were.
+  const groups = useMemo(
+    () => GROUP_ORDER.filter((g) => panes.some((p) => GROUP_OF[p] === g)),
+    [panes],
+  );
+  const lastPaneRef = useRef<Partial<Record<GroupId, Pane>>>({});
 
   const [pane, setPane] = useState<Pane>('hair');
   // A character switch can drop the current pane (e.g. leaving a custom build
@@ -139,6 +107,13 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   // its dependency array, which is evaluated during render, so a later const
   // would be a temporal dead zone at runtime even though tsc stays quiet.
   const [tuneTab, setTuneTab] = useState<'body' | 'face' | 'colour'>('body');
+  const [sceneTab, setSceneTab] = useState<SceneTab>('light');
+  const group: GroupId = GROUP_OF[pane] ?? 'hair';
+  const pickGroup = useCallback((g: GroupId) => {
+    lastPaneRef.current[group] = pane;
+    const remembered = lastPaneRef.current[g];
+    setPane(remembered && panes.includes(remembered) ? remembered : (panes.find((p) => GROUP_OF[p] === g) ?? 'scene'));
+  }, [group, pane, panes]);
 
   // Tell App whether the active pane is a face-region edit so it can frame the
   // camera close (hair / eyebrow / eyelash) vs pull back to the whole figure
@@ -150,11 +125,8 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   // Fires on mount, on pane change, and on tab change.
   useEffect(() => {
     const faceTab = pane === 'body' && isUnifiedHost(agentId) && tuneTab !== 'body';
-    onCloseUpChange?.(
-      pane === 'hair' || pane === 'eyebrow' || pane === 'eyelash'
-        || pane === 'beard' || pane === 'mustache' || faceTab,
-    );
-  }, [pane, tuneTab, agentId, onCloseUpChange]);
+    onCloseUpChange?.(group === 'hair' || group === 'facial' || faceTab);
+  }, [pane, group, tuneTab, agentId, onCloseUpChange]);
 
   const [hair,    setHair]    = useState(() => clampAgentIndex(wardrobe.items.hair,    initial?.hairIndex));
   const [eyebrow, setEyebrow] = useState(() => clampAgentIndex(wardrobe.items.eyebrow, initial?.browIndex));
@@ -203,7 +175,8 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   // index 0 / angle 0 for panes the user never opened and force them onto the
   // character at every switch). Same scheme as CustomizationOverlay.
   const touchedRef = useRef<Set<string>>(new Set());
-  const touch = (key: string) => { touchedRef.current.add(key); };
+  const [dirty, setDirty] = useState(false);
+  const touch = (key: string) => { touchedRef.current.add(key); setDirty(true); };
 
   const value = (cat: CustomCategory) => ({ hair, eyebrow, eyelash, beard, mustache, top, bottom, shoes })[cat];
   const setValue = (cat: CustomCategory, n: number) => {
@@ -232,7 +205,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     onEffect?.({ effectId: id, effectStrength: strength });
   }, [onEffect]);
 
-  const isGarment = pane !== 'body' && pane !== 'environment' && pane !== 'effects';
+  const isGarment = pane !== 'body' && pane !== 'scene';
   const items: WardrobeItem[] = isGarment ? catItems(pane) : [];
   const selected = isGarment ? value(pane) : 0;
 
@@ -247,11 +220,11 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.preventDefault(); onCancel(); return; }
       if (!isGarment || items.length === 0) return;
-      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
       const el = document.activeElement as HTMLElement | null;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return;
       e.preventDefault();
-      const step = e.key === 'ArrowRight' ? 1 : -1;
+      const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : -1;
       // Step through positions, not index numbers: the facial-hair None tile
       // carries index 999 and base hair lists can skip numbers.
       const pos = Math.max(0, items.findIndex((i) => i.index === selected));
@@ -424,6 +397,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
       for (const cat of ccTouched) out.clothingColors[cat] = clothingColors[cat];
     }
     onSave(out);
+    setDirty(false);
   }, [onSave, initial, top, bottom, shoes, hair, eyebrow, eyelash, beard, mustache, heightBlend, weightBlend,
       axes, hairColor, eyeColor,
       lightingAngle, lightIntensity,
@@ -439,7 +413,17 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     return hex ?? CLOTHING_COLORS[picker.target.slot === 'c1' ? p.c1 : p.c2]?.hex ?? '#ffffff';
   }, [picker, accentHex, accentIndex, bgHex, bgIndex, clothingColors]);
 
-  const activeItem = isGarment ? items[selected] : undefined;
+  const activeItem = isGarment ? items.find((i) => i.index === selected) : undefined;
+  const position = isGarment ? `${Math.max(0, items.findIndex((i) => i.index === selected)) + 1} of ${items.length}` : '';
+  const groupPanes = panes.filter((p) => GROUP_OF[p] === group);
+  const unified = isUnifiedHost(agentId);
+  const colourable = isGarment && CUSTOM_COLORABLE.includes(pane as CustomCategory);
+  const [justSaved, setJustSaved] = useState(false);
+  const save = () => { handleSave(); setJustSaved(true); window.setTimeout(() => setJustSaved(false), 1600); };
+
+  const bodyTabs = unified
+    ? [{ id: 'body' as const, label: 'Shape' }, { id: 'face' as const, label: 'Face' }, { id: 'colour' as const, label: 'Colour' }]
+    : [];
 
   return (
     <motion.div
@@ -449,376 +433,237 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
       transition={{ duration: 0.26, ease: EASE_OUT_EXPO }}
       style={{ position: 'absolute', inset: 0, zIndex: 55, pointerEvents: 'none' }}
     >
-      {/* Header, in the left margin under the traffic lights. */}
+      <CustomizeStyles />
+
+      {/* Header: back and the character's name on the left, Save on the right. */}
       <motion.div
         initial={{ opacity: 0, y: -4 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.36, ease: EASE_OUT_EXPO, delay: 0.06 }}
         style={{
-          position: 'absolute', top: 80, left: 18, right: 18,
+          position: 'absolute', top: 72, left: 14, right: 14,
           display: 'flex', alignItems: 'center', gap: 10,
-          pointerEvents: 'auto', WebkitAppRegion: 'no-drag',
-        } as React.CSSProperties}
+          pointerEvents: 'none',
+        }}
       >
         <button
           type="button"
           onClick={onCancel}
-          aria-label="Close customization"
+          aria-label="Close customize"
+          className="cz-focus"
           style={{
-            width: 30, height: 30, borderRadius: '50%',
+            ...ISLAND, width: 36, height: 36, borderRadius: '50%', flex: '0 0 auto',
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            background: 'var(--glass-bg, rgba(40,48,65,0.32))',
-            border: '1px solid var(--glass-border, rgba(255,255,255,0.12))',
-            backdropFilter: 'var(--glass-blur)',
-            WebkitBackdropFilter: 'var(--glass-blur)',
             color: 'var(--text-secondary, #d4cec7)', cursor: 'pointer',
           }}
         >
-          <ArrowLeft size={14} strokeWidth={2} />
+          <ArrowLeft size={16} strokeWidth={2} />
         </button>
-        <span style={{
-          fontSize: 10.5, fontWeight: 600, letterSpacing: '0.16em',
-          textTransform: 'uppercase', color: 'var(--text-ghost)',
-          textShadow: '0 1px 3px rgba(0,0,0,0.6)',
-        }}>
-          Customize
-        </span>
-      </motion.div>
-
-      {/* The bar. Floating object, not a wall: inset on three sides, height
-          animates to whatever the active pane actually needs. */}
-      <motion.div
-        // Start at the pane's target height so entry is a pure slide+fade. If
-        // height is left to animate from its natural content height on mount it
-        // tweens simultaneously with the y-slide, which reads as a jitter as the
-        // bar comes up. Height still animates on later pane switches (animate
-        // updates while mounted; initial only applies on first mount).
-        initial={{ y: 40, opacity: 0, height: barHeight(pane, isUnifiedHost(agentId)) }}
-        animate={{ y: 0, opacity: 1, height: barHeight(pane, isUnifiedHost(agentId)) }}
-        transition={{ type: 'spring', stiffness: 460, damping: 42 }}
-        style={{
-          position: 'absolute',
-          left: 10, right: 10, bottom: 10,
-          pointerEvents: 'auto',
-          display: 'flex', flexDirection: 'column',
-          borderRadius: 18,
-          background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.52))',
-          backdropFilter: 'var(--glass-blur, blur(36px) saturate(1.7))',
-          WebkitBackdropFilter: 'var(--glass-blur, blur(36px) saturate(1.7))',
-          border: '1px solid var(--glass-border, rgba(255,255,255,0.12))',
-          boxShadow: '0 1px 0 rgba(255,255,255,0.06) inset, 0 18px 44px -14px rgba(0,0,0,0.62)',
-          overflow: 'hidden',
-          WebkitAppRegion: 'no-drag',
-        } as React.CSSProperties}
-      >
-        {/* Command row: the chip strip, then Save pinned at the right edge.
-            Save lives IN the bar because this bar is where every change
-            happens; a save button floating at the top of the window made the
-            commit gesture feel unrelated to the work. */}
-        <div style={{
-          flex: '0 0 auto',
-          display: 'flex', alignItems: 'center',
-          padding: '5px 10px 0 4px', gap: 8,
-        }}>
-          {/* Nine chips can't fit 400px, so the strip scrolls. The mask fades
-              the clipped edges (an honest "there's more" signal, instead of a
-              hard cut that reads as the end of the list) and the active chip
-              auto-centers so the selection is never the hidden one. */}
-          <div
-            role="tablist"
-            aria-label="Customization categories"
-            style={{
-              flex: '1 1 auto', minWidth: 0,
-              display: 'flex', alignItems: 'center', gap: 1,
-              overflowX: 'auto', overflowY: 'hidden',
-              scrollbarWidth: 'none',
-              WebkitMaskImage: 'linear-gradient(to right, transparent 0, black 16px, black calc(100% - 16px), transparent 100%)',
-              maskImage: 'linear-gradient(to right, transparent 0, black 16px, black calc(100% - 16px), transparent 100%)',
-              padding: '0 12px',
-            }}
-          >
-            {panes.map((p) => (
-              <Fragment key={p}>
-                {/* Hairline break between her (garments/body) and the room
-                    (environment). Quieter than a group label, same info. */}
-                {p === 'environment' && (
-                  <span aria-hidden style={{
-                    flex: '0 0 auto', width: 1, height: 12, margin: '0 5px',
-                    background: 'rgba(255,255,255,0.10)',
-                  }} />
-                )}
-                <Chip
-                  label={PANE_LABELS[p]}
-                  active={pane === p}
-                  onClick={() => setPane(p)}
-                />
-              </Fragment>
-            ))}
-          </div>
-          <span aria-hidden style={{
-            flex: '0 0 auto', width: 1, height: 16,
-            background: 'rgba(255,255,255,0.08)',
-          }} />
-          {onRenameInstance && (
+        {onRenameInstance ? (
+          <label style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 6, pointerEvents: 'auto', minWidth: 0 }}>
             <input
               defaultValue={instanceName ?? ''}
               placeholder="Name your character"
               maxLength={24}
+              aria-label="Character name"
               onBlur={(e) => onRenameInstance(e.target.value)}
               onKeyDown={(e) => {
                 e.stopPropagation();
                 if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
               }}
               style={{
-                flex: '0 0 auto',
-                width: 150,
-                padding: '5px 10px',
-                borderRadius: 999,
-                background: 'rgba(255,255,255,0.06)',
-                border: '1px solid rgba(255,255,255,0.12)',
-                outline: 'none',
-                color: 'var(--text-primary)',
-                fontFamily: 'inherit',
-                fontSize: 11,
-                fontWeight: 600,
-                letterSpacing: '0.03em',
+                width: `calc(${Math.max(4, Math.min(20, (instanceName ?? '').length || 16))}ch + 44px)`,
+                padding: '6px 26px 6px 8px', borderRadius: 10, outline: 'none',
+                background: 'transparent', border: '1px solid transparent',
+                color: 'var(--text-primary)', fontFamily: 'inherit', fontSize: 17, fontWeight: 600, letterSpacing: '-0.01em',
+                textShadow: '0 1px 3px rgba(0,0,0,0.6)',
+              }}
+              onFocus={(e) => { e.target.style.background = 'rgba(40,48,65,0.52)'; e.target.style.borderColor = 'rgba(255,255,255,0.14)'; }}
+              onBlurCapture={(e) => { (e.target as HTMLInputElement).style.background = 'transparent'; (e.target as HTMLInputElement).style.borderColor = 'transparent'; }}
+            />
+            <Pencil size={13} strokeWidth={2} style={{ position: 'absolute', right: 9, color: 'var(--text-ghost)', pointerEvents: 'none' }} />
+          </label>
+        ) : (
+          <span style={{ fontSize: 17, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--text-primary)', textShadow: '0 1px 3px rgba(0,0,0,0.6)' }}>
+            Customize
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        <motion.button
+          type="button"
+          onClick={save}
+          whileTap={{ scale: 0.96 }}
+          className="cz-focus"
+          style={{
+            pointerEvents: 'auto', flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '9px 18px', borderRadius: 11, border: 'none', cursor: 'pointer',
+            fontFamily: 'inherit', fontSize: 13.5, fontWeight: 600,
+            color: dirty ? '#fafafa' : 'var(--text-secondary)',
+            background: dirty ? 'var(--accent, #c44444)' : justSaved ? 'rgba(140,191,138,0.16)' : 'rgba(40,48,65,0.52)',
+            boxShadow: dirty ? '0 4px 14px -4px rgba(196,68,68,0.6)' : 'none',
+            backdropFilter: 'var(--glass-blur)', WebkitBackdropFilter: 'var(--glass-blur)',
+            transition: 'background 200ms var(--ease-out-quart), color 200ms var(--ease-out-quart), box-shadow 200ms var(--ease-out-quart)',
+          }}
+        >
+          {!dirty && justSaved && <Check size={14} strokeWidth={2.4} style={{ color: 'var(--live, #8cbf8a)' }} />}
+          {dirty ? 'Save' : justSaved ? 'Saved' : 'Save'}
+        </motion.button>
+      </motion.div>
+
+      <GroupRail groups={groups} active={group} onPick={pickGroup} />
+
+      <AnimatePresence>
+        {group === 'scene' ? (
+          <motion.div key="scene" style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+            <LightOrbit
+              angle={lightingAngle}
+              hex={accentHex ?? ACCENT_COLORS[accentIndex]?.hex ?? '#f0e8d6'}
+              intensity={lightIntensity}
+              onAngle={(a) => {
+                setLightingAngle(a);
+                touch('lightingAngle');
+                onEmit({ EventType: 'changeLightAngle', lightAngle: String(a) });
               }}
             />
-          )}
-          <SaveButton onClick={handleSave} />
-        </div>
-
-        <div style={{ flex: '1 1 auto', minHeight: 0, position: 'relative' }}>
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={pane}
-              initial={{ opacity: 0, y: 5 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -5 }}
-              transition={{ duration: 0.17, ease: EASE_OUT_EXPO }}
-              style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}
-            >
-              {isGarment ? (
-                <>
-                  <Reel
-                    items={items}
-                    selected={selected}
-                    onPick={(i) => pickItem(pane, i)}
+            <SceneDeck
+              tab={sceneTab}
+              onTab={setSceneTab}
+              lightHex={accentHex ?? ACCENT_COLORS[accentIndex]?.hex ?? '#ffffff'}
+              accentIndex={accentHex ? -1 : accentIndex}
+              accentHex={accentHex}
+              onAccent={(i) => { setAccentIndex(i); setAccentHex(undefined); touch('accent'); emitLight(ACCENT_COLORS[i], lightIntensity); }}
+              onAccentCustom={(rect) => setPicker({ target: { kind: 'accent' }, rect })}
+              lightIntensity={lightIntensity}
+              onLightIntensity={(v) => { setLightIntensity(v); touch('lightIntensity'); emitLight(accentRgb(), v); }}
+              bgHex={bgHex ?? BG_COLORS[bgIndex]?.hex ?? '#1a2338'}
+              bgIndex={bgHex ? -1 : bgIndex}
+              bgCustomHex={bgHex}
+              onBg={(i) => { setBgIndex(i); setBgHex(undefined); touch('bg'); emitBG(BG_COLORS[i], bgGlow); }}
+              onBgCustom={(rect) => setPicker({ target: { kind: 'bg' }, rect })}
+              bgGlow={bgGlow}
+              onBgGlow={(v) => { setBgGlow(v); touch('bgGlow'); emitBG(bgRgb(), v); }}
+              bgMode={clampBgMode(bgMode)}
+              onBgMode={onBgMode ? (m) => { onEmit({ EventType: 'changeBGMaterial', bgmode: m }); onBgMode(m); } : undefined}
+              effectId={effectId}
+              effectStrength={effectStrength}
+              onEffect={(id) => applyEffect(id, effectStrength)}
+              onEffectStrength={(v) => applyEffect(effectId, v)}
+            />
+          </motion.div>
+        ) : pane === 'body' ? (
+          <ColumnIsland
+            key="body"
+            title={GROUP_META.body.label}
+            width={172}
+            bottom={14}
+            tabs={unified ? <Tabs id="body" items={bodyTabs} value={tuneTab} onChange={setTuneTab} /> : undefined}
+          >
+            {unified ? (
+              tuneTab === 'colour' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  <SwatchRow
+                    label="Hair"
+                    items={HAIR_COLORS.map((h, i) => ({ key: String(i), hex: h.hex, name: h.label }))}
+                    activeKey={hairColor?.preset !== undefined ? String(hairColor.preset) : null}
+                    onPick={(k) => pickHair(Number(k))}
                   />
-                  <Caption
-                    name={activeItem?.name ?? ''}
-                    position={Math.max(0, items.findIndex((i) => i.index === selected)) + 1}
-                    total={items.length}
+                  <SwatchRow
+                    label="Eyes"
+                    items={EYE_COLORS.map((e) => ({ key: e.iris, hex: e.hex, name: e.label }))}
+                    activeKey={eyeColor?.iris ?? null}
+                    onPick={pickEyes}
                   />
-                  {CUSTOM_COLORABLE.includes(pane as CustomCategory) && (
-                    <ToneRow
-                      pair={clothingColors[pane as 'top' | 'bottom' | 'shoes']}
-                      onPreset={(slot, idx) => setTone(pane as 'top' | 'bottom' | 'shoes', slot, idx)}
-                      onCustom={(slot, rect) =>
-                        setPicker({ target: { kind: 'clothing', cat: pane as 'top' | 'bottom' | 'shoes', slot }, rect })}
-                    />
-                  )}
-                </>
-              ) : pane === 'body' ? (
-                isUnifiedHost(agentId) ? (
-                  // Unified: the full rig. Tabbed rather than a sixteen-lever
-                  // wall, because Body / Face / Colour is how people actually
-                  // think about changing a character, and a single scroll
-                  // trough of identical controls gets read by nobody.
-                  <div style={{
-                    flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column',
-                    gap: 10, padding: '2px 16px 12px',
-                  }}>
-                    <div style={{ display: 'flex', gap: 16, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-                      {(['body', 'face', 'colour'] as const).map((t) => (
-                        <button
-                          key={t}
-                          type="button"
-                          onClick={() => setTuneTab(t)}
-                          style={{
-                            position: 'relative', background: 'none', border: 'none',
-                            padding: '0 0 6px', cursor: 'pointer',
-                            fontSize: 10, fontWeight: 600, letterSpacing: '0.14em',
-                            textTransform: 'uppercase',
-                            color: t === tuneTab ? 'var(--text-primary)' : 'var(--text-ghost)',
-                            transition: 'color 180ms ease-out',
-                          }}
-                        >
-                          {t === 'colour' ? 'Colour' : t}
-                          {t === tuneTab && (
-                            <span style={{
-                              position: 'absolute', left: 0, right: 0, bottom: -1,
-                              height: 1, background: 'var(--accent, #c44444)',
-                            }} />
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                    <div style={{
-                      flex: 1, minHeight: 0, overflowY: 'auto',
-                      display: 'flex', flexDirection: 'column', gap: 14,
-                      paddingRight: 2,
-                    }}>
-                      {tuneTab === 'colour' ? (
-                        <>
-                          <SwatchRow
-                            label="Hair"
-                            items={HAIR_COLORS.map((h, i) => ({ key: String(i), hex: h.hex, name: h.label }))}
-                            activeKey={hairColor?.preset !== undefined ? String(hairColor.preset) : null}
-                            onPick={(k) => pickHair(Number(k))}
-                          />
-                          <SwatchRow
-                            label="Eyes"
-                            items={EYE_COLORS.map((e) => ({ key: e.iris, hex: e.hex, name: e.label }))}
-                            activeKey={eyeColor?.iris ?? null}
-                            onPick={pickEyes}
-                          />
-                          {/* The skin is a generative result, so it is the one
-                              part worth re-rolling. Re-running the whole chain
-                              for it costs a 3D credit, several minutes and a
-                              headless engine boot; this is seconds. */}
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                            <span style={{
-                              fontSize: 10, fontWeight: 600, letterSpacing: '0.14em',
-                              textTransform: 'uppercase', color: 'var(--text-ghost)',
-                            }}>Skin</span>
-                            {(skins?.length ?? 0) > 1 && (
-                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                                {skins!.map((sk) => {
-                                  const on = sk.path === activeSkin;
-                                  return (
-                                    <button
-                                      key={sk.path}
-                                      type="button"
-                                      onClick={() => onPickSkin?.(sk.path)}
-                                      style={{
-                                        padding: '5px 10px',
-                                        borderRadius: 999,
-                                        background: on ? 'rgba(196,68,68,0.16)' : 'rgba(40,48,65,0.32)',
-                                        border: on
-                                          ? '1px solid rgba(196,68,68,0.55)'
-                                          : '1px solid rgba(255,255,255,0.10)',
-                                        color: on ? 'var(--text-primary)' : 'var(--text-secondary)',
-                                        fontSize: 11,
-                                        fontWeight: 500,
-                                        cursor: 'pointer',
-                                      }}
-                                    >
-                                      {sk.label}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            )}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>Skin</span>
+                    {(skins?.length ?? 0) > 1 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {skins!.map((sk) => {
+                          const on = sk.path === activeSkin;
+                          return (
                             <button
+                              key={sk.path}
                               type="button"
-                              disabled={regenSkin === 'busy' || !onRegenSkin}
-                              onClick={async () => {
-                                if (!onRegenSkin) return;
-                                setRegenSkin('busy');
-                                const ok = await onRegenSkin();
-                                setRegenSkin(ok ? 'idle' : 'failed');
-                              }}
+                              onClick={() => onPickSkin?.(sk.path)}
+                              className="cz-focus"
                               style={{
-                                alignSelf: 'flex-start',
-                                padding: '7px 14px',
-                                borderRadius: 999,
-                                background: 'rgba(40, 48, 65, 0.38)',
-                                border: '1px solid rgba(255,255,255,0.12)',
-                                color: regenSkin === 'failed' ? 'var(--accent, #c44444)' : 'var(--text-primary)',
-                                fontSize: 11.5,
-                                fontWeight: 500,
-                                cursor: regenSkin === 'busy' ? 'default' : 'pointer',
-                                opacity: regenSkin === 'busy' ? 0.6 : 1,
-                                transition: 'opacity 180ms ease-out',
+                                padding: '5px 10px', borderRadius: 999, cursor: 'pointer', fontFamily: 'inherit',
+                                background: on ? 'rgba(196,68,68,0.16)' : 'rgba(255,255,255,0.04)',
+                                border: on ? '1px solid rgba(196,68,68,0.55)' : '1px solid rgba(255,255,255,0.10)',
+                                color: on ? 'var(--text-primary)' : 'var(--text-secondary)', fontSize: 11.5, fontWeight: 500,
                               }}
                             >
-                              {regenSkin === 'busy' ? 'Painting new skin'
-                                : regenSkin === 'failed' ? 'Failed, try again'
-                                : 'Generate new skin'}
+                              {sk.label}
                             </button>
-                          </div>
-                        </>
-                      ) : (
-                        (tuneTab === 'body' ? UNIFIED_BODY_AXES : UNIFIED_FACE_AXES).map((a) => (
-                          <Lever
-                            key={a.key}
-                            label={a.label}
-                            plus={a.plus}
-                            minus={a.minus}
-                            value={axes[a.key] ?? 0}
-                            onChange={(v) => setAxis(a.key, v)}
-                          />
-                        ))
-                      )}
-                    </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      disabled={regenSkin === 'busy' || !onRegenSkin}
+                      onClick={async () => {
+                        if (!onRegenSkin) return;
+                        setRegenSkin('busy');
+                        const ok = await onRegenSkin();
+                        setRegenSkin(ok ? 'idle' : 'failed');
+                      }}
+                      className="cz-focus"
+                      style={{
+                        alignSelf: 'flex-start', padding: '8px 13px', borderRadius: 10, fontFamily: 'inherit',
+                        background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.12)',
+                        color: regenSkin === 'failed' ? 'var(--accent, #c44444)' : 'var(--text-primary)',
+                        fontSize: 12.5, fontWeight: 600, cursor: regenSkin === 'busy' ? 'default' : 'pointer',
+                        opacity: regenSkin === 'busy' ? 0.6 : 1,
+                      }}
+                    >
+                      {regenSkin === 'busy' ? 'Painting new skin' : regenSkin === 'failed' ? 'Failed, try again' : 'Generate new skin'}
+                    </button>
                   </div>
-                ) : (
-                <div style={{
-                  flex: 1, display: 'flex', flexDirection: 'column',
-                  alignItems: 'center', justifyContent: 'center',
-                  gap: 20, padding: '2px 16px 12px',
-                }}>
-                  <Lever
-                    label="Height"
-                    plus="Tall"
-                    minus="Short"
-                    value={heightBlend}
-                    onChange={(v) => { setHeightBlend(v); touch('heightBlend'); emitBlends(v, weightBlend); }}
-                  />
-                  <Lever
-                    label="Weight"
-                    plus="Full"
-                    minus="Slim"
-                    value={weightBlend}
-                    onChange={(v) => { setWeightBlend(v); touch('weightBlend'); emitBlends(heightBlend, v); }}
-                  />
-                </div>
-                )
-              ) : pane === 'environment' ? (
-                // Environment = Light | Backdrop, side by side (their own divider).
-                <div style={{
-                  flex: 1, minHeight: 0, display: 'flex', alignItems: 'stretch',
-                  justifyContent: 'center', overflow: 'hidden', padding: '8px 18px',
-                }}>
-                <EnvironmentPane
-                  angle={lightingAngle}
-                  onAngle={(a) => {
-                    setLightingAngle(a);
-                    touch('lightingAngle');
-                    onEmit({ EventType: 'changeLightAngle', lightAngle: String(a) });
-                  }}
-                  lightHex={accentHex ?? ACCENT_COLORS[accentIndex]?.hex ?? '#ffffff'}
-                  lightIntensity={lightIntensity}
-                  onLightIntensity={(v) => { setLightIntensity(v); touch('lightIntensity'); emitLight(accentRgb(), v); }}
-                  accentIndex={accentHex ? -1 : accentIndex}
-                  accentHex={accentHex}
-                  onAccent={(i) => { setAccentIndex(i); setAccentHex(undefined); touch('accent'); emitLight(ACCENT_COLORS[i], lightIntensity); }}
-                  onAccentCustom={(rect) => setPicker({ target: { kind: 'accent' }, rect })}
-                  bgHex={bgHex ?? BG_COLORS[bgIndex]?.hex ?? '#1a2338'}
-                  bgGlow={bgGlow}
-                  onBgGlow={(v) => { setBgGlow(v); touch('bgGlow'); emitBG(bgRgb(), v); }}
-                  bgIndex={bgHex ? -1 : bgIndex}
-                  bgCustomHex={bgHex}
-                  onBg={(i) => { setBgIndex(i); setBgHex(undefined); touch('bg'); emitBG(BG_COLORS[i], bgGlow); }}
-                  onBgCustom={(rect) => setPicker({ target: { kind: 'bg' }, rect })}
-                  bgMode={bgMode}
-                  onBgMode={onBgMode ? (m) => { onEmit({ EventType: 'changeBGMaterial', bgmode: m }); onBgMode(m); } : undefined}
-                />
                 </div>
               ) : (
-                // Effects: its own pane, a horizontal reel like the wardrobe.
-                <EffectsPane
-                  effectId={effectId}
-                  strength={effectStrength}
-                  onPick={(id) => applyEffect(id, effectStrength)}
-                  onStrength={(v) => applyEffect(effectId, v)}
-                />
-              )}
-            </motion.div>
-          </AnimatePresence>
-        </div>
-      </motion.div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16, paddingTop: 4 }}>
+                  {(tuneTab === 'body' ? UNIFIED_BODY_AXES : UNIFIED_FACE_AXES).map((ax) => (
+                    <Lever key={ax.key} label={ax.label} plus={ax.plus} minus={ax.minus}
+                      value={axes[ax.key] ?? 0} onChange={(v) => setAxis(ax.key, v)} />
+                  ))}
+                </div>
+              )
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20, paddingTop: 6 }}>
+                <Lever label="Height" plus="Tall" minus="Short" value={heightBlend}
+                  onChange={(v) => { setHeightBlend(v); touch('heightBlend'); emitBlends(v, weightBlend); }} />
+                <Lever label="Weight" plus="Full" minus="Slim" value={weightBlend}
+                  onChange={(v) => { setWeightBlend(v); touch('weightBlend'); emitBlends(heightBlend, v); }} />
+              </div>
+            )}
+          </ColumnIsland>
+        ) : (
+          <ColumnIsland
+            key={`items-${group}`}
+            title={GROUP_META[group].label}
+            tabs={<Tabs id={`g-${group}`} items={groupPanes.map((p) => ({ id: p, label: PANE_LABELS[p] }))} value={pane} onChange={(p) => setPane(p)} />}
+          >
+            <div role="listbox" aria-label={PANE_LABELS[pane]} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {items.map((it) => (
+                <NamedTile key={`${pane}-${it.key}`} item={it} selected={it.index === selected} onPick={() => pickItem(pane as CustomCategory, it.index)}
+                  height={it.key === 'none' ? 48 : 88} />
+              ))}
+            </div>
+          </ColumnIsland>
+        )}
+      </AnimatePresence>
+
+      {isGarment && (
+        <Dock
+          name={activeItem?.name ?? ''}
+          position={position}
+          colour={colourable ? {
+            pair: clothingColors[pane as 'top' | 'bottom' | 'shoes'],
+            onPreset: (slot, idx) => setTone(pane as 'top' | 'bottom' | 'shoes', slot, idx),
+            onCustom: (slot, rect) => setPicker({ target: { kind: 'clothing', cat: pane as 'top' | 'bottom' | 'shoes', slot }, rect }),
+          } : undefined}
+        />
+      )}
 
       {picker && (
         <ColorPickerPanel
@@ -836,347 +681,6 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   );
 }
 
-// ============ reel ==================================================
-
-// Chevron buttons flank every horizontal reel: there's no visible scrollbar,
-// so these are how you scrub the set. Each dims at the edge it can't move
-// toward. Shared by the wardrobe reel and the effects reel.
-function useReelArrows(scrollRef: React.RefObject<HTMLDivElement | null>) {
-  const [edges, setEdges] = useState({ canLeft: false, canRight: false });
-  const sync = useCallback(() => {
-    const box = scrollRef.current;
-    if (!box) return;
-    const canLeft = box.scrollLeft > 1;
-    const canRight = box.scrollLeft + box.clientWidth < box.scrollWidth - 1;
-    setEdges((p) => (p.canLeft === canLeft && p.canRight === canRight ? p : { canLeft, canRight }));
-  }, [scrollRef]);
-  const scroll = useCallback((dir: 1 | -1) => {
-    const box = scrollRef.current;
-    if (!box) return;
-    box.scrollBy({ left: dir * Math.max(120, box.clientWidth * 0.7), behavior: 'smooth' });
-  }, [scrollRef]);
-  return { edges, sync, scroll };
-}
-
-function ReelArrow({ dir, active, onClick }: { dir: 'left' | 'right'; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      aria-label={dir === 'left' ? 'Scroll left' : 'Scroll right'}
-      onClick={onClick}
-      disabled={!active}
-      style={{
-        flex: '0 0 auto',
-        width: 24, height: 24, padding: 0, borderRadius: 8,
-        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        background: 'rgba(255,255,255,0.05)',
-        border: '1px solid rgba(255,255,255,0.10)',
-        color: 'var(--text-secondary, #d4cec7)',
-        cursor: active ? 'pointer' : 'default',
-        opacity: active ? 1 : 0.25,
-        transition: 'opacity 160ms var(--ease-out-quart)',
-      }}
-    >
-      {dir === 'left' ? <ChevronLeft size={15} strokeWidth={2} /> : <ChevronRight size={15} strokeWidth={2} />}
-    </button>
-  );
-}
-
-function Reel({ items, selected, onPick }: {
-  items: WardrobeItem[]; selected: number; onPick: (i: number) => void;
-}) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const selRef = useRef<HTMLButtonElement | null>(null);
-  const { edges, sync, scroll } = useReelArrows(scrollRef);
-
-  // Bring the selected frame into view ONLY when it's off-screen (e.g. arrow-
-  // scrubbing walked it out). We scroll the reel's own scrollLeft directly
-  // rather than element.scrollIntoView, because scrollIntoView also scrolls
-  // every ancestor — which yanked the whole panel and reset your horizontal
-  // position on each pick. Clicking an already-visible item now leaves the
-  // scroll exactly where you left it.
-  useEffect(() => {
-    const el = selRef.current;
-    const box = scrollRef.current;
-    if (!el || !box) return;
-    const elR = el.getBoundingClientRect();
-    const boxR = box.getBoundingClientRect();
-    if (elR.left < boxR.left || elR.right > boxR.right) {
-      const delta = elR.left - boxR.left - (boxR.width - elR.width) / 2;
-      box.scrollBy({ left: delta, behavior: 'smooth' });
-    }
-  }, [selected]);
-  // Refresh arrow enabled-state when the set changes (and on mount).
-  useEffect(() => { sync(); }, [items.length, sync]);
-
-  return (
-    <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 3, padding: '0 8px' }}>
-      <ReelArrow dir="left" active={edges.canLeft} onClick={() => scroll(-1)} />
-      <div
-        ref={scrollRef}
-        role="listbox"
-        aria-label="Items"
-        onScroll={sync}
-        style={{
-          flex: 1, minWidth: 0,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 7,
-          // Vertical padding leaves room for the selected frame to grow + lift
-          // without clipping against the scroll box.
-          padding: '9px 6px 7px',
-          overflowX: 'auto',
-          overflowY: 'hidden',
-          scrollbarWidth: 'none',        }}
-      >
-      {items.map((item) => {
-        const isSel = item.index === selected;
-        return (
-          <motion.button
-            key={item.key}
-            ref={isSel ? selRef : undefined}
-            type="button"
-            role="option"
-            aria-selected={isSel}
-            title={item.name}
-            onClick={() => onPick(item.index)}
-            animate={{ scale: isSel ? FRAME_SELECTED : 1, y: isSel ? -3 : 0 }}
-            whileHover={{ scale: isSel ? FRAME_SELECTED : 1.08 }}
-            whileTap={{ scale: isSel ? FRAME_SELECTED * 0.97 : 0.96 }}
-            transition={{ type: 'spring', stiffness: 480, damping: 30 }}
-            style={{
-              position: 'relative', // contains the no-thumb nameplate (inset:0)
-              flex: '0 0 auto',
-              width: FRAME, height: FRAME,
-              padding: 0,
-              borderRadius: 9,
-              overflow: 'hidden',
-              cursor: 'pointer',              background: 'rgba(255,255,255,0.03)',
-              border: isSel
-                ? '1px solid var(--accent, #c44444)'
-                : '1px solid rgba(255,255,255,0.10)',
-              boxShadow: isSel
-                ? '0 6px 16px -6px rgba(196,68,68,0.6)'
-                : 'none',
-              // Unselected frames recede so the grown one reads instantly.
-              opacity: isSel ? 1 : 0.55,
-              transition: 'opacity 180ms var(--ease-out-quart), border-color 180ms var(--ease-out-quart)',
-            }}
-          >
-            {item.thumb ? (
-              <img
-                src={item.thumb}
-                alt=""
-                draggable={false}
-                loading="lazy"
-                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              />
-            ) : (
-              // No art for this index. Name it rather than showing a void.
-              <span style={{
-                position: 'absolute', inset: 0,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                padding: '0 4px', textAlign: 'center',
-                fontSize: 7, fontWeight: 700, lineHeight: 1.2,
-                letterSpacing: '0.06em', textTransform: 'uppercase',
-                color: 'var(--text-ghost)',
-              }}>
-                {item.name}
-              </span>
-            )}
-          </motion.button>
-        );
-      })}
-      </div>
-      <ReelArrow dir="right" active={edges.canRight} onClick={() => scroll(1)} />
-    </div>
-  );
-}
-
-// ============ caption ===============================================
-// The name lives here, once, instead of under 34 frames where it would clip.
-
-function Caption({ name, position, total }: { name: string; position: number; total: number }) {
-  return (
-    <div style={{
-      flex: '0 0 auto',
-      height: 16,
-      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
-      padding: '0 16px',
-    }}>
-      <AnimatePresence mode="wait">
-        <motion.span
-          key={name}
-          initial={{ opacity: 0, y: 2 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -2 }}
-          transition={{ duration: 0.14, ease: EASE_OUT_EXPO }}
-          style={{
-            fontSize: 11, fontWeight: 500,
-            color: 'var(--text-secondary, #d4cec7)',
-            letterSpacing: '-0.005em', whiteSpace: 'nowrap',
-          }}
-        >
-          {name}
-        </motion.span>
-      </AnimatePresence>
-      <span style={{
-        fontFamily: '"SF Mono", ui-monospace, Menlo, monospace',
-        fontSize: 9, color: 'var(--text-ghost)', fontVariantNumeric: 'tabular-nums',
-      }}>
-        {position}/{total}
-      </span>
-    </div>
-  );
-}
-
-// ============ effects ===============================================
-// Same reel as the wardrobe, because it's the same act: browsing a set and
-// picking one. The frames can't show the real stream (nine live <video> clones
-// to draw a menu is absurd), so each renders a procedural stand-in scene with
-// the effect's own CSS applied to it. Abstract, but honest: what you see in the
-// frame is literally the code that will grade her.
-//
-// One effect at a time. Each is a composited layer over a 60fps video on a
-// machine already running Unreal, and stacking them would quietly tax the GPU
-// that's drawing her. Strength is the only knob because it's the only one worth
-// having: which look, and how much.
-
-function EffectsPane({ effectId, strength, onPick, onStrength }: {
-  effectId: string;
-  strength: number;
-  onPick: (id: string) => void;
-  onStrength: (v: number) => void;
-}) {
-  const fx = effectFor(effectId);
-  const isNone = fx.id === DEFAULT_EFFECT_ID;
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const selRef = useRef<HTMLButtonElement | null>(null);
-  const { edges, sync, scroll } = useReelArrows(scrollRef);
-
-  // Same out-of-view-only scroll as the wardrobe reel: don't yank the strip
-  // (and its ancestors) back on every pick.
-  useEffect(() => {
-    const el = selRef.current;
-    const box = scrollRef.current;
-    if (!el || !box) return;
-    const elR = el.getBoundingClientRect();
-    const boxR = box.getBoundingClientRect();
-    if (elR.left < boxR.left || elR.right > boxR.right) {
-      box.scrollBy({ left: elR.left - boxR.left - (boxR.width - elR.width) / 2, behavior: 'smooth' });
-    }
-  }, [effectId]);
-  useEffect(() => { sync(); }, [sync]);
-
-  return (
-    <>
-      {/* Horizontal reel, same act as the wardrobe: scrub a set, pick one. */}
-      <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 3, padding: '0 8px' }}>
-      <ReelArrow dir="left" active={edges.canLeft} onClick={() => scroll(-1)} />
-      <div
-        ref={scrollRef}
-        role="listbox"
-        aria-label="Effects"
-        onScroll={sync}
-        style={{
-          flex: 1, minWidth: 0,
-          display: 'flex', alignItems: 'center', gap: 7,
-          padding: '9px 6px 7px',
-          overflowX: 'auto', overflowY: 'hidden',
-          scrollbarWidth: 'none',        }}
-      >
-        {STREAM_EFFECTS.map((e) => {
-          const sel = e.id === effectId;
-          return (
-            <motion.button
-              key={e.id}
-              ref={sel ? selRef : undefined}
-              type="button"
-              role="option"
-              aria-selected={sel}
-              title={e.name}
-              onClick={() => onPick(e.id)}
-              animate={{ scale: sel ? FRAME_SELECTED : 1, y: sel ? -3 : 0 }}
-              whileHover={{ scale: sel ? FRAME_SELECTED : 1.08 }}
-              whileTap={{ scale: sel ? FRAME_SELECTED * 0.97 : 0.96 }}
-              transition={{ type: 'spring', stiffness: 480, damping: 30 }}
-              style={{
-                position: 'relative',
-                flex: '0 0 auto',
-                width: FRAME, height: FRAME,
-                padding: 0, borderRadius: 9, overflow: 'hidden',
-                cursor: 'pointer',
-                background: 'rgba(255,255,255,0.03)',
-                border: sel ? '1px solid var(--accent, #c44444)' : '1px solid rgba(255,255,255,0.10)',
-                boxShadow: sel ? '0 6px 16px -6px rgba(196,68,68,0.6)' : 'none',
-                opacity: sel ? 1 : 0.55,
-                transition: 'opacity 180ms var(--ease-out-quart), border-color 180ms var(--ease-out-quart)',
-              }}
-            >
-              {e.id === DEFAULT_EFFECT_ID ? (
-                // "None" gets no swatch: an empty frame with a slash is the
-                // clearest way to say "nothing applied".
-                <span style={{
-                  position: 'absolute', inset: 0,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 15, color: 'var(--text-ghost)',
-                }}>
-                  &#8709;
-                </span>
-              ) : (
-                <EffectSwatch effect={e} />
-              )}
-            </motion.button>
-          );
-        })}
-      </div>
-      <ReelArrow dir="right" active={edges.canRight} onClick={() => scroll(1)} />
-      </div>
-
-      {/* Name + strength on ONE row: label at left, slider at right. The
-          strength slider fades out with nothing applied (meaningless at None)
-          but keeps its space so the name doesn't jump when you switch to it. */}
-      <div style={{
-        flex: '0 0 auto',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        gap: 14, padding: '4px 16px 12px',
-      }}>
-        <AnimatePresence mode="wait">
-          <motion.span
-            key={fx.id}
-            initial={{ opacity: 0, y: 2 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -2 }}
-            transition={{ duration: 0.14, ease: EASE_OUT_EXPO }}
-            style={{
-              fontSize: 11, fontWeight: 600,
-              color: 'var(--text-primary, #fafafa)', letterSpacing: '-0.005em',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {fx.name}
-          </motion.span>
-        </AnimatePresence>
-        <div style={{
-          opacity: isNone ? 0 : 1,
-          pointerEvents: isNone ? 'none' : 'auto',
-          transition: 'opacity 180ms var(--ease-out-quart)',
-        }}>
-          <ValueSlider
-            value={strength}
-            onChange={onStrength}
-            min={0}
-            max={1}
-            step={0.01}
-            width={170}
-            label="Effect strength"
-          />
-        </div>
-      </div>
-    </>
-  );
-}
-
 // ============ lever =================================================
 // A bipolar HORIZONTAL fader: zero in the middle, poles at the ends (minus
 // left, plus right). Custom rather than an <input type=range> because this
@@ -1184,7 +688,6 @@ function EffectsPane({ effectId, strength, onPick, onStrength }: {
 // that snaps home. The mixing-desk read is the point: two faders, both resting
 // at center, is instantly legible as "she is at her defaults".
 
-const LEVER_W = 150;
 const DETENT = 0.05;   // snap-to-zero window; the lever has a real center click
 
 /** Unified hosts get the extended rig. Kept as its own test rather than reusing
@@ -1307,96 +810,71 @@ function Lever({ label, plus, minus, value, onChange }: {
     else if (e.key === 'Home' || e.key === '0') { e.preventDefault(); onChange(0); }
   };
 
-  // Thumb position: -1 -> left, +1 -> right.
-  const pct = (value + 1) / 2;                     // 0 at -1, 1 at +1
-  const thumbLeft = pct * LEVER_W;
-  // Fill spans center -> thumb, so magnitude reads as distance from home.
-  const fillLeft = value > 0 ? LEVER_W / 2 : thumbLeft;
-  const fillW = Math.abs(value) * (LEVER_W / 2);
+  // Thumb position as a percentage of the track: -1 left, +1 right. The track
+  // fills its column, so everything is relative.
+  const pct = ((value + 1) / 2) * 100;
+  const fillLeft = value > 0 ? 50 : pct;
+  const fillW = Math.abs(value) * 50;
+  const readout = value === 0 ? 'Default' : `${value > 0 ? plus : minus} ${Math.round(Math.abs(value) * 100)}%`;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-        <PoleLabel active={value < -0.02}>{minus}</PoleLabel>
-
-        <div
-          ref={trackRef}
-          role="slider"
-          tabIndex={0}
-          aria-label={`${label} blend`}
-          aria-valuemin={-1}
-          aria-valuemax={1}
-          aria-valuenow={value}
-          aria-valuetext={valueText(value, plus, minus)}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
-          onKeyDown={onKeyDown}
-          style={{
-            position: 'relative',
-            width: LEVER_W,
-            height: 20,
-            cursor: dragging ? 'grabbing' : 'pointer',
-            touchAction: 'none',
-            outline: 'none',
-          }}
-        >
-          {/* rail */}
-          <span style={{
-            position: 'absolute', top: '50%', left: 0, right: 0,
-            height: 3, marginTop: -1.5, borderRadius: 999,
-            background: 'rgba(255,255,255,0.13)',
-          }} />
-          {/* center detent: the home line you can feel by sight */}
-          <span style={{
-            position: 'absolute', top: 3, bottom: 3, left: LEVER_W / 2 - 0.5,
-            width: 1, background: 'rgba(255,255,255,0.30)',
-          }} />
-          {/* fill, growing out of the middle */}
-          <motion.span
-            animate={{ left: fillLeft, width: fillW }}
-            transition={dragging ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 40 }}
-            style={{
-              position: 'absolute', top: '50%', height: 3, marginTop: -1.5,
-              borderRadius: 999,
-              background: 'rgba(255, 245, 235, 0.78)',
-            }}
-          />
-          {/* thumb */}
-          <motion.span
-            animate={{ left: thumbLeft }}
-            transition={dragging ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 40 }}
-            style={{
-              position: 'absolute', top: '50%',
-              width: 14, height: 14, marginTop: -7, marginLeft: -7,
-              borderRadius: '50%',
-              background: 'rgba(255, 248, 240, 0.96)',
-              boxShadow: '0 1px 6px rgba(0,0,0,0.6), 0 0 12px rgba(255,240,220,0.35)',
-              // At home the thumb sits flush and quiet; off home it lifts.
-              scale: value === 0 ? 0.86 : 1,
-            }}
-          />
-        </div>
-
-        <PoleLabel active={value > 0.02}>{plus}</PoleLabel>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>{label}</span>
+        <span style={{
+          fontSize: 11.5, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
+          color: value === 0 ? 'var(--text-ghost)' : 'var(--text-secondary, #d4cec7)',
+        }}>
+          {readout}
+        </span>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, marginTop: 1 }}>
+      <div
+        ref={trackRef}
+        role="slider"
+        tabIndex={0}
+        aria-label={`${label} blend`}
+        aria-valuemin={-1}
+        aria-valuemax={1}
+        aria-valuenow={value}
+        aria-valuetext={valueText(value, plus, minus)}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onKeyDown={onKeyDown}
+        className="cz-focus"
+        style={{
+          position: 'relative', width: '100%', height: 20, borderRadius: 6,
+          cursor: dragging ? 'grabbing' : 'pointer', touchAction: 'none',
+        }}
+      >
         <span style={{
-          fontSize: 9.5, fontWeight: 600, letterSpacing: '0.1em',
-          textTransform: 'uppercase', color: 'var(--text-ghost)',
-        }}>
-          {label}
-        </span>
-        <span style={{
-          fontFamily: '"SF Mono", ui-monospace, Menlo, monospace',
-          fontSize: 9.5,
-          color: value === 0 ? 'var(--text-ghost)' : 'var(--text-secondary, #d4cec7)',
-          fontVariantNumeric: 'tabular-nums',
-        }}>
-          {value === 0 ? 'home' : `${value > 0 ? '+' : ''}${value.toFixed(2)}`}
-        </span>
+          position: 'absolute', top: '50%', left: 0, right: 0,
+          height: 3, marginTop: -1.5, borderRadius: 999, background: 'rgba(255,255,255,0.13)',
+        }} />
+        {/* center detent: home, visible at a glance */}
+        <span style={{ position: 'absolute', top: 4, bottom: 4, left: '50%', width: 1, background: 'rgba(255,255,255,0.30)' }} />
+        <motion.span
+          animate={{ left: `${fillLeft}%`, width: `${fillW}%` }}
+          transition={dragging ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 40 }}
+          style={{ position: 'absolute', top: '50%', height: 3, marginTop: -1.5, borderRadius: 999, background: 'rgba(255, 245, 235, 0.78)' }}
+        />
+        <motion.span
+          animate={{ left: `${pct}%` }}
+          transition={dragging ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 40 }}
+          style={{
+            position: 'absolute', top: '50%', width: 14, height: 14, marginTop: -7, marginLeft: -7,
+            borderRadius: '50%', background: 'rgba(255, 248, 240, 0.96)',
+            boxShadow: '0 1px 6px rgba(0,0,0,0.6), 0 0 12px rgba(255,240,220,0.35)',
+            scale: value === 0 ? 0.86 : 1,
+          }}
+        />
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+        <PoleLabel active={value < -0.02}>{minus}</PoleLabel>
+        <PoleLabel active={value > 0.02}>{plus}</PoleLabel>
       </div>
     </div>
   );
@@ -1405,10 +883,9 @@ function Lever({ label, plus, minus, value, onChange }: {
 function PoleLabel({ children, active }: { children: React.ReactNode; active: boolean }) {
   return (
     <span style={{
-      fontSize: 8.5, fontWeight: 700, letterSpacing: '0.12em',
-      textTransform: 'uppercase', whiteSpace: 'nowrap',
+      fontSize: 10.5, fontWeight: 500, whiteSpace: 'nowrap',
       // The engaged pole brightens: which way you've pushed, without a readout.
-      color: active ? 'var(--text-primary, #fafafa)' : 'rgba(255,255,255,0.24)',
+      color: active ? 'var(--text-primary, #fafafa)' : 'var(--text-ghost)',
       transition: 'color 180ms var(--ease-out-quart)',
     }}>
       {children}
@@ -1436,322 +913,6 @@ function round2(n: number): number {
 // push glow up and the halo blooms, swing the angle and the light sweeps around
 // her. That's why they merged, and it's the one moment of delight on this
 // surface.
-
-function EnvironmentPane(p: {
-  angle: number;
-  onAngle: (a: number) => void;
-  lightHex: string;
-  lightIntensity: number;
-  onLightIntensity: (v: number) => void;
-  accentIndex: number;
-  accentHex?: string;
-  onAccent: (i: number) => void;
-  onAccentCustom: (rect: DOMRect) => void;
-  bgHex: string;
-  bgGlow: number;
-  onBgGlow: (v: number) => void;
-  bgIndex: number;
-  bgCustomHex?: string;
-  onBg: (i: number) => void;
-  onBgCustom: (rect: DOMRect) => void;
-  bgMode?: number;
-  onBgMode?: (i: number) => void;
-}) {
-  // Normalize both magnitudes to 0-1 so they can drive opacity honestly.
-  const glowN = (p.bgGlow - BG_GLOW_MIN) / (BG_GLOW_MAX - BG_GLOW_MIN);
-  const litN = (p.lightIntensity - LIGHT_INTENSITY_MIN) / (LIGHT_INTENSITY_MAX - LIGHT_INTENSITY_MIN);
-
-  return (
-    <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 14, padding: '0 14px' }}>
-      {/* The stage */}
-      <div style={{ position: 'relative', flex: '0 0 auto', width: 96, height: 96 }}>
-        {/* backdrop wash: the half-sphere, seen from above */}
-        <motion.span
-          aria-hidden
-          animate={{ opacity: 0.22 + glowN * 0.78 }}
-          transition={{ duration: 0.24, ease: EASE_OUT_EXPO }}
-          style={{
-            position: 'absolute', inset: -14, borderRadius: '50%',
-            background: `radial-gradient(circle, ${p.bgHex} 0%, ${p.bgHex}66 45%, transparent 72%)`,
-            filter: 'blur(6px)',
-            pointerEvents: 'none',
-          }}
-        />
-        {/* key-light wash: brightens with intensity, tinted by the light color */}
-        <motion.span
-          aria-hidden
-          animate={{ opacity: 0.1 + litN * 0.5 }}
-          transition={{ duration: 0.24, ease: EASE_OUT_EXPO }}
-          style={{
-            position: 'absolute', inset: 4, borderRadius: '50%',
-            background: `radial-gradient(circle, ${p.lightHex}55 0%, transparent 68%)`,
-            filter: 'blur(4px)',
-            pointerEvents: 'none',
-          }}
-        />
-        <LightingDial value={p.angle} onChange={p.onAngle} size={96} />
-      </div>
-
-      {/* The two axes, side by side (each a column: label, swatches, magnitude,
-          + the backdrop's mode dropdown) so the pane stays short in the bar. */}
-      <div style={{ flex: '0 0 auto', display: 'flex', flexDirection: 'row', alignItems: 'flex-start', gap: 16 }}>
-        <EnvRow label="Light">
-          <Dots
-            colors={ACCENT_COLORS}
-            activeIndex={p.accentIndex}
-            customHex={p.accentHex}
-            onPick={p.onAccent}
-            onCustom={p.onAccentCustom}
-          />
-          <ValueSlider
-            value={p.lightIntensity}
-            onChange={p.onLightIntensity}
-            min={LIGHT_INTENSITY_MIN}
-            max={LIGHT_INTENSITY_MAX}
-            width={150}
-            label="Key light intensity"
-          />
-        </EnvRow>
-        <span style={{ width: 1, alignSelf: 'stretch', background: 'rgba(255,255,255,0.06)' }} />
-        <EnvRow label="Backdrop">
-          <Dots
-            colors={BG_COLORS}
-            activeIndex={p.bgIndex}
-            customHex={p.bgCustomHex}
-            onPick={p.onBg}
-            onCustom={p.onBgCustom}
-          />
-          <ValueSlider
-            value={p.bgGlow}
-            onChange={p.onBgGlow}
-            min={BG_GLOW_MIN}
-            max={BG_GLOW_MAX}
-            width={150}
-            label="Backdrop glow"
-          />
-          {p.onBgMode && (
-            <BackdropStylePicker value={clampBgMode(p.bgMode)} onSelect={p.onBgMode} />
-          )}
-        </EnvRow>
-      </div>
-    </div>
-  );
-}
-
-function EnvRow({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-      <span style={{
-        fontSize: 8.5, fontWeight: 700, letterSpacing: '0.14em',
-        textTransform: 'uppercase', color: 'var(--text-ghost)',
-      }}>
-        {label}
-      </span>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-// ============ chip ==================================================
-
-function Chip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  const ref = useRef<HTMLButtonElement | null>(null);
-  // Keep the active chip visible inside the masked, scrollable strip; without
-  // this, tabbing to Environment or Effects leaves the selection off-screen.
-  useEffect(() => {
-    if (active) ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
-  }, [active]);
-  return (
-    <button
-      ref={ref}
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      style={{
-        position: 'relative', flex: '0 0 auto',
-        padding: '8px 10px 9px',
-        background: 'none', border: 'none', cursor: 'pointer',
-        fontFamily: 'inherit', fontSize: 10.5,
-        fontWeight: active ? 600 : 500,
-        letterSpacing: '-0.005em', whiteSpace: 'nowrap',
-        color: active ? 'var(--text-primary, #fafafa)' : 'var(--text-ghost)',
-        transition: 'color 160ms var(--ease-out-quart)',
-      }}
-    >
-      {label}
-      {active && (
-        <motion.span
-          layoutId="custom-wardrobe-chip"
-          transition={{ type: 'spring', stiffness: 520, damping: 38 }}
-          style={{
-            position: 'absolute', left: 8, right: 8, bottom: 1,
-            height: 2, borderRadius: 999,
-            background: 'var(--accent, #c44444)',
-          }}
-        />
-      )}
-    </button>
-  );
-}
-
-// ============ dots ==================================================
-
-function Dots({ colors, activeIndex, customHex, onPick, onCustom }: {
-  colors: Array<{ label: string; hex: string }>;
-  activeIndex: number;
-  customHex?: string;
-  onPick: (i: number) => void;
-  onCustom: (rect: DOMRect) => void;
-}) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
-      {colors.map((c, i) => (
-        <Dot key={c.label} hex={c.hex} label={c.label} active={i === activeIndex} onClick={() => onPick(i)} />
-      ))}
-      <Dot
-        hex={customHex ?? 'transparent'}
-        label="Custom color"
-        active={!!customHex}
-        dashed={!customHex}
-        rainbow
-        onClick={(rect) => onCustom(rect)}
-      />
-    </div>
-  );
-}
-
-// The color-wheel fill for the custom-color swatch when nothing's picked yet:
-// a full-spectrum ring reads as "pick any color" at a glance.
-const RAINBOW_SWATCH =
-  'conic-gradient(from 0deg, #ff4d4d, #ffd24d, #7dff4d, #4dffd2, #4d9dff, #7d4dff, #ff4dd2, #ff4d4d)';
-
-function Dot({ hex, label, active, dashed, rainbow, onClick }: {
-  hex: string; label: string; active: boolean; dashed?: boolean; rainbow?: boolean;
-  onClick: (rect: DOMRect) => void;
-}) {
-  // The unset custom swatch shows the rainbow wheel (if requested) instead of a
-  // dashed placeholder, so it reads as a color picker; once a color is chosen it
-  // shows that color like any other dot.
-  const showWheel = dashed && rainbow;
-  return (
-    <motion.button
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-pressed={active}
-      whileHover={{ scale: 1.16 }}
-      whileTap={{ scale: 0.94 }}
-      transition={{ duration: 0.16, ease: EASE_OUT_EXPO }}
-      onClick={(e) => onClick(e.currentTarget.getBoundingClientRect())}
-      style={{
-        width: 18, height: 18, borderRadius: '50%', padding: 0, cursor: 'pointer',
-        background: showWheel ? RAINBOW_SWATCH : dashed ? 'rgba(255,255,255,0.06)' : hex,
-        border: active
-          ? '2px solid rgba(255,255,255,0.92)'
-          : showWheel ? '1px solid rgba(255,255,255,0.22)'
-          : dashed ? '1px dashed rgba(255,255,255,0.34)' : '1px solid rgba(255,255,255,0.16)',
-        boxShadow: active && !dashed ? `0 0 9px -1px ${hex}` : 'none',
-        transition: 'border-color 160ms var(--ease-out-quart), box-shadow 160ms var(--ease-out-quart)',
-      }}
-    />
-  );
-}
-
-// ============ strands row ===========================================
-// Hair only. Same style either way, so this is a quality switch rather than a
-// choice about the look: strand grooms are the real thing, cards are the cheap
-// stand-in. It sits under the reel because it modifies whatever you just
-// picked, and it's a switch rather than a reel frame because it isn't a
-// hairstyle, it's how that hairstyle is drawn.
-
-// ============ tone row ==============================================
-
-function ToneRow({ pair, onPreset, onCustom }: {
-  pair: ClothingColor;
-  onPreset: (slot: 'c1' | 'c2', idx: number) => void;
-  onCustom: (slot: 'c1' | 'c2', rect: DOMRect) => void;
-}) {
-  return (
-    <div style={{
-      flex: '0 0 auto',
-      borderTop: '1px solid rgba(255,255,255,0.06)',
-      padding: '7px 14px 8px',
-      display: 'flex', flexDirection: 'column', gap: 5,
-    }}>
-      {(['c1', 'c2'] as const).map((slot) => {
-        const hex = slot === 'c1' ? pair.c1Hex : pair.c2Hex;
-        const idx = slot === 'c1' ? pair.c1 : pair.c2;
-        return (
-          <div key={slot} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{
-              flex: '0 0 auto', width: 10,
-              fontFamily: '"SF Mono", ui-monospace, Menlo, monospace',
-              fontSize: 8.5, color: 'var(--text-ghost)',
-            }}>
-              {slot === 'c1' ? '1' : '2'}
-            </span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              {CLOTHING_COLORS.map((c, i) => (
-                <Dot
-                  key={c.label}
-                  hex={c.hex}
-                  label={c.label}
-                  active={!hex && i === idx}
-                  onClick={() => onPreset(slot, i)}
-                />
-              ))}
-              <Dot
-                hex={hex ?? 'transparent'}
-                label="Custom color"
-                active={!!hex}
-                dashed={!hex}
-                onClick={(rect) => onCustom(slot, rect)}
-              />
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ============ save ==================================================
-
-function SaveButton({ onClick }: { onClick: () => void }) {
-  const [saved, setSaved] = useState(false);
-  const handle = () => {
-    onClick();
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1400);
-  };
-  return (
-    <motion.button
-      type="button"
-      onClick={handle}
-      whileHover={{ scale: 1.04 }}
-      whileTap={{ scale: 0.95 }}
-      style={{
-        pointerEvents: 'auto',
-        flex: '0 0 auto',
-        padding: '6px 12px', borderRadius: 999,
-        background: saved
-          ? 'color-mix(in srgb, var(--live) 24%, rgba(20, 24, 32, 0.55))'
-          : 'color-mix(in srgb, var(--accent) 22%, rgba(20, 24, 32, 0.55))',
-        border: `1px solid color-mix(in srgb, ${saved ? 'var(--live)' : 'var(--accent)'} 55%, transparent)`,
-        color: '#fafafa', fontFamily: 'inherit',
-        fontSize: 10, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase',
-        display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer',
-        transition: 'background 200ms var(--ease-out-quart), border-color 200ms var(--ease-out-quart)',
-      }}
-    >
-      {saved && <Check size={10} strokeWidth={2.6} />}
-      {saved ? 'Saved' : 'Save'}
-    </motion.button>
-  );
-}
 
 // ============ helpers ===============================================
 
