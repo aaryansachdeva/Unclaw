@@ -19,7 +19,7 @@ import { CameraModeToggle } from './components/CameraModeToggle';
 import { StreamEffects } from './components/StreamEffects';
 import { dressCharacter, type DressScope } from './wardrobe/dressCharacter';
 import { wardrobeDefaultsFor } from './wardrobe/catalog';
-import { cameraCustomize, cameraForMode, cameraDefaultFor, type CameraMode } from './wardrobe/camera';
+import { cameraCustomize, cameraCustomizeFace, cameraPanelShift, cameraForMode, cameraDefaultFor, type CameraMode } from './wardrobe/camera';
 import { blendAxesForCamera } from './wardrobe/camera';
 import { PulseGrid } from './components/PulseGrid';
 import { hexToRgb01, round3 } from './components/ColorPickerPanel';
@@ -3532,6 +3532,9 @@ function AppMain() {
   // pane via onCloseUpChange. Defaults true because customization always opens
   // on the hair pane.
   const [customizeCloseUp, setCustomizeCloseUp] = useState(true);
+  // Width of the Customize inspector when one is open (0 on the overview).
+  const [customizePanelPx, setCustomizePanelPx] = useState(0);
+  const lastCameraRef = useRef<[number, number, number]>([0, 0, 0]);
   const applyCamera = useCallback((agentIdOverride?: string | null) => {
     if (!pixelStreaming) return;
     const aid = agentIdOverride ?? activeAgentId;
@@ -3541,9 +3544,14 @@ function AppMain() {
     const axes = blendAxesForCamera(
       currentInstance?.identity?.gender, currentInstance?.identity?.build,
     );
-    const [x, y, z] = customizationActive
-      ? (customizeCloseUp ? cameraDefaultFor(aid, axes) : cameraCustomize(aid, axes))
+    const [cx, y, z] = customizationActive
+      ? (customizeCloseUp ? cameraCustomizeFace(aid, axes) : cameraCustomize(aid, axes))
       : cameraForMode(aid, cameraMode, axes);
+    // An open inspector slides her left so the panel never covers her.
+    const x = customizationActive
+      ? cx + cameraPanelShift(customizeCloseUp, customizePanelPx, window.innerWidth)
+      : cx;
+    lastCameraRef.current = [x, y, z];
     pixelStreaming.emitUIInteraction({
       EventType: 'updateCameraFromLocation',
       'locB.x': round3(x),
@@ -3551,7 +3559,7 @@ function AppMain() {
       'locB.z': round3(z),
       Timestamp: new Date().toISOString(),
     });
-  }, [pixelStreaming, activeAgentId, customizationActive, customizeCloseUp, cameraMode,
+  }, [pixelStreaming, activeAgentId, customizationActive, customizeCloseUp, customizePanelPx, cameraMode,
       currentInstance?.identity?.gender, currentInstance?.identity?.build]);
   const applyCameraRef = useRef(applyCamera);
   applyCameraRef.current = applyCamera;
@@ -3608,6 +3616,28 @@ function AppMain() {
   useEffect(() => {
     if (pixelStreaming) applyCamera();
   }, [activeAgentId, customizationActive, cameraMode, pixelStreaming, applyCamera]);
+
+  // Customize listens to UE replies (update*Success acks, hotspot positions).
+  // Each subscription gets its own listener name so they never replace each other.
+  const ueSubSeqRef = useRef(0);
+  const subscribeUE = useCallback((fn: (raw: string) => void) => {
+    const ps = pixelStreaming as unknown as {
+      addResponseEventListener?: (name: string, f: (raw: string) => void) => void;
+      removeResponseEventListener?: (name: string) => void;
+    } | null;
+    if (!ps?.addResponseEventListener) return () => {};
+    const name = `unclaw-customize-${++ueSubSeqRef.current}`;
+    ps.addResponseEventListener(name, fn);
+    return () => ps.removeResponseEventListener?.(name);
+  }, [pixelStreaming]);
+
+  // Dev only: send a raw descriptor to UE from DevTools (camera and hotspot calibration).
+  useEffect(() => {
+    if (!import.meta.env.DEV || !pixelStreaming) return undefined;
+    const w = window as unknown as { __unclawDev?: Record<string, unknown> };
+    w.__unclawDev = { ...(w.__unclawDev ?? {}), emitUE: (p: Record<string, unknown>) => pixelStreaming.emitUIInteraction(p), lastCamera: () => lastCameraRef.current };
+    return undefined;
+  }, [pixelStreaming]);
 
 
   // Mood-accent bleed. The GLOBAL key-light color the user picks
@@ -4878,6 +4908,8 @@ function AppMain() {
             onCancel={handleExitCustomization}
             onEffect={setEffectPreview}
             onCloseUpChange={setCustomizeCloseUp}
+            onPanelChange={setCustomizePanelPx}
+            onUeMessage={subscribeUE}
             bgMode={environment.bgmode}
             onBgMode={(m) => setEnvironment({ bgmode: m })}
             instanceName={currentInstance?.name ?? ''}

@@ -16,7 +16,7 @@ import {
 } from '../CustomizationOverlay';
 import { BACKGROUNDS } from '../../wardrobe/backgrounds';
 import { STREAM_EFFECTS, EffectSwatch, effectFor, DEFAULT_EFFECT_ID } from '../StreamEffects';
-import { DeckSlider, EASE_OUT_EXPO, ISLAND, SectionLabel, Swatches, Tabs } from './kit';
+import { DeckSlider, EASE_OUT_EXPO, SectionLabel, Swatches, Tabs } from './kit';
 
 export type SceneTab = 'light' | 'backdrop' | 'effects';
 
@@ -234,9 +234,11 @@ export function SceneDeck(p: {
       exit={{ opacity: 0, y: 16 }}
       transition={{ duration: 0.34, ease: EASE_OUT_EXPO }}
       style={{
-        ...ISLAND, position: 'absolute', left: 104, right: 12, bottom: 12,
-        borderRadius: 20, padding: '12px 18px 16px', display: 'flex', flexDirection: 'column', gap: 12,
-      }}
+        position: 'absolute', left: 0, right: 0, bottom: 0, padding: '64px 18px 16px',
+        display: 'flex', flexDirection: 'column', gap: 12, pointerEvents: 'auto', WebkitAppRegion: 'no-drag',
+        // A scrim out of the room's darkness, not a glass card over it.
+        background: 'linear-gradient(to top, rgba(7,8,11,0.93) 0%, rgba(7,8,11,0.84) 55%, rgba(7,8,11,0) 100%)',
+      } as React.CSSProperties}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <Tabs id="scene" items={tabs} value={p.tab} onChange={p.onTab} />

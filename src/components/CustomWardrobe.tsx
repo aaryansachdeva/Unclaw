@@ -1,14 +1,14 @@
 // CustomWardrobe: customization for every character (custom builds get the
 // full catalog, the base six a restricted set; see wardrobeForAgent).
 //
-// SPLIT ISLANDS (2026-09-16 redesign). The old bottom bar put eleven tabs in
-// one scrolling strip, 52 px tiles, and grew to cover the face on Body. Now:
-// a slim group rail floats on the left (Hair, Facial, Outfit, Body, Scene), the
-// group's options sit in a column island on the right as big named tiles, and
-// a dock at the foot names what is on the character. She stays centred and
-// whole. Scene drops the column entirely: the key light becomes a body you
-// drag around an orbit ring on the stage, and colour, brightness, backdrop and
-// effects share one deck (customize/SceneStage).
+// HOTSPOTS (2026-09-16 redesign, replacing the split islands the same day).
+// Customize opens on her whole figure with a spot on each part you can change:
+// hair, face, facial hair, top, legs, body, and the key light floating where it
+// shines from. Tap one and its options open in an inspector at the right edge,
+// the camera frames that part, and a hairline ties the panel back to it. Picks
+// show that they landed: a light sweep crosses her and the status reads
+// Applying until Unreal's update*Success ack comes back. See customize/regions
+// for where the spots come from (UE projection first, a measured map second).
 //
 // State, emits and the touched-only save are unchanged from the bar version.
 
@@ -25,20 +25,31 @@ import {
 import { clampBgMode } from '../wardrobe/backgrounds';
 import {
   CUSTOM_CATEGORY_LABELS, CUSTOM_COLORABLE,
-  wardrobeForAgent, clampAgentIndex, type CustomCategory, type WardrobeItem,
+  GROOM_NONE_INDEX, wardrobeForAgent, clampAgentIndex, type CustomCategory, type WardrobeItem,
 } from '../wardrobe/catalog';
 import { DEFAULT_EFFECT_ID, DEFAULT_EFFECT_STRENGTH } from './StreamEffects';
-import {
-  CustomizeStyles, EASE_OUT_EXPO, GROUP_META, GROUP_OF, GROUP_ORDER, ISLAND, NamedTile, Tabs,
-  type GroupId, type Pane,
-} from './customize/kit';
-import { ColumnIsland, Dock, GroupRail } from './customize/Islands';
+import { CustomizeStyles, EASE_OUT_EXPO, Swatches, type Pane } from './customize/kit';
 import { LightOrbit, SceneDeck, type SceneTab } from './customize/SceneStage';
+import { HotspotLayer, type Spot } from './customize/HotspotLayer';
+import {
+  ApplyStatus, Inspector, RelitTile, Sweep, TileGrid, WordTabs, INSPECTOR_W, type ApplyPhase,
+} from './customize/Inspector';
+import {
+  REGION_CATEGORIES, REGION_LABEL, anchorPoint, framingFor, lightPoint, useUeHotspots,
+  type RegionId, type UeSubscribe,
+} from './customize/regions';
 
 const PANE_LABELS: Record<Pane, string> = {
   ...CUSTOM_CATEGORY_LABELS,
   body: 'Body',
   scene: 'Scene',
+};
+
+/** Unreal's ready ack for each wardrobe slot. */
+const ACK_CATEGORY: Record<string, CustomCategory> = {
+  updateHairSuccess: 'hair', updateEyebrowSuccess: 'eyebrow', updateEyelashSuccess: 'eyelash',
+  updateBeardSuccess: 'beard', updateMustacheSuccess: 'mustache',
+  updateTopSuccess: 'top', updateBottomSuccess: 'bottom', updateShoesSuccess: 'shoes',
 };
 
 interface CustomWardrobeProps {
@@ -65,6 +76,9 @@ interface CustomWardrobeProps {
    *  and the camera should sit at the close resting shot instead of the
    *  full-figure customization pull-back. App drives the camera from this. */
   onCloseUpChange?: (closeUp: boolean) => void;
+  /** Width of the open inspector in px (0 when none), so App can slide the
+   *  camera and keep her clear of the panel. */
+  onPanelChange?: (px: number) => void;
   /** GLOBAL backdrop style index (bgmode); backdrop is not per-instance. */
   bgMode?: number;
   /** Persist a new global backdrop style index. */
@@ -73,9 +87,12 @@ interface CustomWardrobeProps {
    *  When provided, a "name your character" field renders in the toolbar. */
   instanceName?: string;
   onRenameInstance?: (name: string) => void;
+  /** Subscribe to Unreal's replies: update*Success acks drive the Applying
+   *  status and a hotspots reply places the spots exactly. */
+  onUeMessage?: UeSubscribe;
 }
 
-export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onEffect, onCloseUpChange, bgMode, onBgMode, instanceName, onRenameInstance, onRegenSkin, skins, activeSkin, onPickSkin }: CustomWardrobeProps) {
+export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onEffect, onCloseUpChange, onPanelChange, bgMode, onBgMode, instanceName, onRenameInstance, onRegenSkin, skins, activeSkin, onPickSkin, onUeMessage }: CustomWardrobeProps) {
   // The wardrobe surface for THIS character: which categories exist, their
   // items (per-character hair, shared/subset clothing), whether body blends
   // apply. Memoized on agentId so a switch mid-session re-resolves.
@@ -88,15 +105,32 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     () => [...wardrobe.categories, ...(wardrobe.body ? ['body' as const] : []), 'scene'],
     [wardrobe],
   );
-  // Groups present for this character, and the pane each one last showed so
-  // hopping between groups returns to where you were.
-  const groups = useMemo(
-    () => GROUP_ORDER.filter((g) => panes.some((p) => GROUP_OF[p] === g)),
-    [panes],
-  );
-  const lastPaneRef = useRef<Partial<Record<GroupId, Pane>>>({});
+  const unified = isUnifiedHost(agentId);
 
+  // The spots this character has. Face and Body only exist where there is a
+  // blend rig; facial hair only where the wardrobe carries it.
+  const regions = useMemo<RegionId[]>(() => {
+    const has = (c: CustomCategory) => wardrobe.categories.includes(c);
+    const out: RegionId[] = [];
+    if (REGION_CATEGORIES.hair.some(has)) out.push('hair');
+    if (unified) out.push('face');
+    if (REGION_CATEGORIES.facial.some(has)) out.push('facial');
+    if (has('top')) out.push('top');
+    if (REGION_CATEGORIES.legs.some(has)) out.push('legs');
+    if (wardrobe.body) out.push('body');
+    out.push('scene');
+    return out;
+  }, [wardrobe, unified]);
+  const regionPanes = useCallback((r: RegionId): Pane[] => {
+    if (r === 'face' || r === 'body') return ['body'];
+    if (r === 'scene') return ['scene'];
+    return REGION_CATEGORIES[r].filter((c) => wardrobe.categories.includes(c));
+  }, [wardrobe]);
+
+  // null = the overview with every spot showing.
+  const [region, setRegion] = useState<RegionId | null>(null);
   const [pane, setPane] = useState<Pane>('hair');
+  const lastPaneRef = useRef<Partial<Record<RegionId, Pane>>>({});
   // A character switch can drop the current pane (e.g. leaving a custom build
   // while on Eyebrow). Fall back to the first pane if it's gone.
   useEffect(() => {
@@ -108,25 +142,36 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   // would be a temporal dead zone at runtime even though tsc stays quiet.
   const [tuneTab, setTuneTab] = useState<'body' | 'face' | 'colour'>('body');
   const [sceneTab, setSceneTab] = useState<SceneTab>('light');
-  const group: GroupId = GROUP_OF[pane] ?? 'hair';
-  const pickGroup = useCallback((g: GroupId) => {
-    lastPaneRef.current[group] = pane;
-    const remembered = lastPaneRef.current[g];
-    setPane(remembered && panes.includes(remembered) ? remembered : (panes.find((p) => GROUP_OF[p] === g) ?? 'scene'));
-  }, [group, pane, panes]);
 
-  // Tell App whether the active pane is a face-region edit so it can frame the
-  // camera close (hair / eyebrow / eyelash) vs pull back to the whole figure
-  // for clothing / body / environment.
-  //
-  // The unified Body pane is three different jobs behind one pane, so it cannot
-  // pick a framing from `pane` alone: shaping the BODY wants the whole figure,
-  // while the Face and Colour tabs are edits you can only judge on the face.
-  // Fires on mount, on pane change, and on tab change.
+  const openRegion = useCallback((r: RegionId | null) => {
+    if (region) lastPaneRef.current[region] = pane;
+    setRegion(r);
+    if (!r) return;
+    const list = regionPanes(r);
+    const remembered = lastPaneRef.current[r];
+    setPane(remembered && list.includes(remembered) ? remembered : (list[0] ?? 'scene'));
+    if (r === 'face') setTuneTab((t) => (t === 'body' ? 'face' : t));
+    if (r === 'body') setTuneTab('body');
+  }, [region, pane, regionPanes]);
+
+  // Tell App which shot to frame: the close-up for hair, facial hair and the
+  // face, the whole figure for everything else including the overview.
   useEffect(() => {
-    const faceTab = pane === 'body' && isUnifiedHost(agentId) && tuneTab !== 'body';
-    onCloseUpChange?.(group === 'hair' || group === 'facial' || faceTab);
-  }, [pane, group, tuneTab, agentId, onCloseUpChange]);
+    onCloseUpChange?.(framingFor(region, tuneTab !== 'body') === 'face');
+  }, [region, tuneTab, onCloseUpChange]);
+
+  const panelPx = region && region !== 'scene' ? INSPECTOR_W : 0;
+  useEffect(() => {
+    onPanelChange?.(panelPx);
+  }, [panelPx, onPanelChange]);
+  useEffect(() => () => onPanelChange?.(0), [onPanelChange]);
+
+  // Ask Unreal for live spot positions while Customize is open. Builds without
+  // the hotspots handler ignore it and the measured map stands in.
+  useEffect(() => {
+    onEmit({ EventType: 'hotspots', enabled: true });
+    return () => onEmit({ EventType: 'hotspots', enabled: false });
+  }, [onEmit]);
 
   const [hair,    setHair]    = useState(() => clampAgentIndex(wardrobe.items.hair,    initial?.hairIndex));
   const [eyebrow, setEyebrow] = useState(() => clampAgentIndex(wardrobe.items.eyebrow, initial?.browIndex));
@@ -205,20 +250,45 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     onEffect?.({ effectId: id, effectStrength: strength });
   }, [onEffect]);
 
-  const isGarment = pane !== 'body' && pane !== 'scene';
+  const isGarment = !!region && pane !== 'body' && pane !== 'scene';
   const items: WardrobeItem[] = isGarment ? catItems(pane) : [];
   const selected = isGarment ? value(pane) : 0;
+
+  // Applying status: set on a pick, landed when Unreal acks that slot, and
+  // quietly cleared if no ack comes (older builds do not ack every slot).
+  const [apply, setApply] = useState<{ cat: CustomCategory | null; phase: ApplyPhase }>({ cat: null, phase: 'idle' });
+  const [sweep, setSweep] = useState(0);
+  const applyTimerRef = useRef<number | null>(null);
+  const settleApply = useCallback((phase: ApplyPhase, cat: CustomCategory | null, ms: number) => {
+    setApply({ cat, phase });
+    if (applyTimerRef.current != null) window.clearTimeout(applyTimerRef.current);
+    applyTimerRef.current = window.setTimeout(() => setApply({ cat: null, phase: 'idle' }), ms);
+  }, []);
+  useEffect(() => () => { if (applyTimerRef.current != null) window.clearTimeout(applyTimerRef.current); }, []);
+  const applyRef = useRef(apply);
+  applyRef.current = apply;
+  useEffect(() => {
+    if (!onUeMessage) return undefined;
+    return onUeMessage((raw) => {
+      let et: unknown;
+      try { et = (JSON.parse(raw) as { EventType?: unknown })?.EventType; } catch { return; }
+      const cat = typeof et === 'string' ? ACK_CATEGORY[et] : undefined;
+      if (cat && applyRef.current.phase === 'applying' && applyRef.current.cat === cat) settleApply('landed', cat, 1500);
+    });
+  }, [onUeMessage, settleApply]);
 
   const pickItem = useCallback((cat: CustomCategory, index: number) => {
     setValue(cat, index);
     touch(cat);
+    settleApply('applying', cat, 6000);
+    setSweep((n) => n + 1);
     onEmit({ EventType: 'changeWardrobeItem', wardrobeCategory: cat, wardrobeIndex: index });
-  }, [onEmit]);
+  }, [onEmit, settleApply]);
 
   // Arrow keys scrub the reel. A reel you can only click is half a reel.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); onCancel(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); if (region) openRegion(null); else onCancel(); return; }
       if (!isGarment || items.length === 0) return;
       if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
       const el = document.activeElement as HTMLElement | null;
@@ -232,7 +302,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [onCancel, isGarment, items.length, selected, pane, pickItem]);
+  }, [onCancel, region, openRegion, isGarment, items.length, selected, pane, pickItem]);
 
   // NOTE: wardrobeModeOn/Off is gone. All it ever did was zoom the camera
   // in/out for the fitting-room framing, and the camera is now driven from
@@ -415,18 +485,69 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
 
   const activeItem = isGarment ? items.find((i) => i.index === selected) : undefined;
   const position = isGarment ? `${Math.max(0, items.findIndex((i) => i.index === selected)) + 1} of ${items.length}` : '';
-  const groupPanes = panes.filter((p) => GROUP_OF[p] === group);
-  const unified = isUnifiedHost(agentId);
   const colourable = isGarment && CUSTOM_COLORABLE.includes(pane as CustomCategory);
   const [justSaved, setJustSaved] = useState(false);
   const save = () => { handleSave(); setJustSaved(true); window.setTimeout(() => setJustSaved(false), 1600); };
+  const [preview, setPreview] = useState<string | null>(null);
+  const [colourSlot, setColourSlot] = useState<'c1' | 'c2' | null>(null);
+  useEffect(() => { setColourSlot(null); setPreview(null); }, [pane, region]);
 
-  const bodyTabs = unified
-    ? [{ id: 'body' as const, label: 'Shape' }, { id: 'face' as const, label: 'Face' }, { id: 'colour' as const, label: 'Colour' }]
+  // The overlay's own box: spots are placed in it, and it tracks window resizes.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [box, setBox] = useState({ w: window.innerWidth, h: window.innerHeight });
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return undefined;
+    const ro = new ResizeObserver(() => setBox({ w: el.clientWidth, h: el.clientHeight }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const ue = useUeHotspots(onUeMessage, box.w, box.h);
+  const framing = framingFor(region, tuneTab !== 'body');
+  // The fallback map is for her centred; with a panel open the camera has slid
+  // her left by half its width. UE's own points already include that.
+  const pointFor = (r: RegionId) => {
+    if (ue[r]) return ue[r]!;
+    const p = anchorPoint(r, framing, box.w, box.h);
+    return p && panelPx ? { x: p.x - panelPx / 2, y: p.y } : p;
+  };
+
+  const lightHex = accentHex ?? ACCENT_COLORS[accentIndex]?.hex ?? '#f0e8d6';
+  const nameOf = (cat: CustomCategory) => catItems(cat).find((i) => i.index === value(cat))?.name ?? '';
+  const detailFor = (r: RegionId): string => {
+    switch (r) {
+      case 'hair': return nameOf('hair') || nameOf('eyebrow');
+      case 'facial': {
+        const worn = (['beard', 'mustache'] as const).filter((c) => wardrobe.categories.includes(c) && value(c) !== GROOM_NONE_INDEX);
+        return worn.length ? worn.map(nameOf).join(', ') : 'Clean shaven';
+      }
+      case 'top': return nameOf('top');
+      case 'legs': return [nameOf('bottom'), nameOf('shoes')].filter(Boolean).join(', ');
+      case 'face': return 'Shape and colour';
+      case 'body': return unified ? 'Build and proportions' : 'Height and weight';
+      default: return '';
+    }
+  };
+
+  const spots: Spot[] = [];
+  if (!region) {
+    for (const r of regions) {
+      const point = r === 'scene' ? null : pointFor(r);
+      if (point && point.y > 110 && point.y < box.h - 24) spots.push({ id: r, point, detail: detailFor(r) });
+    }
+  }
+  const lp = lightPoint(lightingAngle, box.w, box.h);
+
+  const facialPane = pane === 'beard' || pane === 'mustache';
+  const regionTabs = region && region !== 'scene' && region !== 'face' && region !== 'body'
+    ? regionPanes(region).map((c) => ({ id: c, label: PANE_LABELS[c] }))
     : [];
+  const whoName = instanceName?.trim() || undefined;
+  const changes = touchedRef.current.size;
 
   return (
     <motion.div
+      ref={rootRef}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
@@ -434,90 +555,122 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
       style={{ position: 'absolute', inset: 0, zIndex: 55, pointerEvents: 'none' }}
     >
       <CustomizeStyles />
+      <Sweep run={sweep} />
 
-      {/* Header: back and the character's name on the left, Save on the right. */}
+      {/* A soft top scrim so the header reads on any backdrop, never a bar. */}
+      <div aria-hidden style={{
+        position: 'absolute', top: 0, left: 0, right: 0, height: 150, pointerEvents: 'none',
+        background: 'linear-gradient(to bottom, rgba(7,8,11,0.55), rgba(7,8,11,0))',
+      }} />
+
+      {/* Header: back (to the overview, then out), her name, Save. */}
       <motion.div
         initial={{ opacity: 0, y: -4 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.36, ease: EASE_OUT_EXPO, delay: 0.06 }}
         style={{
-          position: 'absolute', top: 72, left: 14, right: 14,
-          display: 'flex', alignItems: 'center', gap: 10,
-          pointerEvents: 'none',
+          position: 'absolute', top: 70, left: 12, right: 14, zIndex: 3,
+          display: 'flex', alignItems: 'center', gap: 6,
+          pointerEvents: 'none', textShadow: '0 1px 2px rgba(0,0,0,0.65), 0 0 18px rgba(0,0,0,0.35)',
         }}
       >
         <button
           type="button"
-          onClick={onCancel}
-          aria-label="Close customize"
-          className="cz-focus"
+          onClick={() => (region ? openRegion(null) : onCancel())}
+          aria-label={region ? 'Back to all parts' : 'Close customize'}
+          className="cz-focus cz-back"
           style={{
-            ...ISLAND, width: 36, height: 36, borderRadius: '50%', flex: '0 0 auto',
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            color: 'var(--text-secondary, #d4cec7)', cursor: 'pointer',
+            width: 36, height: 36, borderRadius: '50%', flex: '0 0 auto', border: 'none', background: 'transparent',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'auto',
+            color: 'var(--text-primary, #fafafa)', cursor: 'pointer', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.6))',
           }}
         >
-          <ArrowLeft size={16} strokeWidth={2} />
+          <ArrowLeft size={18} strokeWidth={2.2} />
         </button>
-        {onRenameInstance ? (
-          <label style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 6, pointerEvents: 'auto', minWidth: 0 }}>
-            <input
-              defaultValue={instanceName ?? ''}
-              placeholder="Name your character"
-              maxLength={24}
-              aria-label="Character name"
-              onBlur={(e) => onRenameInstance(e.target.value)}
-              onKeyDown={(e) => {
-                e.stopPropagation();
-                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-              }}
-              style={{
-                width: `calc(${Math.max(4, Math.min(20, (instanceName ?? '').length || 16))}ch + 44px)`,
-                padding: '6px 26px 6px 8px', borderRadius: 10, outline: 'none',
-                background: 'transparent', border: '1px solid transparent',
-                color: 'var(--text-primary)', fontFamily: 'inherit', fontSize: 17, fontWeight: 600, letterSpacing: '-0.01em',
-                textShadow: '0 1px 3px rgba(0,0,0,0.6)',
-              }}
-              onFocus={(e) => { e.target.style.background = 'rgba(40,48,65,0.52)'; e.target.style.borderColor = 'rgba(255,255,255,0.14)'; }}
-              onBlurCapture={(e) => { (e.target as HTMLInputElement).style.background = 'transparent'; (e.target as HTMLInputElement).style.borderColor = 'transparent'; }}
-            />
-            <Pencil size={13} strokeWidth={2} style={{ position: 'absolute', right: 9, color: 'var(--text-ghost)', pointerEvents: 'none' }} />
-          </label>
-        ) : (
-          <span style={{ fontSize: 17, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--text-primary)', textShadow: '0 1px 3px rgba(0,0,0,0.6)' }}>
-            Customize
+        <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, pointerEvents: 'auto' }}>
+          {onRenameInstance ? (
+            <label style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', minWidth: 0 }}>
+              <input
+                defaultValue={instanceName ?? ''}
+                placeholder="Name your character"
+                maxLength={24}
+                aria-label="Character name"
+                onBlur={(e) => onRenameInstance(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                }}
+                className="cz-name"
+                style={{
+                  width: `calc(${Math.max(4, Math.min(20, (instanceName ?? '').length || 16))}ch + 34px)`,
+                  padding: '0 24px 0 4px', margin: '0 0 0 -4px', borderRadius: 8, outline: 'none', height: 30,
+                  background: 'transparent', border: '1px solid transparent',
+                  color: 'var(--text-primary)', fontFamily: 'inherit', fontSize: 22, fontWeight: 800, letterSpacing: '-0.03em',
+                  textShadow: 'inherit',
+                }}
+              />
+              <Pencil size={12} strokeWidth={2.2} style={{ position: 'absolute', right: 8, color: 'var(--text-ghost)', pointerEvents: 'none' }} />
+            </label>
+          ) : (
+            <span style={{ fontSize: 22, lineHeight: '30px', fontWeight: 800, letterSpacing: '-0.03em', color: 'var(--text-primary)' }}>
+              Customize
+            </span>
+          )}
+          <span style={{ fontSize: 11.5, lineHeight: '14px', fontWeight: 500, color: 'var(--text-secondary, #d4cec7)' }}>
+            {region ? 'All parts' : 'Tap a part to change it'}
           </span>
-        )}
+        </div>
         <span style={{ flex: 1 }} />
         <motion.button
           type="button"
           onClick={save}
           whileTap={{ scale: 0.96 }}
+          disabled={!dirty}
           className="cz-focus"
           style={{
-            pointerEvents: 'auto', flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', gap: 6,
-            padding: '9px 18px', borderRadius: 11, border: 'none', cursor: 'pointer',
-            fontFamily: 'inherit', fontSize: 13.5, fontWeight: 600,
-            color: dirty ? '#fafafa' : 'var(--text-secondary)',
-            background: dirty ? 'var(--accent, #c44444)' : justSaved ? 'rgba(140,191,138,0.16)' : 'rgba(40,48,65,0.52)',
-            boxShadow: dirty ? '0 4px 14px -4px rgba(196,68,68,0.6)' : 'none',
-            backdropFilter: 'var(--glass-blur)', WebkitBackdropFilter: 'var(--glass-blur)',
-            transition: 'background 200ms var(--ease-out-quart), color 200ms var(--ease-out-quart), box-shadow 200ms var(--ease-out-quart)',
+            pointerEvents: 'auto', flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', gap: 8,
+            padding: dirty ? '7px 15px 7px 8px' : '7px 10px', borderRadius: 999, border: 'none',
+            cursor: dirty ? 'pointer' : 'default', fontFamily: 'inherit', fontSize: 13.5, fontWeight: 700, letterSpacing: '-0.01em',
+            color: dirty ? '#15171c' : 'var(--text-secondary)',
+            background: dirty ? 'rgba(250,250,250,0.95)' : 'transparent',
+            boxShadow: dirty ? '0 10px 26px -12px rgba(0,0,0,0.85)' : 'none',
+            textShadow: dirty ? 'none' : 'inherit',
+            transition: 'background 240ms var(--ease-out-quart), color 240ms var(--ease-out-quart), padding 240ms var(--ease-out-quart)',
           }}
         >
-          {!dirty && justSaved && <Check size={14} strokeWidth={2.4} style={{ color: 'var(--live, #8cbf8a)' }} />}
-          {dirty ? 'Save' : justSaved ? 'Saved' : 'Save'}
+          {dirty ? (
+            <span style={{
+              minWidth: 20, height: 20, padding: '0 6px', borderRadius: 999, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              background: 'var(--accent, #c44444)', color: '#fafafa', fontSize: 11, fontWeight: 800, fontVariantNumeric: 'tabular-nums',
+            }}>
+              {Math.max(1, changes)}
+            </span>
+          ) : (
+            <Check size={14} strokeWidth={2.6} style={{ color: justSaved ? 'var(--live, #8cbf8a)' : 'currentColor' }} />
+          )}
+          {dirty ? 'Save' : 'Saved'}
         </motion.button>
       </motion.div>
 
-      <GroupRail groups={groups} active={group} onPick={pickGroup} />
+      <AnimatePresence>
+        {!region && (
+          <motion.div key="overview" exit={{ opacity: 0 }} transition={{ duration: 0.2 }} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+            <HotspotLayer
+              spots={spots}
+              width={box.w}
+              light={{ ...lp, hex: lightHex, detail: sideName(lightingAngle) }}
+              onOpen={openRegion}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
-        {group === 'scene' ? (
-          <motion.div key="scene" style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+        {region === 'scene' && (
+          <motion.div key="scene" exit={{ opacity: 0 }} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
             <LightOrbit
               angle={lightingAngle}
-              hex={accentHex ?? ACCENT_COLORS[accentIndex]?.hex ?? '#f0e8d6'}
+              hex={lightHex}
               intensity={lightIntensity}
               onAngle={(a) => {
                 setLightingAngle(a);
@@ -528,7 +681,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             <SceneDeck
               tab={sceneTab}
               onTab={setSceneTab}
-              lightHex={accentHex ?? ACCENT_COLORS[accentIndex]?.hex ?? '#ffffff'}
+              lightHex={lightHex}
               accentIndex={accentHex ? -1 : accentIndex}
               accentHex={accentHex}
               onAccent={(i) => { setAccentIndex(i); setAccentHex(undefined); touch('accent'); emitLight(ACCENT_COLORS[i], lightIntensity); }}
@@ -550,120 +703,198 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
               onEffectStrength={(v) => applyEffect(effectId, v)}
             />
           </motion.div>
-        ) : pane === 'body' ? (
-          <ColumnIsland
-            key="body"
-            title={GROUP_META.body.label}
-            width={172}
-            bottom={14}
-            tabs={unified ? <Tabs id="body" items={bodyTabs} value={tuneTab} onChange={setTuneTab} /> : undefined}
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {(region === 'face' || region === 'body') && (
+          <Inspector
+            key={`inspect-${region}`}
+            region={region}
+            title={REGION_LABEL[region]}
+            anchor={pointFor(region)}
+            width={box.w}
+            tabs={region === 'face'
+              ? <WordTabs items={[{ id: 'face' as const, label: 'Shape' }, { id: 'colour' as const, label: 'Colour' }]}
+                  value={tuneTab === 'colour' ? 'colour' : 'face'} onChange={setTuneTab} />
+              : undefined}
           >
-            {unified ? (
-              tuneTab === 'colour' ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                  <SwatchRow
-                    label="Hair"
-                    items={HAIR_COLORS.map((h, i) => ({ key: String(i), hex: h.hex, name: h.label }))}
-                    activeKey={hairColor?.preset !== undefined ? String(hairColor.preset) : null}
-                    onPick={(k) => pickHair(Number(k))}
-                  />
-                  <SwatchRow
-                    label="Eyes"
-                    items={EYE_COLORS.map((e) => ({ key: e.iris, hex: e.hex, name: e.label }))}
-                    activeKey={eyeColor?.iris ?? null}
-                    onPick={pickEyes}
-                  />
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>Skin</span>
-                    {(skins?.length ?? 0) > 1 && (
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                        {skins!.map((sk) => {
-                          const on = sk.path === activeSkin;
-                          return (
-                            <button
-                              key={sk.path}
-                              type="button"
-                              onClick={() => onPickSkin?.(sk.path)}
-                              className="cz-focus"
-                              style={{
-                                padding: '5px 10px', borderRadius: 999, cursor: 'pointer', fontFamily: 'inherit',
-                                background: on ? 'rgba(196,68,68,0.16)' : 'rgba(255,255,255,0.04)',
-                                border: on ? '1px solid rgba(196,68,68,0.55)' : '1px solid rgba(255,255,255,0.10)',
-                                color: on ? 'var(--text-primary)' : 'var(--text-secondary)', fontSize: 11.5, fontWeight: 500,
-                              }}
-                            >
-                              {sk.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                    <button
-                      type="button"
-                      disabled={regenSkin === 'busy' || !onRegenSkin}
-                      onClick={async () => {
-                        if (!onRegenSkin) return;
-                        setRegenSkin('busy');
-                        const ok = await onRegenSkin();
-                        setRegenSkin(ok ? 'idle' : 'failed');
-                      }}
-                      className="cz-focus"
-                      style={{
-                        alignSelf: 'flex-start', padding: '8px 13px', borderRadius: 10, fontFamily: 'inherit',
-                        background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.12)',
-                        color: regenSkin === 'failed' ? 'var(--accent, #c44444)' : 'var(--text-primary)',
-                        fontSize: 12.5, fontWeight: 600, cursor: regenSkin === 'busy' ? 'default' : 'pointer',
-                        opacity: regenSkin === 'busy' ? 0.6 : 1,
-                      }}
-                    >
-                      {regenSkin === 'busy' ? 'Painting new skin' : regenSkin === 'failed' ? 'Failed, try again' : 'Generate new skin'}
-                    </button>
-                  </div>
+            {region === 'face' && tuneTab === 'colour' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                <SwatchRow
+                  label="Hair"
+                  items={HAIR_COLORS.map((h, i) => ({ key: String(i), hex: h.hex, name: h.label }))}
+                  activeKey={hairColor?.preset !== undefined ? String(hairColor.preset) : null}
+                  onPick={(k) => pickHair(Number(k))}
+                />
+                <SwatchRow
+                  label="Eyes"
+                  items={EYE_COLORS.map((e) => ({ key: e.iris, hex: e.hex, name: e.label }))}
+                  activeKey={eyeColor?.iris ?? null}
+                  onPick={pickEyes}
+                />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-primary)' }}>Skin</span>
+                  {(skins?.length ?? 0) > 1 && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px' }}>
+                      {skins!.map((sk) => {
+                        const on = sk.path === activeSkin;
+                        return (
+                          <button
+                            key={sk.path}
+                            type="button"
+                            onClick={() => onPickSkin?.(sk.path)}
+                            className="cz-focus"
+                            style={{
+                              padding: '3px 0', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit',
+                              color: on ? 'var(--text-primary)' : 'var(--text-ghost)', fontSize: 12.5, fontWeight: on ? 800 : 600,
+                            }}
+                          >
+                            {sk.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    disabled={regenSkin === 'busy' || !onRegenSkin}
+                    onClick={async () => {
+                      if (!onRegenSkin) return;
+                      setRegenSkin('busy');
+                      const ok = await onRegenSkin();
+                      setRegenSkin(ok ? 'idle' : 'failed');
+                    }}
+                    className="cz-focus"
+                    style={{
+                      alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: 7, padding: '7px 12px', borderRadius: 999, fontFamily: 'inherit',
+                      background: 'rgba(250,250,250,0.08)', border: 'none', boxShadow: '0 0 0 1px rgba(255,255,255,0.12) inset',
+                      color: regenSkin === 'failed' ? 'var(--accent, #c44444)' : 'var(--text-primary)',
+                      fontSize: 12.5, fontWeight: 700, cursor: regenSkin === 'busy' ? 'default' : 'pointer',
+                    }}
+                  >
+                    {regenSkin === 'busy' && <span className="cz-spin" />}
+                    {regenSkin === 'busy' ? 'Painting new skin' : regenSkin === 'failed' ? 'Failed, try again' : 'Generate new skin'}
+                  </button>
                 </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 16, paddingTop: 4 }}>
-                  {(tuneTab === 'body' ? UNIFIED_BODY_AXES : UNIFIED_FACE_AXES).map((ax) => (
-                    <Lever key={ax.key} label={ax.label} plus={ax.plus} minus={ax.minus}
-                      value={axes[ax.key] ?? 0} onChange={(v) => setAxis(ax.key, v)} />
-                  ))}
-                </div>
-              )
+              </div>
+            ) : unified ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 18, paddingTop: 2 }}>
+                {(region === 'body' ? UNIFIED_BODY_AXES : UNIFIED_FACE_AXES).map((ax) => (
+                  <Lever key={ax.key} label={ax.label} plus={ax.plus} minus={ax.minus}
+                    value={axes[ax.key] ?? 0} onChange={(v) => setAxis(ax.key, v)} />
+                ))}
+              </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 20, paddingTop: 6 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 22, paddingTop: 2 }}>
                 <Lever label="Height" plus="Tall" minus="Short" value={heightBlend}
                   onChange={(v) => { setHeightBlend(v); touch('heightBlend'); emitBlends(v, weightBlend); }} />
                 <Lever label="Weight" plus="Full" minus="Slim" value={weightBlend}
                   onChange={(v) => { setWeightBlend(v); touch('weightBlend'); emitBlends(heightBlend, v); }} />
               </div>
             )}
-          </ColumnIsland>
-        ) : (
-          <ColumnIsland
-            key={`items-${group}`}
-            title={GROUP_META[group].label}
-            tabs={<Tabs id={`g-${group}`} items={groupPanes.map((p) => ({ id: p, label: PANE_LABELS[p] }))} value={pane} onChange={(p) => setPane(p)} />}
+          </Inspector>
+        )}
+
+        {region && region !== 'scene' && region !== 'face' && region !== 'body' && isGarment && (
+          <Inspector
+            key={`inspect-${region}`}
+            region={region}
+            title={REGION_LABEL[region]}
+            anchor={pointFor(region)}
+            width={box.w}
+            status={
+              <ApplyStatus
+                name={preview ?? activeItem?.name ?? ''}
+                position={preview ? 'Preview' : position}
+                phase={preview ? 'idle' : apply.cat === pane ? apply.phase : 'idle'}
+                who={whoName}
+              />
+            }
+            tabs={<WordTabs items={regionTabs} value={pane} onChange={(p) => setPane(p)} />}
           >
-            <div role="listbox" aria-label={PANE_LABELS[pane]} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {items.map((it) => (
-                <NamedTile key={`${pane}-${it.key}`} item={it} selected={it.index === selected} onPick={() => pickItem(pane as CustomCategory, it.index)}
-                  height={it.key === 'none' ? 48 : 88} />
-              ))}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {region === 'hair' && unified && pane !== 'eyelash' && (
+                <SwatchRow
+                  label="Colour"
+                  items={HAIR_COLORS.map((h, i) => ({ key: String(i), hex: h.hex, name: h.label }))}
+                  activeKey={hairColor?.preset !== undefined ? String(hairColor.preset) : null}
+                  onPick={(k) => pickHair(Number(k))}
+                />
+              )}
+              {colourable && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div style={{ display: 'flex', gap: 14 }}>
+                    {(['c1', 'c2'] as const).map((slot) => {
+                      const pair = clothingColors[pane as 'top' | 'bottom' | 'shoes'];
+                      const hex = (slot === 'c1' ? pair.c1Hex : pair.c2Hex) ?? CLOTHING_COLORS[slot === 'c1' ? pair.c1 : pair.c2]?.hex;
+                      const open = colourSlot === slot;
+                      return (
+                        <button
+                          key={slot}
+                          type="button"
+                          aria-expanded={open}
+                          onClick={() => setColourSlot(open ? null : slot)}
+                          className="cz-focus"
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 7, padding: '2px 0', background: 'none', border: 'none',
+                            cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: open ? 800 : 600,
+                            color: open ? 'var(--text-primary)' : 'var(--text-secondary)',
+                          }}
+                        >
+                          <span style={{
+                            width: 16, height: 16, borderRadius: '50%', background: hex,
+                            boxShadow: open ? '0 0 0 2px #07080b, 0 0 0 3.5px #fafafa' : '0 0 0 1px rgba(255,255,255,0.25)',
+                          }} />
+                          {slot === 'c1' ? 'Main' : 'Trim'}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <AnimatePresence initial={false}>
+                    {colourSlot && (
+                      <motion.div
+                        key="swatches"
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.24, ease: EASE_OUT_EXPO }}
+                        style={{ overflow: 'hidden' }}
+                      >
+                        <div style={{ padding: '4px 2px 2px' }}>
+                          <Swatches
+                            colors={CLOTHING_COLORS}
+                            activeIndex={colourSlot === 'c1' ? clothingColors[pane as 'top' | 'bottom' | 'shoes'].c1 : clothingColors[pane as 'top' | 'bottom' | 'shoes'].c2}
+                            customHex={colourSlot === 'c1' ? clothingColors[pane as 'top' | 'bottom' | 'shoes'].c1Hex : clothingColors[pane as 'top' | 'bottom' | 'shoes'].c2Hex}
+                            onPick={(i) => setTone(pane as 'top' | 'bottom' | 'shoes', colourSlot, i)}
+                            onCustom={(rect) => setPicker({ target: { kind: 'clothing', cat: pane as 'top' | 'bottom' | 'shoes', slot: colourSlot }, rect })}
+                            size={20}
+                          />
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              )}
+              <TileGrid label={PANE_LABELS[pane]}>
+                {items.map((it) => (
+                  <RelitTile
+                    key={`${pane}-${it.key}`}
+                    item={it}
+                    selected={it.index === selected}
+                    applying={apply.phase === 'applying' && apply.cat === pane}
+                    onPick={() => pickItem(pane as CustomCategory, it.index)}
+                    onPreview={setPreview}
+                  />
+                ))}
+              </TileGrid>
+              {facialPane && items.length <= 1 && (
+                <span style={{ fontSize: 12, color: 'var(--text-ghost)' }}>No styles for this character.</span>
+              )}
             </div>
-          </ColumnIsland>
+          </Inspector>
         )}
       </AnimatePresence>
-
-      {isGarment && (
-        <Dock
-          name={activeItem?.name ?? ''}
-          position={position}
-          colour={colourable ? {
-            pair: clothingColors[pane as 'top' | 'bottom' | 'shoes'],
-            onPreset: (slot, idx) => setTone(pane as 'top' | 'bottom' | 'shoes', slot, idx),
-            onCustom: (slot, rect) => setPicker({ target: { kind: 'clothing', cat: pane as 'top' | 'bottom' | 'shoes', slot }, rect }),
-          } : undefined}
-        />
-      )}
 
       {picker && (
         <ColorPickerPanel
@@ -679,6 +910,11 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
       )}
     </motion.div>
   );
+}
+
+const SIDE_NAMES = ['From the front', 'Front right', 'From the right', 'Back right', 'From behind', 'Back left', 'From the left', 'Front left'];
+function sideName(angle: number): string {
+  return SIDE_NAMES[Math.round((((angle % 360) + 360) % 360) / 45) % 8];
 }
 
 // ============ lever =================================================
@@ -734,15 +970,12 @@ function SwatchRow({ label, items, activeKey, onPick }: {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-        <span style={{
-          fontSize: 10, fontWeight: 600, letterSpacing: '0.14em',
-          textTransform: 'uppercase', color: 'var(--text-ghost)',
-        }}>{label}</span>
-        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-primary)' }}>{label}</span>
+        <span style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>
           {active?.name ?? 'As read'}
         </span>
       </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
         {items.map((it) => {
           const on = it.key === activeKey;
           return (

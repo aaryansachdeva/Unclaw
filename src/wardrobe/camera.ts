@@ -113,6 +113,28 @@ export function cameraCustomize(agentId?: string | null, axes?: BlendAxes): Came
   return [x, y + CUSTOMIZE_PULLBACK, z - CUSTOMIZE_DROP];
 }
 
+// Customize close-up (hair, facial hair, face): the resting shot eased back a
+// touch so the whole head fits beside the inspector panel.
+const CUSTOMIZE_FACE_PULLBACK = 18;
+
+export function cameraCustomizeFace(agentId?: string | null, axes?: BlendAxes): CameraLoc {
+  const [x, y, z] = cameraDefaultFor(agentId, axes);
+  return [x, y + CUSTOMIZE_FACE_PULLBACK, z];
+}
+
+// How far she moves on screen per unit of camera x, in px at a 600 px wide
+// window (UE keeps the horizontal FOV, so it scales with width). Measured on
+// Nova 2026-09-16: +x moves her LEFT. Close-up is with the face pull-back above.
+const PANEL_PX_PER_UNIT = { closeUp: 8.3, body: 5 };
+
+/** Camera x offset that centres her in the space left of a right-edge panel
+ *  `panelPx` wide. 0 when no panel is open. */
+export function cameraPanelShift(closeUp: boolean, panelPx: number, windowWidth: number): number {
+  if (panelPx <= 0 || windowWidth <= 0) return 0;
+  const pxPerUnit = (closeUp ? PANEL_PX_PER_UNIT.closeUp : PANEL_PX_PER_UNIT.body) * (windowWidth / 600);
+  return panelPx / 2 / pxPerUnit;
+}
+
 // User-facing framing modes for the camera toggle above the input bar:
 //   default — the character's resting shot (cameraDefaultFor)
 //   waist   — a medium shot, halfway out (down to about the waist)

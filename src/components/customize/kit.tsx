@@ -1,48 +1,16 @@
-// Shared pieces of the customize surface (2026-09-16 split-islands redesign):
-// the group model, the glass island, text tabs, the named tile, swatches and
-// the deck slider. One vocabulary for every island so the surface reads as
-// one object in the room, not four widgets.
+// Shared pieces of the customize surface (2026-09-16 hotspot redesign): text
+// tabs, swatches, the deck slider and the one stylesheet. Nothing here is a
+// glass box: controls sit on scrims that come out of the room's own darkness.
 
-import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { motion } from 'framer-motion';
-import { PersonStanding, Scissors, Shirt, Smile, Sun, type LucideIcon } from 'lucide-react';
-import type { CustomCategory, WardrobeItem } from '../../wardrobe/catalog';
+import type { CustomCategory } from '../../wardrobe/catalog';
 
 export const EASE_OUT_EXPO = [0.16, 1, 0.3, 1] as const;
 
 /** The editable panes. Garment categories keep their UE wardrobeCategory
  *  names; body and scene are ours. */
 export type Pane = CustomCategory | 'body' | 'scene';
-export type GroupId = 'hair' | 'facial' | 'outfit' | 'body' | 'scene';
-
-export const GROUP_OF: Record<Pane, GroupId> = {
-  hair: 'hair', eyebrow: 'hair', eyelash: 'hair',
-  beard: 'facial', mustache: 'facial',
-  top: 'outfit', bottom: 'outfit', shoes: 'outfit',
-  body: 'body', scene: 'scene',
-};
-
-export const GROUP_META: Record<GroupId, { label: string; icon: LucideIcon }> = {
-  hair:   { label: 'Hair',   icon: Scissors },
-  facial: { label: 'Facial', icon: Smile },
-  outfit: { label: 'Outfit', icon: Shirt },
-  body:   { label: 'Body',   icon: PersonStanding },
-  scene:  { label: 'Scene',  icon: Sun },
-};
-
-export const GROUP_ORDER: GroupId[] = ['hair', 'facial', 'outfit', 'body', 'scene'];
-
-/** Frosted slate at panel intensity, with the inset top highlight that makes
- *  the glass read as material. */
-export const ISLAND: CSSProperties = {
-  background: 'var(--glass-bg-panel, rgba(40, 48, 65, 0.52))',
-  backdropFilter: 'var(--glass-blur, blur(36px) saturate(1.7))',
-  WebkitBackdropFilter: 'var(--glass-blur, blur(36px) saturate(1.7))',
-  border: '1px solid var(--glass-border, rgba(255,255,255,0.12))',
-  boxShadow: '0 1px 0 rgba(255,255,255,0.06) inset, 0 22px 48px -18px rgba(0,0,0,0.62)',
-  pointerEvents: 'auto',
-  WebkitAppRegion: 'no-drag',
-} as CSSProperties;
 
 /** Text tabs with a sliding ember underline. Hidden when there is only one. */
 export function Tabs<T extends string>({ id, items, value, onChange, style }: {
@@ -87,63 +55,6 @@ export function Tabs<T extends string>({ id, items, value, onChange, style }: {
         );
       })}
     </div>
-  );
-}
-
-/** A named tile: the thumbnail fills it, the name sits on a scrim at the foot.
- *  Selection is an ember hairline plus a lift, never a heavy ring. */
-export function NamedTile({ item, selected, onPick, height = 104 }: {
-  item: WardrobeItem;
-  selected: boolean;
-  onPick: () => void;
-  height?: number;
-}) {
-  const ref = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    if (selected) ref.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  }, [selected]);
-  return (
-    <button
-      ref={ref}
-      type="button"
-      role="option"
-      aria-selected={selected}
-      onClick={onPick}
-      title={item.name}
-      className="cz-tile"
-      style={{
-        position: 'relative', flex: '0 0 auto', width: '100%', height,
-        padding: 0, borderRadius: 12, overflow: 'hidden', cursor: 'pointer',
-        background: 'rgba(255,255,255,0.035)',
-        border: selected ? '1px solid var(--accent, #c44444)' : '1px solid rgba(255,255,255,0.08)',
-        boxShadow: selected
-          ? '0 0 0 1px var(--accent, #c44444) inset, 0 10px 22px -12px rgba(196,68,68,0.65)'
-          : 'none',
-        transition: 'border-color 160ms var(--ease-out-quart), box-shadow 200ms var(--ease-out-quart)',
-      }}
-    >
-      {item.thumb ? (
-        <img src={item.thumb} alt="" draggable={false} loading="lazy"
-          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
-      ) : (
-        <span style={{
-          position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
-          fontSize: 12, fontWeight: 600, color: 'var(--text-ghost)',
-        }}>
-          {item.name}
-        </span>
-      )}
-      {item.thumb && (
-        <span style={{
-          position: 'absolute', left: 0, right: 0, bottom: 0, padding: '16px 8px 5px',
-          textAlign: 'left', fontSize: 11, fontWeight: 600, letterSpacing: '-0.005em',
-          color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-          background: 'linear-gradient(to top, rgba(12,14,20,0.86), rgba(12,14,20,0))',
-        }}>
-          {item.name}
-        </span>
-      )}
-    </button>
   );
 }
 
@@ -234,7 +145,7 @@ export function SectionLabel({ children, aside }: { children: ReactNode; aside?:
   );
 }
 
-/** One stylesheet for the surface's native controls. */
+/** One stylesheet for the surface's native controls, spots and tiles. */
 export function CustomizeStyles() {
   return (
     <style>{`
@@ -242,10 +153,39 @@ export function CustomizeStyles() {
       input.cz-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 13px; height: 13px; border-radius: 50%; background: rgba(255,248,240,0.96); box-shadow: 0 1px 5px rgba(0,0,0,0.6), 0 0 10px rgba(255,240,220,0.3); transition: transform 180ms cubic-bezier(0.16,1,0.3,1); }
       input.cz-range:hover::-webkit-slider-thumb { transform: scale(1.15); }
       input.cz-range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(196,68,68,0.5); }
-      .cz-tile:focus-visible, .cz-focus:focus-visible { outline: 1.5px solid var(--accent, #c44444); outline-offset: 2px; }
+      .cz-focus:focus-visible { outline: 1.5px solid var(--accent, #c44444); outline-offset: 2px; }
       .cz-scroll { scrollbar-width: none; }
       .cz-scroll::-webkit-scrollbar { display: none; }
-      @media (prefers-reduced-motion: reduce) { .cz-orbit-pulse { animation: none !important; } }
+
+      .cz-spot-ring { position: absolute; left: 50%; top: 50%; width: 30px; height: 30px; margin: -15px; border-radius: 50%; border: 1px solid rgba(255,233,214,0.7); animation: cz-breathe 2.8s cubic-bezier(0.16,1,0.3,1) infinite; pointer-events: none; }
+      @keyframes cz-breathe { 0% { transform: scale(0.45); opacity: 0.9; } 70% { opacity: 0; } 100% { transform: scale(1.35); opacity: 0; } }
+
+      .cz-relit { position: relative; aspect-ratio: 1 / 1.1; padding: 0; overflow: hidden; border-radius: 14px; cursor: pointer; background: #121419; border: none; font-family: inherit; box-shadow: 0 0 0 1px rgba(255,255,255,0.07) inset; transition: box-shadow 240ms cubic-bezier(0.16,1,0.3,1); }
+      .cz-relit img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; filter: grayscale(0.7) contrast(1.32) brightness(0.8); transform: scale(1.06); transition: filter 300ms cubic-bezier(0.16,1,0.3,1), transform 500ms cubic-bezier(0.16,1,0.3,1); }
+      .cz-relit::before { content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none; background: linear-gradient(150deg, rgba(255,196,150,0.5), rgba(255,196,150,0) 55%); mix-blend-mode: soft-light; }
+      .cz-relit::after { content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; border-radius: inherit; background: radial-gradient(110% 85% at 50% 38%, rgba(8,9,12,0) 38%, rgba(8,9,12,0.9) 100%); transition: box-shadow 240ms cubic-bezier(0.16,1,0.3,1); }
+      .cz-relit:hover img { filter: grayscale(0.45) contrast(1.3) brightness(0.92); transform: scale(1.12); }
+      .cz-relit.on { box-shadow: 0 0 0 1.5px rgba(255,236,220,0.92) inset, 0 12px 28px -12px rgba(0,0,0,0.9), 0 0 36px -8px rgba(255,200,160,0.45); }
+      .cz-relit.on img { filter: grayscale(0.35) contrast(1.28) brightness(0.98); }
+      .cz-relit.applying::after { box-shadow: 0 0 0 1.5px rgba(255,236,220,0.25) inset; }
+      .cz-relit.applying > img { animation: cz-dim 1.1s ease-in-out infinite alternate; }
+      @keyframes cz-dim { from { opacity: 1; } to { opacity: 0.55; } }
+      .cz-relit.none { aspect-ratio: auto; background: rgba(255,255,255,0.03); }
+      .cz-relit.none::before, .cz-relit.none::after { display: none; }
+      .cz-none { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 9px; font-size: 12.5px; font-weight: 700; color: var(--text-secondary, #d4cec7); }
+      .cz-none i { position: relative; width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid currentColor; opacity: 0.7; }
+      .cz-none i::after { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1.5px; margin-left: -0.75px; background: currentColor; transform: rotate(45deg); }
+
+      .cz-spin { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid rgba(255,233,214,0.25); border-top-color: rgba(255,233,214,0.95); animation: cz-rot 700ms linear infinite; }
+      @keyframes cz-rot { to { transform: rotate(360deg); } }
+
+      .cz-sweep { position: absolute; inset: 0; pointer-events: none; mix-blend-mode: screen; opacity: 0; background: linear-gradient(100deg, transparent 40%, rgba(255,233,214,0.14) 50%, transparent 60%); background-size: 260% 100%; animation: cz-sweep 1100ms cubic-bezier(0.16,1,0.3,1) forwards; }
+      @keyframes cz-sweep { 0% { opacity: 1; background-position: 130% 0; } 85% { opacity: 1; } 100% { opacity: 0; background-position: -30% 0; } }
+
+      @media (prefers-reduced-motion: reduce) {
+        .cz-orbit-pulse, .cz-spot-ring, .cz-sweep, .cz-relit.applying > img { animation: none !important; }
+        .cz-spot-ring { opacity: 0.5; transform: scale(1); }
+      }
       @keyframes cz-pulse { 0% { transform: scale(1); opacity: 0.55; } 100% { transform: scale(2.2); opacity: 0; } }
     `}</style>
   );
