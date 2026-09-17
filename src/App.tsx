@@ -28,7 +28,7 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { SoulBootScreen } from './components/SoulBootScreen';
 import { SetupWizard } from './components/SetupWizard';
 import { UpdateOverlay } from './components/UpdateOverlay';
-import { readGlancePrefs, type GlancePrefs, type WardrobeSettings } from './services/userSettings';
+import { DEFAULT_VIBE, readGlancePrefs, type GlancePrefs, type WardrobeSettings } from './services/userSettings';
 import { listCustomWidgets, restoreCustomWidget, specForAccount, type CustomWidget } from './services/customWidgets';
 import {
   initSoulBase,
@@ -45,7 +45,8 @@ import { SheetKey } from './hooks/useSheet';
 import { useVoiceAgent } from './voice/useVoiceAgent';
 import { detectEcho } from './voice/echoGuard';
 import { useStreamingTranscriber } from './voice/useStreamingTranscriber';
-import { chatViaSoul, streamChatViaSoul, fireIdle, fetchCurrentBodyIdle, SoulBodyDirective, SoulChatAction, SoulChatChunk, SoulChatResult, announceReminderViaSoul } from './services/soulChat';
+import { chatViaSoul, streamChatViaSoul, speakViaSoul, fireIdle, fetchCurrentBodyIdle, SoulBodyDirective, SoulChatAction, SoulChatChunk, SoulChatResult, announceReminderViaSoul } from './services/soulChat';
+import { CharacterSetupPanel, displayNameFromExport } from './components/CharacterSetupPanel';
 import { startPassthroughBridge } from './services/passthrough';
 import { useReminderAlerts } from './hooks/useReminderAlerts';
 import { buildReminderTemplate } from './services/reminderTemplate';
@@ -562,7 +563,9 @@ function AppMain() {
   // switcher carousel is selected. The carousel is [...stack, ADD_SLOT]; the
   // ADD_SLOT opens the picker over a blank stage. `selectedInstanceId` holds a
   // real roster instance id or ADD_SLOT.
-  const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, setInstanceVoice, resetStack, hydrateStack } = useAgentStack();
+  const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, setInstanceVoice, setInstancePersona, resetStack, hydrateStack } = useAgentStack();
+  const agentStackForDevRef = useRef<AgentInstance[]>([]);
+  agentStackForDevRef.current = agentStack;
   // Global environment — backdrop + key light + post effect (persists across
   // agents, NOT per-instance). See src/hooks/useEnvironment.ts. Applied on every
   // switch + whenever it changes.
@@ -724,6 +727,31 @@ function AppMain() {
   // Fresh photo-identity generation: agentId whose next characterReady should
   // land the user in the customization UI (name + style the new character).
   const customizeOnReadyRef = useRef<string | null>(null);
+  // A MetaHuman just imported from Unreal: the name / personality / voice
+  // setup card over the stage (CharacterSetupPanel), in place of the
+  // customization UI a photo-built character opens.
+  const [setupFor, setSetupFor] = useState<{ instanceId: string; name: string } | null>(null);
+  const [setupTts, setSetupTts] = useState<string | null>(null);
+  useEffect(() => {
+    if (!setupFor) return;
+    void fetchApiKeys().then((k) => setSetupTts(k.tts_provider)).catch(() => setSetupTts(null));
+  }, [setupFor]);
+  // Dev only: reopen the setup for any roster character without a new import
+  // (the import itself goes through a native file dialog).
+  useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
+    const w = window as unknown as { __unclawDev?: Record<string, unknown> };
+    w.__unclawDev = {
+      ...(w.__unclawDev ?? {}),
+      openCharacterSetup: (instanceId?: string) => {
+        const list = agentStackForDevRef.current;
+        const inst = list.find((i) => i.id === instanceId) ?? list.find((i) => i.identity?.groomsDir) ?? list[list.length - 1];
+        if (inst) setSetupFor({ instanceId: inst.id, name: inst.name || 'New character' });
+        return inst?.id ?? null;
+      },
+    };
+    return undefined;
+  }, []);
   /** Every skin generated for the open character, so earlier ones stay pickable. */
   const [skins, setSkins] = useState<Array<{ path: string; label: string }>>([]);
   const openCustomizationRef = useRef<(() => void) | null>(null);
@@ -1130,7 +1158,9 @@ function AppMain() {
   // Grace's voice, masculine -> Mark's. Preset agents have no identity gender,
   // so they keep their own.
   const personaVoicesBase = voicesForInstance(
-    activeAgentId, currentInstance?.identity?.gender ?? null, personaCustomName);
+    activeAgentId, currentInstance?.identity?.gender ?? null, personaCustomName, currentInstance?.voiceFrom);
+  // The character's own personality (import setup), sent with every chat.
+  const personaVibe = currentInstance?.vibe;
   // A cloned voice assigned to this instance replaces the character's stem
   // on the local clone engines; the cloud engines keep the character's ids.
   const personaVoices = currentInstance?.voice
@@ -2562,6 +2592,7 @@ function AppMain() {
         for await (const chunk of streamChatViaSoul(outgoing, {
           systemExtension: systemExt,
           voices: personaVoices,
+          vibe: personaVibe,
           history,
           images: cameraFrameOnly ? pendingImages.map((img) => img.base64) : undefined,
           videoCall: cameraFrameOnly,
@@ -2629,6 +2660,7 @@ function AppMain() {
           const fallback = await chatViaSoul(outgoing, {
             systemExtension: systemExt,
             voices: personaVoices,
+            vibe: personaVibe,
             history,
             images: pendingImages.map((img) => img.base64),
             videoCall: cameraFrameOnly,
@@ -2686,6 +2718,7 @@ function AppMain() {
       const result = await chatViaSoul(outgoing, {
         systemExtension: systemExt,
         voices: personaVoices,
+        vibe: personaVibe,
         history,
         images: pendingImages.map((img) => img.base64),
         videoCall: cameraFrameOnly,
@@ -2713,7 +2746,7 @@ function AppMain() {
     } finally {
       setIsSending(false);
     }
-  }, [camera.captureFrame, isSending, persona, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream, awardClawForInteraction, holdAISpeaking, releaseAISpeaking, forceReleaseAISpeaking]);
+  }, [camera.captureFrame, isSending, persona, personaVibe, memory, attachedImages, dispatchChatResult, dispatchChatChunk, startEscalationPolling, cancelActiveStream, awardClawForInteraction, holdAISpeaking, releaseAISpeaking, forceReleaseAISpeaking]);
 
   // Slash-command animation dispatcher, hands a ready-to-go UE
   // descriptor to the dock so it can fire `/dance`, `/kiss`, `/hello`
@@ -4891,7 +4924,7 @@ function AppMain() {
             key="add-custom"
             authToken={authToken ?? null}
             onClose={() => setAddCustomOpen(false)}
-            onIdentityReady={({ dnaPath, blobPath, baseColorPath, jointsPath, normalPath, groomsDir, grooming }) => {
+            onIdentityReady={({ dnaPath, blobPath, baseColorPath, jointsPath, normalPath, groomsDir, grooming, unrealName }) => {
               // The local pipeline produced the identity artifacts: create the
               // custom instance on the generic host and switch to it. The
               // characterReady handler sends applyIdentity once UE reports the
@@ -4924,8 +4957,45 @@ function AppMain() {
               setSelectedInstanceId(id);
               setAddCustomOpen(false);
               setAddPickerOpen(false);
-              customizeOnReadyRef.current = UNIFIED_AGENT.agentId;
+              if (unrealName) {
+                // An Unreal export arrives dressed and groomed: ask who it is
+                // instead of opening the wardrobe.
+                const name = displayNameFromExport(unrealName);
+                renameInstance(id, name);
+                setSetupFor({ instanceId: id, name });
+              } else {
+                customizeOnReadyRef.current = UNIFIED_AGENT.agentId;
+              }
               switchUeToAgent(UNIFIED_AGENT.agentId, 1, wardrobe);
+            }}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {setupFor && (
+          <CharacterSetupPanel
+            key={`setup-${setupFor.instanceId}`}
+            initialName={setupFor.name}
+            defaultVibe={{
+              formality: profile?.vibe_formality ?? DEFAULT_VIBE.vibe_formality,
+              humor: profile?.vibe_humor ?? DEFAULT_VIBE.vibe_humor,
+              directness: profile?.vibe_directness ?? DEFAULT_VIBE.vibe_directness,
+              verbosity: profile?.vibe_verbosity ?? DEFAULT_VIBE.vibe_verbosity,
+            }}
+            ttsProvider={setupTts}
+            onPreview={async (voices, line) => {
+              try {
+                const result = await speakViaSoul(line, { voices, mood: 'joyful' });
+                dispatchChatResultRef.current(result);
+                await new Promise((r) => window.setTimeout(r, Math.min(8000, Number((result as { duration?: unknown }).duration ?? 2) * 1000)));
+              } catch (err) {
+                console.warn('[setup] voice preview failed', err);
+              }
+            }}
+            onFinish={(r) => {
+              setInstancePersona(setupFor.instanceId, r);
+              setSetupFor(null);
             }}
           />
         )}

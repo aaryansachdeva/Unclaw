@@ -16,6 +16,16 @@ export const BASE_INSTANCE_ID = 'base-grace';
  *  (see migrateInstance). */
 export const BASE_AGENT = 'grace_custom';
 
+/** A character's own personality: the onboarding vibe sliders, 0..100 each.
+ *  Sent with every chat while this instance is on stage and used by soul in
+ *  place of the user's onboarding vibe. */
+export interface CharacterVibe {
+  formality: number;
+  humor: number;
+  directness: number;
+  verbosity: number;
+}
+
 export interface AgentInstance {
   /** Stable unique id for this slot in the roster. */
   id: string;
@@ -34,6 +44,12 @@ export interface AgentInstance {
    *  with on the local clone engines, overriding the character's own. Set by
    *  the voice picker or by a character import that bundled a clip. */
   voice?: string;
+  /** A built-in character whose voices this instance speaks with (every TTS
+   *  engine), picked in the import setup. `voice` (a clone) still wins on the
+   *  local clone engines. */
+  voiceFrom?: string;
+  /** This character's own personality; absent = the user's onboarding vibe. */
+  vibe?: CharacterVibe;
   identity?: {
     /** The capture/build session id — also the identity folder name under
      *  /Identity/. Older saves lack it; readers fall back to parsing
@@ -182,6 +198,27 @@ export function useAgentStack() {
     });
   }, []);
 
+  /** The import setup's answers in one write: name, personality and voice.
+   *  `voice` / `voiceFrom` are replaced as a pair so picking a built-in voice
+   *  clears an earlier clone and the other way round. */
+  const setInstancePersona = useCallback((id: string, persona: {
+    name?: string; vibe?: CharacterVibe; voice?: string; voiceFrom?: string;
+  }) => {
+    setStack((prev) => {
+      const next = prev.map((i) => (i.id === id
+        ? {
+            ...i,
+            name: persona.name?.trim() || i.name,
+            vibe: persona.vibe ?? i.vibe,
+            voice: persona.voice || undefined,
+            voiceFrom: persona.voiceFrom || undefined,
+          }
+        : i));
+      save(next);
+      return next;
+    });
+  }, []);
+
   const setInstanceWardrobe = useCallback((id: string, wardrobe: WardrobeSettings) => {
     setStack((prev) => {
       const next = prev.map((i) => (i.id === id ? { ...i, wardrobe } : i));
@@ -210,5 +247,5 @@ export function useAgentStack() {
     setStack(next);
   }, []);
 
-  return { stack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, setInstanceVoice, resetStack, hydrateStack };
+  return { stack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, setInstanceVoice, setInstancePersona, resetStack, hydrateStack };
 }

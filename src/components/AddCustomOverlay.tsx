@@ -408,6 +408,9 @@ export function AddCustomOverlay({
     normalPath?: string;
     /** Exported grooms folder, Unreal import only. */
     groomsDir?: string;
+    /** Unreal import only: the export's character name (manifest), which
+     *  starts the name / personality / voice setup. */
+    unrealName?: string;
     grooming?: { gender: 'm' | 'f'; build?: 'skinny' | 'fit' | 'fat'; hairIndex: number; browIndex: number; lashIndex: number; hairColor?: string; eyeColor?: string;
       hairColorParams?: { melanin: number; redness: number }; irisVariant?: string };
   }) => void;
@@ -454,6 +457,7 @@ export function AddCustomOverlay({
       normalPath: res.normalPath,
       groomsDir: res.grooms && res.grooms.length ? res.groomsDir : undefined,
       blobPath: '',
+      unrealName: res.name || 'New character',
     });
   }, []);
 

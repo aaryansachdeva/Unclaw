@@ -85,7 +85,10 @@ export function voicesForInstance(
   agentId: string | null | undefined,
   gender: 'm' | 'f' | null | undefined,
   customName?: string | null,
+  /** A built-in character picked as this instance's voice (import setup). */
+  voiceFrom?: string | null,
 ): CharacterVoices {
+  if (voiceFrom && CHARACTERS_BY_ID[voiceFrom]) return CHARACTERS_BY_ID[voiceFrom].voices;
   if (gender === 'm') return mark.voices;
   if (gender === 'f') return grace_custom.voices;
   return characterFor(agentId, customName).voices;

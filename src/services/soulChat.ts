@@ -48,6 +48,9 @@ export interface SoulChatHistoryTurn {
 
 export interface SoulChatOptions {
   history?: SoulChatHistoryTurn[];
+  /** The active character's own personality (set in the import setup). Soul
+   *  uses it in place of the onboarding vibe for this turn. */
+  vibe?: { formality: number; humor: number; directness: number; verbosity: number };
   voiceId?: string;
   /** Per-character voice ids keyed by TTS provider. The active provider (from
    *  the user's saved settings) picks one; it wins over the global per-provider
@@ -145,6 +148,7 @@ export async function chatViaSoul(
   if (opts.systemExtension) body.system_extension = opts.systemExtension;
   if (opts.images && opts.images.length > 0) body.images = opts.images;
   if (opts.videoCall) body.video_call = true;
+  if (opts.vibe) body.vibe = opts.vibe;
 
   // Pull the user's saved {provider, model, key, tts_provider...} so
   // soul routes the request to the backends they configured in
@@ -504,6 +508,7 @@ export async function* streamChatViaSoul(
   if (opts.systemExtension) body.system_extension = opts.systemExtension;
   if (opts.images && opts.images.length > 0) body.images = opts.images;
   if (opts.videoCall) body.video_call = true;
+  if (opts.vibe) body.vibe = opts.vibe;
 
   try {
     const keys = await fetchApiKeys();
