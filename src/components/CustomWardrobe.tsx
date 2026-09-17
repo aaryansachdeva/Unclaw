@@ -35,8 +35,8 @@ import {
   ApplyStatus, Inspector, RelitTile, Sweep, TileGrid, WordTabs, INSPECTOR_W, type ApplyPhase,
 } from './customize/Inspector';
 import {
-  REGION_CATEGORIES, REGION_LABEL, anchorPoint, framingFor, lightPoint, useUeHotspots,
-  type RegionId, type UeSubscribe,
+  FACE_REGIONS, REGION_CATEGORIES, REGION_LABEL, anchorPoint, framingFor, lightPoint, useUeHotspots,
+  type Level, type RegionId, type UeSubscribe,
 } from './customize/regions';
 
 const PANE_LABELS: Record<Pane, string> = {
@@ -107,27 +107,34 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   );
   const unified = isUnifiedHost(agentId);
 
-  // The spots this character has. Face and Body only exist where there is a
-  // blend rig; facial hair only where the wardrobe carries it.
-  const regions = useMemo<RegionId[]>(() => {
+  // The spots inside the face close-up: the grooms, plus face shape where there
+  // is a blend rig to shape.
+  const faceRegions = useMemo<RegionId[]>(() => FACE_REGIONS.filter((r) => (
+    r === 'shape' ? unified : REGION_CATEGORIES[r].some((c) => wardrobe.categories.includes(c))
+  )), [wardrobe, unified]);
+
+  // The spots on the whole figure. Face is a hub: tapping it moves the camera in
+  // and hands over to faceRegions rather than opening a panel.
+  const bodyRegions = useMemo<RegionId[]>(() => {
     const has = (c: CustomCategory) => wardrobe.categories.includes(c);
     const out: RegionId[] = [];
-    if (REGION_CATEGORIES.hair.some(has)) out.push('hair');
-    if (unified) out.push('face');
-    if (REGION_CATEGORIES.facial.some(has)) out.push('facial');
+    if (faceRegions.length > 0) out.push('face');
     if (has('top')) out.push('top');
-    if (REGION_CATEGORIES.legs.some(has)) out.push('legs');
+    if (has('bottom')) out.push('legs');
+    if (has('shoes')) out.push('shoes');
     if (wardrobe.body) out.push('body');
     out.push('scene');
     return out;
-  }, [wardrobe, unified]);
+  }, [wardrobe, faceRegions]);
+
   const regionPanes = useCallback((r: RegionId): Pane[] => {
-    if (r === 'face' || r === 'body') return ['body'];
+    if (r === 'shape' || r === 'body') return ['body'];
     if (r === 'scene') return ['scene'];
     return REGION_CATEGORIES[r].filter((c) => wardrobe.categories.includes(c));
   }, [wardrobe]);
 
-  // null = the overview with every spot showing.
+  // Which set of spots is on screen, and which one (if any) has its panel open.
+  const [level, setLevel] = useState<Level>('body');
   const [region, setRegion] = useState<RegionId | null>(null);
   const [pane, setPane] = useState<Pane>('hair');
   const lastPaneRef = useRef<Partial<Record<RegionId, Pane>>>({});
@@ -145,20 +152,37 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
 
   const openRegion = useCallback((r: RegionId | null) => {
     if (region) lastPaneRef.current[region] = pane;
+    // Face is a hub, not a panel: move in and show its own spots. With only one
+    // thing in there (a base character has hair and nothing else) skip the hub
+    // and go straight to it.
+    if (r === 'face') {
+      setLevel('face');
+      setRegion(faceRegions.length === 1 ? faceRegions[0] : null);
+      if (faceRegions.length === 1) setPane(regionPanes(faceRegions[0])[0] ?? 'hair');
+      return;
+    }
+    if (r && FACE_REGIONS.includes(r)) setLevel('face');
     setRegion(r);
     if (!r) return;
     const list = regionPanes(r);
     const remembered = lastPaneRef.current[r];
     setPane(remembered && list.includes(remembered) ? remembered : (list[0] ?? 'scene'));
-    if (r === 'face') setTuneTab((t) => (t === 'body' ? 'face' : t));
+    if (r === 'shape') setTuneTab((t) => (t === 'body' ? 'face' : t));
     if (r === 'body') setTuneTab('body');
-  }, [region, pane, regionPanes]);
+  }, [region, pane, regionPanes, faceRegions]);
+
+  /** Back: close the panel, then leave the close-up, then leave Customize. */
+  const goBack = useCallback(() => {
+    if (region) { openRegion(null); return; }
+    if (level === 'face') { setLevel('body'); return; }
+    onCancel();
+  }, [region, level, openRegion, onCancel]);
 
   // Tell App which shot to frame: the close-up for hair, facial hair and the
   // face, the whole figure for everything else including the overview.
   useEffect(() => {
-    onCloseUpChange?.(framingFor(region, tuneTab !== 'body') === 'face');
-  }, [region, tuneTab, onCloseUpChange]);
+    onCloseUpChange?.(framingFor(level) === 'face');
+  }, [level, onCloseUpChange]);
 
   const panelPx = region && region !== 'scene' ? INSPECTOR_W : 0;
   useEffect(() => {
@@ -290,7 +314,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   // Arrow keys scrub the reel. A reel you can only click is half a reel.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); if (region) openRegion(null); else onCancel(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); goBack(); return; }
       if (!isGarment || items.length === 0) return;
       if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
       const el = document.activeElement as HTMLElement | null;
@@ -304,7 +328,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [onCancel, region, openRegion, isGarment, items.length, selected, pane, pickItem]);
+  }, [goBack, isGarment, items.length, selected, pane, pickItem]);
 
   // NOTE: wardrobeModeOn/Off is gone. All it ever did was zoom the camera
   // in/out for the fitting-room framing, and the camera is now driven from
@@ -505,7 +529,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     return () => ro.disconnect();
   }, []);
   const ue = useUeHotspots(onUeMessage, box.w, box.h);
-  const framing = framingFor(region, tuneTab !== 'body');
+  const framing = framingFor(level);
   // The fallback map is for her centred; with a panel open the camera has slid
   // her left by half its width. UE's own points already include that.
   const pointFor = (r: RegionId) => {
@@ -516,24 +540,27 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
 
   const lightHex = accentHex ?? ACCENT_COLORS[accentIndex]?.hex ?? '#f0e8d6';
   const nameOf = (cat: CustomCategory) => catItems(cat).find((i) => i.index === value(cat))?.name ?? '';
+  const groomName = (c: CustomCategory) => (value(c) === GROOM_NONE_INDEX ? 'None' : nameOf(c));
   const detailFor = (r: RegionId): string => {
     switch (r) {
-      case 'hair': return nameOf('hair') || nameOf('eyebrow');
-      case 'facial': {
-        const worn = (['beard', 'mustache'] as const).filter((c) => wardrobe.categories.includes(c) && value(c) !== GROOM_NONE_INDEX);
-        return worn.length ? worn.map(nameOf).join(', ') : 'Clean shaven';
-      }
+      case 'face': return [nameOf('hair'), ...(wardrobe.categories.includes('beard') && value('beard') !== GROOM_NONE_INDEX ? [nameOf('beard')] : [])].filter(Boolean).join(', ') || 'Hair and grooms';
+      case 'hair': return nameOf('hair');
+      case 'brows': return nameOf('eyebrow');
+      case 'lashes': return nameOf('eyelash');
+      case 'beard': return groomName('beard');
+      case 'mustache': return groomName('mustache');
+      case 'shape': return 'Shape and colour';
       case 'top': return nameOf('top');
-      case 'legs': return [nameOf('bottom'), nameOf('shoes')].filter(Boolean).join(', ');
-      case 'face': return 'Shape and colour';
+      case 'legs': return nameOf('bottom');
+      case 'shoes': return nameOf('shoes');
       case 'body': return unified ? 'Build and proportions' : 'Height and weight';
       default: return '';
     }
   };
 
   const spots: Spot[] = [];
-  if (!region) {
-    for (const r of regions) {
+  {
+    for (const r of (level === 'face' ? faceRegions : bodyRegions)) {
       const point = r === 'scene' ? null : pointFor(r);
       // Only drop spots that are genuinely off the stage. A crown near the top
       // of frame is real: the label clamps clear of the header by itself.
@@ -582,8 +609,8 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
       >
         <button
           type="button"
-          onClick={() => (region ? openRegion(null) : onCancel())}
-          aria-label={region ? 'Back to all parts' : 'Close customize'}
+          onClick={goBack}
+          aria-label={region || level === 'face' ? 'Back to all parts' : 'Close customize'}
           className="cz-focus cz-back"
           style={{
             width: 36, height: 36, borderRadius: '50%', flex: '0 0 auto', border: 'none', background: 'transparent',
@@ -623,7 +650,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             </span>
           )}
           <span style={{ fontSize: 11.5, lineHeight: '14px', fontWeight: 500, color: 'var(--text-secondary, #d4cec7)' }}>
-            {region ? 'All parts' : 'Tap a part to change it'}
+            {region ? 'All parts' : level === 'face' ? 'Tap a part of her face' : 'Tap a part to change it'}
           </span>
         </div>
         <span style={{ flex: 1 }} />
@@ -659,13 +686,15 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
       </motion.div>
 
       <AnimatePresence>
-        {!region && (
+        {region !== 'scene' && (
           <motion.div key="overview" exit={{ opacity: 0 }} transition={{ duration: 0.2 }} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
             <HotspotLayer
               spots={spots}
               width={box.w}
               light={{ ...lp, hex: lightHex, detail: sideName(lightingAngle) }}
               onOpen={openRegion}
+              quiet={!!region}
+              active={region}
             />
           </motion.div>
         )}
@@ -713,19 +742,19 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
       </AnimatePresence>
 
       <AnimatePresence>
-        {(region === 'face' || region === 'body') && (
+        {(region === 'shape' || region === 'body') && (
           <Inspector
             key={`inspect-${region}`}
             region={region}
             title={REGION_LABEL[region]}
             anchor={pointFor(region)}
             width={box.w}
-            tabs={region === 'face'
+            tabs={region === 'shape'
               ? <WordTabs items={[{ id: 'face' as const, label: 'Shape' }, { id: 'colour' as const, label: 'Colour' }]}
                   value={tuneTab === 'colour' ? 'colour' : 'face'} onChange={setTuneTab} />
               : undefined}
           >
-            {region === 'face' && tuneTab === 'colour' ? (
+            {region === 'shape' && tuneTab === 'colour' ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
                 <SwatchRow
                   label="Hair"
@@ -802,7 +831,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
           </Inspector>
         )}
 
-        {region && region !== 'scene' && region !== 'face' && region !== 'body' && isGarment && (
+        {region && region !== 'scene' && region !== 'shape' && region !== 'body' && isGarment && (
           <Inspector
             key={`inspect-${region}`}
             region={region}
@@ -820,7 +849,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             tabs={<WordTabs items={regionTabs} value={pane} onChange={(p) => setPane(p)} />}
           >
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {region === 'hair' && unified && pane !== 'eyelash' && (
+              {(region === 'hair' || region === 'brows') && unified && (
                 <SwatchRow
                   label="Colour"
                   items={HAIR_COLORS.map((h, i) => ({ key: String(i), hex: h.hex, name: h.label }))}

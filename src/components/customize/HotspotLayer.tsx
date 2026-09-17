@@ -19,11 +19,16 @@ const COLUMN = 150;      // label column width from the window edge
 const GAP = 10;          // leader stops this far from the label
 const HEADER_CLEAR = 122; // labels stay below the name and Save
 
-export function HotspotLayer({ spots, light, width, onOpen }: {
+export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
   spots: Spot[];
   light: (Point & { behind: boolean; hex: string; detail: string }) | null;
   width: number;
   onOpen: (id: RegionId) => void;
+  /** A panel is open: drop the labels and leaders, keep the dots so the other
+   *  parts are still one click away. */
+  quiet?: boolean;
+  /** The region the open panel is editing; its dot stays lit. */
+  active?: RegionId | null;
 }) {
   const [hot, setHot] = useState<RegionId | null>(null);
 
@@ -39,11 +44,11 @@ export function HotspotLayer({ spots, light, width, onOpen }: {
         const lineTo = side === 'right' ? labelX - GAP : s.point.x - 12;
         const dx = lineTo - lineFrom;
         const dy = labelY - s.point.y;
-        const on = hot === s.id;
-        const delay = 0.08 + i * 0.06;
+        const on = hot === s.id || active === s.id;
+        const delay = quiet ? 0 : 0.08 + i * 0.06;
         return (
-          <div key={s.id}>
-            {dx > 8 && (
+          <div key={s.id} style={quiet ? { opacity: active === s.id ? 1 : 0.5 } : undefined}>
+            {!quiet && dx > 8 && (
               <motion.span
                 aria-hidden
                 initial={{ scaleX: 0, opacity: 0 }}
@@ -61,6 +66,7 @@ export function HotspotLayer({ spots, light, width, onOpen }: {
             )}
             <SpotButton point={s.point} label={REGION_LABEL[s.id]} on={on} delay={delay}
               onHover={(v) => setHot(v ? s.id : null)} onOpen={() => onOpen(s.id)} />
+            {!quiet && (
             <motion.button
               type="button"
               onClick={() => onOpen(s.id)}
@@ -91,11 +97,12 @@ export function HotspotLayer({ spots, light, width, onOpen }: {
                 {s.detail}
               </span>
             </motion.button>
+            )}
           </div>
         );
       })}
 
-      {light && (
+      {light && !quiet && (
         <motion.button
           type="button"
           onClick={() => onOpen('scene')}

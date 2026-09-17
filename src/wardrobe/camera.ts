@@ -105,8 +105,11 @@ export function cameraDefaultFor(agentId?: string | null, axes?: BlendAxes): Cam
 // PLACEHOLDER offsets — the pull-back / height drop are a first guess and are
 // meant to be tuned against the live scene. Keep them here so there's one place
 // to adjust.
-const CUSTOMIZE_PULLBACK = 110; // added to y (further from the character)
-const CUSTOMIZE_DROP = 55;      // subtracted from z (frame the body, not the face)
+// Measured live on Grace 2026-09-17: far enough back that the SHOES are in
+// frame, since they are their own hotspot now, with a little headroom left
+// above the crown for its label.
+const CUSTOMIZE_PULLBACK = 170; // added to y (further from the character)
+const CUSTOMIZE_DROP = 73;      // subtracted from z (frame the whole figure, feet included)
 
 export function cameraCustomize(agentId?: string | null, axes?: BlendAxes): CameraLoc {
   const [x, y, z] = cameraDefaultFor(agentId, axes);
