@@ -168,9 +168,11 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
 
   // Ask Unreal for live spot positions while Customize is open. Builds without
   // the hotspots handler ignore it and the measured map stands in.
+  // `value` carries the same flag as a NUMBER because the Blueprints read
+  // descriptors with Get Number Field; `enabled` is the readable alias.
   useEffect(() => {
-    onEmit({ EventType: 'hotspots', enabled: true });
-    return () => onEmit({ EventType: 'hotspots', enabled: false });
+    onEmit({ EventType: 'hotspots', enabled: true, value: 1 });
+    return () => onEmit({ EventType: 'hotspots', enabled: false, value: 0 });
   }, [onEmit]);
 
   const [hair,    setHair]    = useState(() => clampAgentIndex(wardrobe.items.hair,    initial?.hairIndex));
