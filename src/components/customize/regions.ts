@@ -116,6 +116,10 @@ export function useUeHotspots(subscribe: UeSubscribe | undefined, w: number, h: 
         }
       }
       setNorm(next);
+      if (import.meta.env.DEV) {
+        const w = window as unknown as { __unclawDev?: Record<string, unknown> };
+        w.__unclawDev = { ...(w.__unclawDev ?? {}), lastHotspots: { at: Date.now(), points: next } };
+      }
       if (staleRef.current != null) window.clearTimeout(staleRef.current);
       staleRef.current = window.setTimeout(() => setNorm({}), 1500);
     });

@@ -15,8 +15,9 @@ export interface Spot {
   detail: string;
 }
 
-const COLUMN = 150;   // label column width from the window edge
-const GAP = 10;       // leader stops this far from the label
+const COLUMN = 150;      // label column width from the window edge
+const GAP = 10;          // leader stops this far from the label
+const HEADER_CLEAR = 122; // labels stay below the name and Save
 
 export function HotspotLayer({ spots, light, width, onOpen }: {
   spots: Spot[];
@@ -31,21 +32,29 @@ export function HotspotLayer({ spots, light, width, onOpen }: {
       {spots.map((s, i) => {
         const side = REGION_SIDE[s.id];
         const labelX = side === 'right' ? width - COLUMN : COLUMN;
+        // The crown sits under the header in the full-figure shot, so the label
+        // drops into a clear band and the leader slopes up to the spot.
+        const labelY = Math.max(s.point.y, HEADER_CLEAR);
         const lineFrom = side === 'right' ? s.point.x + 12 : labelX + GAP;
         const lineTo = side === 'right' ? labelX - GAP : s.point.x - 12;
+        const dx = lineTo - lineFrom;
+        const dy = labelY - s.point.y;
         const on = hot === s.id;
         const delay = 0.08 + i * 0.06;
         return (
           <div key={s.id}>
-            {lineTo - lineFrom > 8 && (
+            {dx > 8 && (
               <motion.span
                 aria-hidden
                 initial={{ scaleX: 0, opacity: 0 }}
                 animate={{ scaleX: 1, opacity: on ? 0.9 : 0.42 }}
                 transition={{ duration: 0.5, ease: EASE_OUT_EXPO, delay }}
                 style={{
-                  position: 'absolute', left: lineFrom, top: s.point.y, width: lineTo - lineFrom, height: 1,
-                  background: 'var(--cz-bone, #fafafa)', transformOrigin: side === 'right' ? 'left center' : 'right center',
+                  position: 'absolute', left: lineFrom, top: s.point.y,
+                  width: Math.hypot(dx, dy), height: 1,
+                  background: 'var(--cz-bone, #fafafa)',
+                  transform: `rotate(${(Math.atan2(dy, dx) * 180) / Math.PI}deg)`,
+                  transformOrigin: side === 'right' ? 'left center' : 'right center',
                   boxShadow: '0 0 6px rgba(0,0,0,0.5)',
                 }}
               />
@@ -62,7 +71,7 @@ export function HotspotLayer({ spots, light, width, onOpen }: {
               animate={{ opacity: 1, x: 0 }}
               transition={{ duration: 0.45, ease: EASE_OUT_EXPO, delay: delay + 0.12 }}
               style={{
-                position: 'absolute', top: s.point.y - 17, pointerEvents: 'auto',
+                position: 'absolute', top: labelY - 17, pointerEvents: 'auto',
                 ...(side === 'right' ? { left: labelX, textAlign: 'left' } : { right: width - labelX, textAlign: 'right' }),
                 maxWidth: COLUMN - 16, background: 'none', border: 'none', padding: 0, cursor: 'pointer',
                 display: 'flex', flexDirection: 'column', alignItems: side === 'right' ? 'flex-start' : 'flex-end',

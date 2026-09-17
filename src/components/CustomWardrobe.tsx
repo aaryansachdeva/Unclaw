@@ -535,7 +535,11 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   if (!region) {
     for (const r of regions) {
       const point = r === 'scene' ? null : pointFor(r);
-      if (point && point.y > 110 && point.y < box.h - 24) spots.push({ id: r, point, detail: detailFor(r) });
+      // Only drop spots that are genuinely off the stage. A crown near the top
+      // of frame is real: the label clamps clear of the header by itself.
+      if (point && point.y > 24 && point.y < box.h - 24 && point.x > 8 && point.x < box.w - 8) {
+        spots.push({ id: r, point, detail: detailFor(r) });
+      }
     }
   }
   const lp = lightPoint(lightingAngle, box.w, box.h);
