@@ -6,12 +6,14 @@
 import { useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { EASE_OUT_EXPO } from './kit';
-import { REGION_LABEL, REGION_SIDE, type Point, type RegionId } from './regions';
+import {
+  REGION_LABEL, REGION_SIDE, anchorPoint, markerPoint, useUeHotspots,
+  type Framing, type Level, type Point, type RegionId, type UeSubscribe,
+} from './regions';
 
+/** A part to mark, with what is on her there right now ("Layered", "Default"). */
 export interface Spot {
   id: RegionId;
-  point: Point;
-  /** What is on her there right now ("Layered", "Default"). */
   detail: string;
 }
 
@@ -25,10 +27,23 @@ const LABEL_HOLD = 10;      // px the average must drift before the label re-set
 const BASELINE_ALPHA = 0.08; // per update, so the average spans about a second
 const LABEL_SNAP = 40;       // px jump that means she moved, not breathed
 
-export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
+/**
+ * The spots, and the only thing that re-renders as Unreal's points arrive.
+ *
+ * The subscription lives HERE rather than in CustomWardrobe on purpose: points
+ * land 10x a second, and holding them in the parent re-rendered the whole
+ * surface -- every tile, the levers, the panel -- at that rate for nothing.
+ */
+export function HotspotLayer({ spots, light, width, height, framing, level, panelPx, subscribe, onOpen, quiet, active }: {
   spots: Spot[];
   light: (Point & { behind: boolean; hex: string; detail: string }) | null;
   width: number;
+  height: number;
+  framing: Framing;
+  level: Level;
+  /** Width of an open inspector: the camera has slid her half that far. */
+  panelPx: number;
+  subscribe?: UeSubscribe;
   onOpen: (id: RegionId) => void;
   /** A panel is open: drop the labels and leaders, keep the dots so the other
    *  parts are still one click away. */
@@ -37,6 +52,22 @@ export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
   active?: RegionId | null;
 }) {
   const [hot, setHot] = useState<RegionId | null>(null);
+  const ue = useUeHotspots(subscribe, width, height);
+
+  // Unreal's points when they are coming, the measured map when they are not.
+  // UE already accounts for the camera slide; the map does not.
+  const placed = spots.flatMap((s) => {
+    let point = ue[s.id];
+    if (!point) {
+      const p = anchorPoint(s.id, framing, width, height);
+      if (!p) return [];
+      point = panelPx ? { x: p.x - panelPx / 2, y: p.y } : p;
+    }
+    // Drop only what is genuinely off the stage: a crown near the top of frame
+    // is real, and its label clamps clear of the header by itself.
+    if (point.y <= 24 || point.y >= height - 24 || point.x <= 8 || point.x >= width - 8) return [];
+    return [{ ...s, point: markerPoint(s.id, point, level) }];
+  });
   // Labels park on a SLOW AVERAGE of the anchor, not on the anchor itself. Her
   // idle breathing swings a spot several px either way, so following it even
   // gently still slides the text around; averaging cancels the swing, and the
@@ -65,7 +96,7 @@ export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
 
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-      {spots.map((s, i) => {
+      {placed.map((s, i) => {
         const side = REGION_SIDE[s.id];
         const labelX = side === 'right' ? width - COLUMN : COLUMN;
         // The crown sits under the header in the full-figure shot, so the label

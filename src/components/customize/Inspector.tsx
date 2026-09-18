@@ -2,8 +2,8 @@
 // A scrim rises out of the room's darkness at the right edge and the options
 // sit on it, and the region's name flies in from its spot label (shared
 // layoutId). It used to draw a hairline back to the part it edits, which meant
-// a line straight across her body; now the spot on her and this title wear the
-// same ember mark instead, which says the same thing over her, not through her.
+// a line straight across her body. What is open now reads from the spot on her
+// alone, which wears the accent while its panel is up.
 
 import { useEffect, useRef, type ReactNode } from 'react';
 import { motion } from 'framer-motion';
@@ -54,16 +54,8 @@ export function Inspector({ region, title, tabs, status, children }: {
           style={{
             margin: 0, fontSize: 30, lineHeight: '34px', fontWeight: 800, letterSpacing: '-0.04em',
             color: 'var(--text-primary, #fafafa)', whiteSpace: 'nowrap', alignSelf: 'flex-start',
-            display: 'inline-flex', alignItems: 'center', gap: 9,
           }}
         >
-          {/* The spot on her wears this same mark. A shared colour ties the two
-              together without drawing a line across her. */}
-          <span aria-hidden style={{
-            width: 7, height: 7, borderRadius: '50%', flex: '0 0 auto',
-            background: 'var(--accent, #c44444)',
-            boxShadow: '0 0 10px 1px rgba(196,68,68,0.55)',
-          }} />
           {title}
         </motion.h2>
         <div style={{ minHeight: 20, marginTop: 2 }}>{status}</div>

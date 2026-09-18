@@ -35,7 +35,7 @@ import {
   ApplyStatus, Inspector, RelitTile, Sweep, TileGrid, WordTabs, INSPECTOR_W, type ApplyPhase,
 } from './customize/Inspector';
 import {
-  FACE_REGIONS, REGION_CATEGORIES, REGION_LABEL, anchorPoint, framingFor, lightPoint, markerPoint, useUeHotspots,
+  FACE_REGIONS, REGION_CATEGORIES, REGION_LABEL, framingFor, lightPoint,
   type Level, type RegionId, type UeSubscribe,
 } from './customize/regions';
 
@@ -528,15 +528,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const ue = useUeHotspots(onUeMessage, box.w, box.h);
   const framing = framingFor(level);
-  // The fallback map is for her centred; with a panel open the camera has slid
-  // her left by half its width. UE's own points already include that.
-  const pointFor = (r: RegionId) => {
-    if (ue[r]) return ue[r]!;
-    const p = anchorPoint(r, framing, box.w, box.h);
-    return p && panelPx ? { x: p.x - panelPx / 2, y: p.y } : p;
-  };
 
   const lightHex = accentHex ?? ACCENT_COLORS[accentIndex]?.hex ?? '#f0e8d6';
   const nameOf = (cat: CustomCategory) => catItems(cat).find((i) => i.index === value(cat))?.name ?? '';
@@ -558,17 +550,9 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     }
   };
 
-  const spots: Spot[] = [];
-  {
-    for (const r of (level === 'face' ? faceRegions : bodyRegions)) {
-      const point = r === 'scene' ? null : pointFor(r);
-      // Only drop spots that are genuinely off the stage. A crown near the top
-      // of frame is real: the label clamps clear of the header by itself.
-      if (point && point.y > 24 && point.y < box.h - 24 && point.x > 8 && point.x < box.w - 8) {
-        spots.push({ id: r, point: markerPoint(r, point, level), detail: detailFor(r) });
-      }
-    }
-  }
+  const spots: Spot[] = (level === 'face' ? faceRegions : bodyRegions)
+    .filter((r) => r !== 'scene')
+    .map((r) => ({ id: r, detail: detailFor(r) }));
   const lp = lightPoint(lightingAngle, box.w, box.h);
 
   const facialPane = pane === 'beard' || pane === 'mustache';
@@ -653,7 +637,6 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             {region ? 'All parts' : level === 'face' ? 'Tap a part of her face' : 'Tap a part to change it'}
           </span>
         </div>
-        <span style={{ flex: 1 }} />
         <motion.button
           type="button"
           onClick={save}
@@ -661,28 +644,21 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
           disabled={!dirty}
           className="cz-focus"
           style={{
-            pointerEvents: 'auto', flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', gap: 8,
-            padding: dirty ? '7px 15px 7px 8px' : '7px 10px', borderRadius: 999, border: 'none',
-            cursor: dirty ? 'pointer' : 'default', fontFamily: 'inherit', fontSize: 13.5, fontWeight: 700, letterSpacing: '-0.01em',
-            color: dirty ? '#15171c' : 'var(--text-secondary)',
+            pointerEvents: 'auto', flex: '0 0 auto', marginLeft: 16, display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '7px 14px', borderRadius: 999, border: 'none',
+            cursor: dirty ? 'pointer' : 'default', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, letterSpacing: '-0.01em',
+            color: dirty ? '#15171b' : 'var(--text-ghost)',
             background: dirty ? 'rgba(250,250,250,0.95)' : 'transparent',
             boxShadow: dirty ? '0 10px 26px -12px rgba(0,0,0,0.85)' : 'none',
             textShadow: dirty ? 'none' : 'inherit',
-            transition: 'background 240ms var(--ease-out-quart), color 240ms var(--ease-out-quart), padding 240ms var(--ease-out-quart)',
+            transition: 'background 240ms var(--ease-out-quart), color 240ms var(--ease-out-quart), opacity 240ms var(--ease-out-quart)',
+            opacity: dirty || justSaved ? 1 : 0.6,
           }}
         >
-          {dirty ? (
-            <span style={{
-              minWidth: 20, height: 20, padding: '0 6px', borderRadius: 999, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              background: 'var(--accent, #c44444)', color: '#fafafa', fontSize: 11, fontWeight: 800, fontVariantNumeric: 'tabular-nums',
-            }}>
-              {Math.max(1, changes)}
-            </span>
-          ) : (
-            <Check size={14} strokeWidth={2.6} style={{ color: justSaved ? 'var(--live, #8cbf8a)' : 'currentColor' }} />
-          )}
-          {dirty ? 'Save' : 'Saved'}
+          {!dirty && justSaved && <Check size={13} strokeWidth={2.6} style={{ color: 'var(--live, #8cbf8a)' }} />}
+          {dirty ? 'Save' : justSaved ? 'Saved' : 'Saved'}
         </motion.button>
+        <span style={{ flex: 1 }} />
       </motion.div>
 
       <AnimatePresence>
@@ -691,6 +667,11 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             <HotspotLayer
               spots={spots}
               width={box.w}
+              height={box.h}
+              framing={framing}
+              level={level}
+              panelPx={panelPx}
+              subscribe={onUeMessage}
               light={level === 'body' ? { ...lp, hex: lightHex, detail: sideName(lightingAngle) } : null}
               onOpen={openRegion}
               quiet={!!region}
