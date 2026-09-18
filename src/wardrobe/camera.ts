@@ -118,6 +118,22 @@ export function cameraCustomize(agentId?: string | null, axes?: BlendAxes): Came
 
 // Customize close-up (hair, facial hair, face): the resting shot eased back a
 // touch so the whole head fits beside the inspector panel.
+/** Character setup: the sheet that replaces the InputBar is far taller than the
+ *  bar, so it eats the bottom third of the frame and the chat framing ends up a
+ *  chest close-up with the head out of shot.
+ *
+ *  Two moves, and the SIGNS matter. Pulling back (y up) fits head and shoulders
+ *  into what is left. RAISING the camera (z up) brings the head back DOWN into
+ *  frame: the camera looks level, so a lower camera pushes the subject up and
+ *  off the top, which is exactly the mistake that made this a shot of a chin
+ *  and a hoodie. */
+const SETUP_PULLBACK = 34;
+const SETUP_RAISE = 3;
+
+export function cameraSetup(base: CameraLoc): CameraLoc {
+  return [base[0], base[1] + SETUP_PULLBACK, base[2] + SETUP_RAISE];
+}
+
 const CUSTOMIZE_FACE_PULLBACK = 18;
 
 export function cameraCustomizeFace(agentId?: string | null, axes?: BlendAxes): CameraLoc {

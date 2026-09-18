@@ -111,11 +111,13 @@ export function StepShell({
   title,
   subtitle,
   aside,
+  accent,
   children,
 }: {
   title: string;
   subtitle?: string;
   aside?: ReactNode;
+  accent?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -131,11 +133,11 @@ export function StepShell({
     >
       {aside ? (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24 }}>
-          <StepHeader title={title} subtitle={subtitle} />
+          <StepHeader title={title} subtitle={subtitle} accent={accent} />
           {aside}
         </div>
       ) : (
-        <StepHeader title={title} subtitle={subtitle} />
+        <StepHeader title={title} subtitle={subtitle} accent={accent} />
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
         {children}

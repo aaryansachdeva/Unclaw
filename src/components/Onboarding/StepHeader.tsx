@@ -7,11 +7,16 @@
 interface Props {
   title: string;
   subtitle?: string;
+  /** The ember tick. On by default. Character setup turns it off: that sheet
+   *  already has an accent on its primary button and its progress dot, and a
+   *  third saturated mark over a short form spends the accent on nothing. */
+  accent?: boolean;
 }
 
-export function StepHeader({ title, subtitle }: Props) {
+export function StepHeader({ title, subtitle, accent = true }: Props) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: accent ? 12 : 0 }}>
+      {accent && (
       <span
         aria-hidden
         style={{
@@ -22,6 +27,7 @@ export function StepHeader({ title, subtitle }: Props) {
           boxShadow: '0 0 12px -1px rgba(196, 68, 68, 0.55)',
         }}
       />
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <h2
           style={{

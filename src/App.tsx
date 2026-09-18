@@ -19,7 +19,7 @@ import { CameraModeToggle } from './components/CameraModeToggle';
 import { StreamEffects } from './components/StreamEffects';
 import { dressCharacter, type DressScope } from './wardrobe/dressCharacter';
 import { wardrobeDefaultsFor } from './wardrobe/catalog';
-import { cameraCustomize, cameraCustomizeFace, cameraPanelShift, cameraForMode, cameraDefaultFor, type CameraMode } from './wardrobe/camera';
+import { cameraCustomize, cameraCustomizeFace, cameraSetup, cameraPanelShift, cameraForMode, cameraDefaultFor, type CameraMode } from './wardrobe/camera';
 import { blendAxesForCamera } from './wardrobe/camera';
 import { PulseGrid } from './components/PulseGrid';
 import { hexToRgb01, round3 } from './components/ColorPickerPanel';
@@ -1052,6 +1052,11 @@ function AppMain() {
   useEffect(() => {
     if (wizardMode) setChatPaneOpen(false);
   }, [wizardMode]);
+  // Same for character setup: the sheet takes the dock, so a chat pane left
+  // open would sit behind it with nothing to type into.
+  useEffect(() => {
+    if (setupFor) { setChatPaneOpen(false); setActiveWidget(null); }
+  }, [setupFor]);
 
   // Apply the user's custom assistant name (set in onboarding) only on
   // the default Grace persona, Mark stays Mark. This way the user can
@@ -1123,6 +1128,11 @@ function AppMain() {
   const currentInstance = onAddSlot
     ? null
     : agentStack.find((i) => i.id === selectedInstanceId) ?? agentStack[0];
+  // A new character is being set up. Like onboarding, this owns the whole
+  // window: the sheet in the dock, the character, and nothing else. Naming a
+  // character while the greeting, the glance column and a live character
+  // switcher sat around it made setup read as a popup over a running app.
+  const setupActive = !!setupFor;
   const activeAgentId = currentInstance?.agentId ?? null;
 
   // Placed after currentInstance is declared, deliberately: the dependency
@@ -3572,7 +3582,9 @@ function AppMain() {
     );
     const [cx, y, z] = customizationActive
       ? (customizeCloseUp ? cameraCustomizeFace(aid, axes) : cameraCustomize(aid, axes))
-      : cameraForMode(aid, cameraMode, axes);
+      : setupActive
+        ? cameraSetup(cameraForMode(aid, cameraMode, axes))
+        : cameraForMode(aid, cameraMode, axes);
     // An open inspector slides her left so the panel never covers her.
     const x = customizationActive
       ? cx + cameraPanelShift(customizeCloseUp, customizePanelPx, window.innerWidth)
@@ -3586,6 +3598,7 @@ function AppMain() {
       Timestamp: new Date().toISOString(),
     });
   }, [pixelStreaming, activeAgentId, customizationActive, customizeCloseUp, customizePanelPx, cameraMode,
+      setupActive,
       currentInstance?.identity?.gender, currentInstance?.identity?.build]);
   const applyCameraRef = useRef(applyCamera);
   applyCameraRef.current = applyCamera;
@@ -5056,6 +5069,11 @@ function AppMain() {
             onFinish={(r) => {
               setInstancePersona(setupFor.instanceId, r);
               setSetupFor(null);
+              // Named, given a vibe and a voice: the last thing anyone wants to
+              // do with a new character is look at them. Hand straight over to
+              // Customize rather than dropping the user back on the chat
+              // screen to go and find the wardrobe themselves.
+              openCustomizationRef.current?.();
             }}
           />
         )}
@@ -5099,6 +5117,10 @@ function AppMain() {
         }
         onHeight={setGreetingHeight}
       />
+      {/* The ambient column stands down for a focused moment, the same way it
+          does for the onboarding wizard. The greeting above stays: it is part
+          of the room, not a widget competing with the sheet. */}
+      {!setupActive && (
       <GlanceColumn
         top={GREETING_TOP + greetingHeight + 28}
         reminders={onboardingComplete ? reminders : null}
@@ -5139,6 +5161,7 @@ function AppMain() {
         customWidgets={customWidgets}
         onCustomWidgetsChanged={() => { void refreshCustomWidgets(); }}
       />
+      )}
 
       {/* Ambient widget sheets are disabled until onboarding completes — they
           need the user's profile (timezone/city/interests) and shouldn't
@@ -5169,7 +5192,7 @@ function AppMain() {
           greeting plays after a successful save. Both flow through
           dispatchChatResult so UE plays them via the same reply path. */}
       <AnimatePresence>
-        {isConnected && !customizationActive && !addPickerOpen && wizardMode && (
+        {isConnected && !customizationActive && !addPickerOpen && !setupActive && wizardMode && (
           <Wizard
             key="onboarding-wizard"
             firstRun={wizardMode === 'first'}
@@ -5212,7 +5235,7 @@ function AppMain() {
           states, so typing/voice/textarea-focus state survives toggles.
           Z-index 38 sits above the chat pane (35) so the bar reads
           on top of the gray pane surface, and below the titlebar (50). */}
-      {isConnected && hasSession && !customizationActive && !addPickerOpen && (
+      {isConnected && hasSession && !customizationActive && !addPickerOpen && !setupActive && (
         <div
           style={{
             position: 'absolute',
@@ -5351,7 +5374,7 @@ function AppMain() {
               Hidden during the wizard since the wizard occupies this
               same anchor. Gated on profile so it doesn't flash before
               the first profile fetch resolves. */}
-          {profile !== undefined && !wizardMode && (
+          {profile !== undefined && !wizardMode && !setupActive && (
             <motion.div
               initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
@@ -5874,7 +5897,7 @@ function AppMain() {
           a session exists (authed or guest); conversation history
           comes from the per-persona localStorage memory. Hidden
           while customization mode is active. */}
-      {isConnected && hasSession && !customizationActive && !addPickerOpen && (
+      {isConnected && hasSession && !customizationActive && !addPickerOpen && !setupActive && (
         <ChatPane
           open={chatPaneOpen}
           turns={memory.turns}
@@ -5894,7 +5917,7 @@ function AppMain() {
           drag region overlay. The wrapper's `right: 140` leaves
           room for the existing titlebar window controls (AS / pin /
           minimize / close-window). */}
-      {isConnected && hasSession && chatPaneOpen && !customizationActive && !addPickerOpen && (
+      {isConnected && hasSession && chatPaneOpen && !customizationActive && !addPickerOpen && !setupActive && (
         <div
           style={{
             position: 'absolute',

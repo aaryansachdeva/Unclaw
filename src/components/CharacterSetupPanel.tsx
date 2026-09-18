@@ -1,6 +1,12 @@
-// After a MetaHuman arrives from Unreal (2026-09-16): name it, give it a
-// personality, give it a voice. Three short steps in a frosted card over the
-// stage, so the character loading behind it stays in view the whole time.
+// After a MetaHuman arrives from Unreal: name it, give it a personality, give
+// it a voice, then go and dress it. This is ONBOARDING for a character, and it
+// is deliberately the same surface: the full-width sheet in the InputBar's
+// slot, the ember tick and 24px title of StepHeader, the one 560px measure of
+// StepShell, the pinned footer. It used to be a 460px card floating at z60 on
+// top of a live InputBar, greeting, glance column and character switcher, so
+// meeting a new character felt like a popup interrupting the app instead of
+// the app doing one thing. App.tsx now hides that chrome while this is open,
+// exactly as it does for the onboarding wizard.
 //
 //   1. Name         prefilled from the export's manifest name
 //   2. Personality  the onboarding vibe sliders, saved on this character only
@@ -16,7 +22,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { ArrowLeft, Check, Mic, Square, Upload, Volume2 } from 'lucide-react';
 
 import { Slider } from './Onboarding/Slider';
-import { FIELD_BASE, applyBlur, applyFocus } from './Onboarding/onboardingKit';
+import { FIELD_BASE, StepShell, applyBlur, applyFocus } from './Onboarding/onboardingKit';
 import { CHARACTERS, type CharacterVoices } from '../characters';
 import type { CharacterVibe } from '../hooks/useAgentStack';
 import { useVoiceCloner } from '../hooks/useVoiceCloner';
@@ -25,6 +31,11 @@ import { vibeWord } from '../services/userSettings';
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
 const STEPS = ['Name', 'Personality', 'Voice'] as const;
+
+/** Spring + step motion copied from the onboarding wizard so the two surfaces
+ *  move identically. A character setup that eased differently read as a
+ *  different product. */
+const PANEL_SPRING = { type: 'spring' as const, stiffness: 320, damping: 34, mass: 0.8 };
 
 /** The engines a cloned voice plays on. */
 const CLONE_ENGINES = new Set(['pocket', 'chatterbox']);
@@ -105,9 +116,11 @@ export function CharacterSetupPanel({
   const body = useMemo<ReactNode>(() => {
     if (step === 0) {
       return (
-        <>
-          <Title>What should we call them?</Title>
-          <Sub>This is the name they answer to and the one in your roster.</Sub>
+        <StepShell
+          accent={false}
+          title="What should we call them?"
+          subtitle="This is the name they answer to and the one in your roster."
+        >
           <input
             ref={nameRef}
             type="text"
@@ -118,29 +131,34 @@ export function CharacterSetupPanel({
             onKeyDown={(e) => { if (e.key === 'Enter' && name.trim()) go(1); }}
             onFocus={(e) => applyFocus(e.target)}
             onBlur={(e) => applyBlur(e.target)}
-            style={{ ...FIELD_BASE, marginTop: 14 }}
+            style={FIELD_BASE}
           />
-        </>
+        </StepShell>
       );
     }
     if (step === 1) {
       return (
-        <>
-          <Title>How does {shownName} talk?</Title>
-          <Sub>Only for {shownName}. Your other characters keep their own vibe.</Sub>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', rowGap: 16, columnGap: 28, marginTop: 16 }}>
+        <StepShell
+          accent={false}
+          title={`How does ${shownName} talk?`}
+          subtitle={`Only for ${shownName}. Your other characters keep their own vibe.`}
+        >
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', rowGap: 16, columnGap: 28 }}>
             <Slider value={vibe.formality} onChange={setSlider('formality')} leftLabel="Casual" rightLabel="Formal" caption="Formality" word={vibeWord('formality', vibe.formality)} />
             <Slider value={vibe.humor} onChange={setSlider('humor')} leftLabel="Dry" rightLabel="Playful" caption="Humor" word={vibeWord('humor', vibe.humor)} />
             <Slider value={vibe.directness} onChange={setSlider('directness')} leftLabel="Gentle" rightLabel="Blunt" caption="Directness" word={vibeWord('directness', vibe.directness)} />
             <Slider value={vibe.verbosity} onChange={setSlider('verbosity')} leftLabel="Brief" rightLabel="Thorough" caption="Verbosity" word={vibeWord('verbosity', vibe.verbosity)} />
           </div>
-        </>
+        </StepShell>
       );
     }
     return (
-      <>
-        <Title>Give {shownName} a voice.</Title>
-        <div role="tablist" aria-label="Voice source" style={{ display: 'flex', gap: 2, padding: 3, marginTop: 12, borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--glass-border)' }}>
+      <StepShell
+        accent={false}
+        title={`Give ${shownName} a voice.`}
+        subtitle="Pick one, or clone a voice from a short clip. You will hear it on stage."
+      >
+        <div role="tablist" aria-label="Voice source" style={{ display: 'flex', gap: 2, padding: 3, borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--glass-border)' }}>
           {(['builtin', 'clone'] as const).map((m) => (
             <button
               key={m}
@@ -230,7 +248,7 @@ export function CharacterSetupPanel({
             )}
           </div>
         )}
-      </>
+      </StepShell>
     );
   }, [step, name, initialName, go, shownName, vibe, voiceMode, voiceFrom, previewing, preview, clonePlays, cloner, cloneSlug]);
 
@@ -238,49 +256,50 @@ export function CharacterSetupPanel({
     <motion.div
       role="dialog"
       aria-label={`Set up ${shownName}`}
-      initial={reduce ? { opacity: 0 } : { opacity: 0, y: 18 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={reduce ? { opacity: 0 } : { opacity: 0, y: 18 }}
-      transition={{ duration: 0.42, ease: EASE_OUT_EXPO }}
+      // `layout` so the sheet breathes between steps of different height,
+      // exactly as the wizard does: the name step is one field, the voice step
+      // is a list.
+      layout
+      initial={reduce ? { y: 0, opacity: 0 } : { y: 24, opacity: 0 }}
+      animate={{ y: 0, opacity: 1 }}
+      exit={reduce ? { y: 0, opacity: 0 } : { y: 24, opacity: 0 }}
+      transition={reduce ? { duration: 0 } : PANEL_SPRING}
       style={{
+        // The InputBar's slot, the wizard's surface. App.tsx hides the
+        // InputBar, the glance column, the widget rail and the switcher while
+        // this is mounted, so this sheet IS the app for its duration.
         position: 'absolute',
-        left: '50%',
-        bottom: 'calc(20px + env(safe-area-inset-bottom, 0px))',
-        x: '-50%',
-        width: 'min(460px, calc(100% - 32px))',
-        zIndex: 60,
-        padding: '18px 20px 16px',
-        borderRadius: 18,
-        background: 'rgba(30, 36, 50, 0.9)',
-        border: '1px solid var(--glass-border)',
+        left: 16,
+        right: 16,
+        bottom: 16,
+        zIndex: 30,
+        background: 'var(--glass-bg-panel)',
         backdropFilter: 'var(--glass-blur)',
         WebkitBackdropFilter: 'var(--glass-blur)',
-        boxShadow: '0 24px 60px -18px rgba(0,0,0,0.6)',
+        border: '1px solid var(--glass-border-focus)',
+        borderRadius: 16,
+        boxShadow: [
+          '0 1px 0 rgba(255, 255, 255, 0.06) inset',
+          '0 16px 36px -10px rgba(0, 0, 0, 0.45)',
+        ].join(', '),
+        display: 'flex',
+        flexDirection: 'column',
+        maxHeight: 'calc(100% - 80px)',
+        overflow: 'hidden',
         pointerEvents: 'auto',
+        willChange: 'transform, opacity',
       }}
     >
-      {/* Eyebrow: where you are, in words, plus three quiet progress marks. */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-        <span style={EYEBROW}>New character · {STEPS[step]}</span>
-        <div aria-hidden style={{ display: 'flex', gap: 5 }}>
-          {STEPS.map((s, i) => (
-            <span key={s} style={{
-              width: i === step ? 18 : 6, height: 6, borderRadius: 3,
-              background: i <= step ? 'rgba(255,255,255,0.72)' : 'rgba(255,255,255,0.16)',
-              transition: 'width 260ms var(--ease-out-quart), background 260ms var(--ease-out-quart)',
-            }} />
-          ))}
-        </div>
-      </div>
-
-      <div style={{ position: 'relative', overflow: 'hidden' }}>
-        <AnimatePresence mode="wait" initial={false} custom={dir}>
+      {/* Body scrolls; the footer below stays pinned so the primary action is
+          always reachable, same as the wizard. */}
+      <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '20px 22px 14px' }}>
+        <AnimatePresence mode="popLayout" initial={false} custom={dir}>
           <motion.div
             key={step}
             custom={dir}
-            initial={reduce ? { opacity: 0 } : { opacity: 0, x: dir * 18 }}
+            initial={reduce ? { opacity: 0 } : { opacity: 0, x: dir * 14 }}
             animate={{ opacity: 1, x: 0 }}
-            exit={reduce ? { opacity: 0 } : { opacity: 0, x: dir * -18 }}
+            exit={reduce ? { opacity: 0 } : { opacity: 0, x: dir * -14 }}
             transition={{ duration: 0.22, ease: EASE_OUT_EXPO }}
           >
             {body}
@@ -288,22 +307,61 @@ export function CharacterSetupPanel({
         </AnimatePresence>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 18 }}>
+      <div style={{
+        position: 'relative',
+        flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '12px 16px',
+        borderTop: '1px solid rgba(255, 255, 255, 0.06)',
+      }}>
         {step > 0 && (
           <button type="button" onClick={() => go(step - 1)} style={{ ...PILL, border: 'none', paddingLeft: 6 }}>
             <ArrowLeft size={14} /> Back
           </button>
         )}
         <div style={{ flex: 1 }} />
+        {/* Dots centred on the SHEET, not on the space left over between the
+            buttons: step one has no Back, so a flex-centred row drifts right
+            by exactly the width of a button that is not there. Absolute
+            centring is the only kind that survives the footer's contents
+            changing from step to step. */}
+        <div
+          aria-hidden
+          style={{
+            position: 'absolute',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            display: 'flex', alignItems: 'center', gap: 5,
+            pointerEvents: 'none',
+          }}
+        >
+          {STEPS.map((s, i) => (
+            <motion.span
+              key={s}
+              layout
+              transition={reduce ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 38 }}
+              style={{
+                width: i === step ? 18 : 6,
+                height: 6,
+                borderRadius: 3,
+                background: i === step ? 'var(--accent, #c44444)'
+                  : i < step ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.16)',
+                boxShadow: i === step ? '0 0 8px var(--accent-strong, rgba(196,68,68,0.6))' : 'none',
+              }}
+            />
+          ))}
+        </div>
         {step < STEPS.length - 1 && (
           <button type="button" onClick={finish} style={{ ...PILL, border: 'none', color: 'var(--text-ghost)' }}>
             Skip for now
           </button>
         )}
-        <button
+        <motion.button
           type="button"
           disabled={!canNext || cloner.busy !== 'idle'}
           onClick={() => (step < STEPS.length - 1 ? go(step + 1) : finish())}
+          whileHover={canNext && !reduce ? { y: -1 } : undefined}
+          whileTap={canNext && !reduce ? { y: 0, scale: 0.98 } : undefined}
           style={{
             ...PILL,
             border: 'none',
@@ -315,8 +373,8 @@ export function CharacterSetupPanel({
             cursor: canNext ? 'pointer' : 'default',
           }}
         >
-          {step < STEPS.length - 1 ? 'Next' : `Meet ${shownName}`}
-        </button>
+          {step < STEPS.length - 1 ? 'Continue' : `Dress ${shownName}`}
+        </motion.button>
       </div>
     </motion.div>
   );
@@ -372,14 +430,6 @@ function VoiceRow({
   );
 }
 
-function Title({ children }: { children: ReactNode }) {
-  return <div style={{ fontSize: 19, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--text-primary)', lineHeight: 1.25 }}>{children}</div>;
-}
-
-function Sub({ children }: { children: ReactNode }) {
-  return <div style={{ ...META, fontSize: 12.5, marginTop: 4 }}>{children}</div>;
-}
-
 function Note({ children }: { children: ReactNode }) {
   return (
     <div style={{ ...META, padding: '8px 10px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--glass-border)' }}>
@@ -387,10 +437,6 @@ function Note({ children }: { children: ReactNode }) {
     </div>
   );
 }
-
-const EYEBROW: CSSProperties = {
-  fontSize: 10.5, fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', color: 'var(--text-ghost)',
-};
 
 const META: CSSProperties = { fontSize: 11.5, lineHeight: 1.45, color: 'var(--text-secondary)', letterSpacing: '0.005em' };
 
