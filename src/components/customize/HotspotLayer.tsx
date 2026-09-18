@@ -3,7 +3,7 @@
 // labels share a layoutId with the inspector title, so tapping one flies the
 // name across into the panel that opens.
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { EASE_OUT_EXPO } from './kit';
 import { REGION_LABEL, REGION_SIDE, type Point, type RegionId } from './regions';
@@ -18,6 +18,12 @@ export interface Spot {
 const COLUMN = 150;      // label column width from the window edge
 const GAP = 10;          // leader stops this far from the label
 const HEADER_CLEAR = 122; // labels stay below the name and Save
+// Text vibrating by a pixel reads far worse than a dot doing it, so a label
+// holds its place until the spot has genuinely drifted, then glides. The dot
+// keeps following the part it marks.
+const LABEL_HOLD = 10;      // px the average must drift before the label re-settles
+const BASELINE_ALPHA = 0.08; // per update, so the average spans about a second
+const LABEL_SNAP = 40;       // px jump that means she moved, not breathed
 
 export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
   spots: Spot[];
@@ -31,6 +37,31 @@ export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
   active?: RegionId | null;
 }) {
   const [hot, setHot] = useState<RegionId | null>(null);
+  // Labels park on a SLOW AVERAGE of the anchor, not on the anchor itself. Her
+  // idle breathing swings a spot several px either way, so following it even
+  // gently still slides the text around; averaging cancels the swing, and the
+  // label only re-settles when that average has genuinely moved (a camera
+  // change, a body slider, a different character). Refs, because the layer
+  // already re-renders as the points arrive.
+  const baseline = useRef(new Map<RegionId, { x: number; y: number }>());
+  const settled = useRef(new Map<RegionId, { x: number; y: number }>());
+  const hold = (id: RegionId, x: number, y: number) => {
+    const base = baseline.current.get(id);
+    // A big jump is the camera moving or the level changing, not breathing:
+    // take it whole so the label does not crawl across the screen.
+    const jumped = base && (Math.abs(x - base.x) > LABEL_SNAP || Math.abs(y - base.y) > LABEL_SNAP);
+    const next = base && !jumped
+      ? { x: base.x + (x - base.x) * BASELINE_ALPHA, y: base.y + (y - base.y) * BASELINE_ALPHA }
+      : { x, y };
+    baseline.current.set(id, next);
+
+    const at = settled.current.get(id);
+    if (!at || Math.abs(at.x - next.x) > LABEL_HOLD || Math.abs(at.y - next.y) > LABEL_HOLD) {
+      settled.current.set(id, next);
+      return next;
+    }
+    return at;
+  };
 
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
@@ -39,34 +70,53 @@ export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
         const labelX = side === 'right' ? width - COLUMN : COLUMN;
         // The crown sits under the header in the full-figure shot, so the label
         // drops into a clear band and the leader slopes up to the spot.
-        const labelY = Math.max(s.point.y, HEADER_CLEAR);
-        const lineFrom = side === 'right' ? s.point.x + 12 : labelX + GAP;
-        const lineTo = side === 'right' ? labelX - GAP : s.point.x - 12;
-        const dx = lineTo - lineFrom;
+        const at = hold(s.id, s.point.x, Math.max(s.point.y, HEADER_CLEAR));
+        const labelY = at.y;
+        // The leader runs from the dot (which tracks her) to the label (which
+        // is parked), so it stays honest while the text stays still.
+        const fromX = side === 'right' ? s.point.x + 12 : s.point.x - 12;
+        const toX = side === 'right' ? labelX - GAP : labelX + GAP;
+        const dx = toX - fromX;
         const dy = labelY - s.point.y;
+        const len = Math.hypot(dx, dy);
         const on = hot === s.id || active === s.id;
         const delay = quiet ? 0 : 0.08 + i * 0.06;
         return (
           <div key={s.id} style={quiet ? { opacity: active === s.id ? 1 : 0.5 } : undefined}>
-            {!quiet && dx > 8 && (
-              <motion.span
+            {!quiet && len > 8 && (
+              // Wrapper holds the geometry, the inner span draws itself in:
+              // one transform cannot be shared between CSS and framer-motion.
+              <span
                 aria-hidden
-                initial={{ scaleX: 0, opacity: 0 }}
-                animate={{ scaleX: 1, opacity: on ? 0.9 : 0.42 }}
-                transition={{ duration: 0.5, ease: EASE_OUT_EXPO, delay }}
                 style={{
-                  position: 'absolute', left: lineFrom, top: s.point.y,
-                  width: Math.hypot(dx, dy), height: 1,
-                  background: 'var(--cz-bone, #fafafa)',
-                  transform: `rotate(${(Math.atan2(dy, dx) * 180) / Math.PI}deg)`,
-                  transformOrigin: side === 'right' ? 'left center' : 'right center',
-                  boxShadow: '0 0 6px rgba(0,0,0,0.5)',
+                  position: 'absolute', left: 0, top: 0, height: 1,
+                  transform: `translate(${fromX}px, ${s.point.y}px) rotate(${(Math.atan2(dy, dx) * 180) / Math.PI}deg)`,
+                  transformOrigin: 'left center',
                 }}
-              />
+              >
+                <motion.span
+                  initial={{ scaleX: 0, opacity: 0 }}
+                  animate={{ scaleX: 1, opacity: on ? 0.9 : 0.42 }}
+                  transition={{ duration: 0.5, ease: EASE_OUT_EXPO, delay }}
+                  style={{
+                    display: 'block', width: len, height: 1, transformOrigin: 'left center',
+                    background: 'var(--cz-bone, #fafafa)', boxShadow: '0 0 6px rgba(0,0,0,0.5)',
+                  }}
+                />
+              </span>
             )}
             <SpotButton point={s.point} label={REGION_LABEL[s.id]} on={on} delay={delay}
               onHover={(v) => setHot(v ? s.id : null)} onOpen={() => onOpen(s.id)} />
             {!quiet && (
+            // The wrapper owns the glide, the button owns the entrance: sharing
+            // one transform between a CSS transition and framer-motion means
+            // framer wins and the label snaps.
+            <span style={{
+              position: 'absolute', top: 0, pointerEvents: 'none',
+              transform: `translateY(${labelY - 17}px)`,
+              transition: 'transform 420ms var(--ease-out-quart)',
+              ...(side === 'right' ? { left: labelX } : { right: width - labelX }),
+            }}>
             <motion.button
               type="button"
               onClick={() => onOpen(s.id)}
@@ -77,8 +127,7 @@ export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
               animate={{ opacity: 1, x: 0 }}
               transition={{ duration: 0.45, ease: EASE_OUT_EXPO, delay: delay + 0.12 }}
               style={{
-                position: 'absolute', top: labelY - 17, pointerEvents: 'auto',
-                ...(side === 'right' ? { left: labelX, textAlign: 'left' } : { right: width - labelX, textAlign: 'right' }),
+                pointerEvents: 'auto', textAlign: side === 'right' ? 'left' : 'right',
                 maxWidth: COLUMN - 16, background: 'none', border: 'none', padding: 0, cursor: 'pointer',
                 display: 'flex', flexDirection: 'column', alignItems: side === 'right' ? 'flex-start' : 'flex-end',
                 fontFamily: 'inherit', textShadow: '0 1px 2px rgba(0,0,0,0.7), 0 0 16px rgba(0,0,0,0.45)',
@@ -97,6 +146,7 @@ export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
                 {s.detail}
               </span>
             </motion.button>
+            </span>
             )}
           </div>
         );

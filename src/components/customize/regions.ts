@@ -130,11 +130,17 @@ export function lightPoint(angle: number, w: number, h: number): Point & { behin
 
 export type UeSubscribe = (fn: (raw: string) => void) => () => void;
 
+// Smoothing, in fractions of the viewport (0.0025 is about 1.5 px at 600 wide).
+const DEAD_ZONE = 0.0025;   // below this the point is treated as standing still
+const EASE_ALPHA = 0.35;    // per 100 ms update, so roughly a 250 ms settle
+const SNAP_JUMP = 0.08;     // bigger than this is a real move, not a wobble
+
 /** Live points from Unreal, keyed by region, in pixels for the given box. Empty
  *  until UE sends a hotspots reply; stale after 1.5 s without one so the
  *  fallback map takes over again if the stream stops sending. */
 export function useUeHotspots(subscribe: UeSubscribe | undefined, w: number, h: number): Partial<Record<RegionId, Point>> {
   const [norm, setNorm] = useState<Partial<Record<RegionId, [number, number]>>>({});
+  const smoothRef = useRef<Partial<Record<RegionId, [number, number]>>>({});
   const staleRef = useRef<number | null>(null);
   useEffect(() => {
     if (!subscribe) return undefined;
@@ -148,13 +154,31 @@ export function useUeHotspots(subscribe: UeSubscribe | undefined, w: number, h: 
           next[k as RegionId] = [Number(v[0]), Number(v[1])];
         }
       }
-      setNorm(next);
+      // Idle animation moves her face a few px at a time and the points arrive
+      // 10x a second, so the raw stream vibrates. Drop movement under a pixel
+      // or two outright, ease the rest, and snap on a big jump (a camera cut,
+      // a level change, a character swap) so nothing slides across the screen.
+      const prev = smoothRef.current;
+      const eased: Partial<Record<RegionId, [number, number]>> = {};
+      for (const [k, v] of Object.entries(next)) {
+        if (!v) continue;
+        const key = k as RegionId;
+        const p0 = prev[key];
+        if (!p0) { eased[key] = v; continue; }
+        const dx = v[0] - p0[0];
+        const dy = v[1] - p0[1];
+        if (Math.abs(dx) > SNAP_JUMP || Math.abs(dy) > SNAP_JUMP) { eased[key] = v; continue; }
+        if (Math.hypot(dx, dy) < DEAD_ZONE) { eased[key] = p0; continue; }
+        eased[key] = [p0[0] + dx * EASE_ALPHA, p0[1] + dy * EASE_ALPHA];
+      }
+      smoothRef.current = eased;
+      setNorm(eased);
       if (import.meta.env.DEV) {
         const w2 = window as unknown as { __unclawDev?: Record<string, unknown> };
         w2.__unclawDev = { ...(w2.__unclawDev ?? {}), lastHotspots: { at: Date.now(), points: next } };
       }
       if (staleRef.current != null) window.clearTimeout(staleRef.current);
-      staleRef.current = window.setTimeout(() => setNorm({}), 1500);
+      staleRef.current = window.setTimeout(() => { smoothRef.current = {}; setNorm({}); }, 1500);
     });
     return () => {
       off();
