@@ -443,8 +443,8 @@ export function AddCustomOverlay({
   // the synthesized-depth pipeline runs.
   /** Bring-your-own MetaHuman: the main process shows a folder picker, stages
    *  the export into the UE container, and the identity lands on the generic
-   *  host exactly like a photo-built one. Grooms in the export are staged too;
-   *  the host applies them once the runtime groom path ships. */
+   *  host exactly like a photo-built one. Grooms in the export are staged too
+   *  and the host rebuilds them from strands when the identity applies. */
   const importFromUnreal = useCallback(async (droppedPath?: string) => {
     const api = window.electronAPI?.identity;
     if (!api?.importUnreal) { setImportError('This build cannot import character files.'); return; }
@@ -457,6 +457,9 @@ export function AddCustomOverlay({
         if (res.error !== 'cancelled') setImportError(res.error ?? 'The import failed.');
         return;
       }
+      // Optional pieces the importer left out (a damaged texture, an unknown
+      // groom slot). The character still comes in; this is the only trace.
+      if (res.warnings?.length) console.warn('[unreal-import] imported with warnings:', res.warnings);
       onIdentityReadyRef.current?.({
         sessionId: localId,
         dnaPath: res.dnaPath,

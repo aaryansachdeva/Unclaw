@@ -3254,24 +3254,20 @@ function AppMain() {
     const dressed = opts?.instance
       ?? agentStackRef.current.find((i) => w && i.wardrobe === w)
       ?? currentInstanceRef.current;
-    const wantAgent = (agentIdForWardrobe ?? dressed?.agentId ?? '').toLowerCase();
-    const ownsImportedGrooms = wantAgent.length > 0 && agentStackRef.current.some(
-      (i) => i.agentId?.toLowerCase() === wantAgent && !!i.identity?.groomsDir,
-    );
-    if (dressed?.identity?.groomsDir || ownsImportedGrooms) {
+    // The INSTANCE answers this, never the agent: an import and a photo
+    // character share the `unified` host, so asking "does any instance of this
+    // agent carry grooms" withheld the catalog hair from every photo character
+    // the moment one import existed.
+    const skipGrooms = !!dressed?.identity?.groomsDir;
+    if (skipGrooms) {
       console.log('[dress] imported grooms own this character; catalog hair/brows/lashes withheld',
-        { agent: wantAgent, instance: dressed?.id ?? null, viaAgent: ownsImportedGrooms });
+        { instance: dressed?.id ?? null });
     }
     await dressCharacter({
       wardrobe: w ?? {},
       agentId: agentIdForWardrobe,
       scope: opts?.scope ?? 'full',
-      // Belt and braces: the resolved instance answers this, and if instance
-      // resolution ever fails again, the AGENT still answers it. agentId is the
-      // UE character class, and an imported MetaHuman has its own, so any
-      // instance of that agent carrying a grooms folder means the grooms on
-      // stage came from the import and the catalog must not touch them.
-      skipGrooms: !!dressed?.identity?.groomsDir || ownsImportedGrooms,
+      skipGrooms,
       emit: (payload) => {
         pixelStreaming.emitUIInteraction({
           ...payload,

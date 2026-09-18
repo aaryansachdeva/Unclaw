@@ -227,7 +227,7 @@ interface ElectronAPI {
     /** Bring-your-own MetaHuman: stage a .unclawchar or exporter folder. `path`
      *  = a dropped file; absent = the file dialog. */
     importUnreal: (args: { localId: string; path?: string }) => Promise<{
-      ok: boolean; error?: string; name?: string;
+      ok: boolean; error?: string; name?: string; warnings?: string[];
       dnaPath?: string; jointsPath?: string; tablePath?: string; baseColorPath?: string; normalPath?: string;
       groomsDir?: string; grooms?: string[];
     }>;

@@ -19,6 +19,7 @@ import { ueContainerSavedDir } from './identityInference';
 import * as fs from 'node:fs';
 import { extractZip } from './setupCoordinator';
 import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 
 const SECRETS = '/Users/foton/Documents/Unclaw-Mac/modal-mh/p1/secrets';
 const HYPER3D_KEY_FILE = `${SECRETS}/hyper3d_key.txt`;
@@ -782,46 +783,114 @@ export async function importUnrealPackage(
   return importUnrealExport(localId, folder);
 }
 
+/** The groom slots the host character has a component for. A package naming
+ *  any other slot is from a newer exporter or a hand-edited manifest; Unreal
+ *  would ignore the file, so it is dropped here with a warning instead. */
+const UNREAL_GROOM_SLOTS = new Set(['Hair', 'Eyebrows', 'Eyelashes', 'Mustache', 'Beard']);
+const UNREAL_EXPORT_FORMAT = 1;
+
+type UnrealManifest = {
+  format?: number;
+  name?: string;
+  files?: Record<string, string | null>;
+  grooms?: Record<string, { strand?: string; settings?: string }>;
+  hashes?: Record<string, { sha1?: string; size?: number }>;
+  compat?: { ok?: boolean; errors?: string[] };
+};
+
+/** `rel` resolved under `root`, or null when it points anywhere else. The
+ *  manifest is a file a stranger can hand the user, so its paths are not
+ *  trusted to stay inside the package. */
+function resolveInside(root: string, rel: string | null | undefined): string | null {
+  if (!rel || typeof rel !== 'string') return null;
+  const abs = path.resolve(root, rel);
+  const base = path.resolve(root) + path.sep;
+  return abs.startsWith(base) ? abs : null;
+}
+
+/** Why a packaged file fails the manifest's own record of it, or null when it
+ *  matches (or the manifest recorded nothing, as the early Python exporter did). */
+function hashMismatch(man: UnrealManifest, rel: string, abs: string): string | null {
+  const want = man.hashes?.[rel];
+  if (!want) return null;
+  const size = fs.statSync(abs).size;
+  if (typeof want.size === 'number' && want.size !== size) {
+    return `${rel} is ${size} bytes, the export wrote ${want.size}`;
+  }
+  if (want.sha1) {
+    const got = crypto.createHash('sha1').update(fs.readFileSync(abs)).digest('hex');
+    if (got.toLowerCase() !== want.sha1.toLowerCase()) return `${rel} does not match its checksum`;
+  }
+  return null;
+}
+
 export function importUnrealExport(localId: string, folder: string): {
-  ok: boolean; error?: string; name?: string;
+  ok: boolean; error?: string; name?: string; warnings?: string[];
   dnaPath?: string; jointsPath?: string; tablePath?: string; baseColorPath?: string; normalPath?: string;
   groomsDir?: string; grooms?: string[];
 } {
   const manifestPath = path.join(folder, 'manifest.json');
   if (!fs.existsSync(manifestPath)) return { ok: false, error: 'no manifest.json in that folder' };
-  let man: { name?: string; files?: Record<string, string | null>; grooms?: Record<string, { strand: string; settings: string }> };
+  let man: UnrealManifest;
   try {
     man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   } catch (e) {
     return { ok: false, error: `manifest unreadable: ${e instanceof Error ? e.message : String(e)}` };
   }
+  if (typeof man.format === 'number' && man.format > UNREAL_EXPORT_FORMAT) {
+    return { ok: false, error: `this export is format ${man.format}; update Unclaw to import it` };
+  }
   // A package from the exporter plugin carries its own compatibility verdict.
-  const compat = (man as { compat?: { ok?: boolean; errors?: string[] } }).compat;
-  if (compat && compat.ok === false) {
-    return { ok: false, error: `the exporter reported: ${(compat.errors ?? []).join('; ') || 'incompatible character'}` };
+  if (man.compat && man.compat.ok === false) {
+    return { ok: false, error: `the exporter reported: ${(man.compat.errors ?? []).join('; ') || 'incompatible character'}` };
   }
+
+  const warnings: string[] = [];
   const f = man.files ?? {};
-  if (!f.dna || !fs.existsSync(path.join(folder, f.dna))) return { ok: false, error: 'the export has no head.dna' };
+  // The face is the import: a missing or damaged one fails it. Everything else
+  // is optional, and a damaged optional file is left out rather than sent to
+  // Unreal, where it would fail without a log in a Shipping build.
+  const dna = resolveInside(folder, f.dna);
+  if (!dna || !fs.existsSync(dna)) return { ok: false, error: 'the export has no head.dna' };
+  const dnaBad = hashMismatch(man, f.dna as string, dna);
+  if (dnaBad) return { ok: false, error: `the export is damaged: ${dnaBad}` };
+
+  const optional = (key: 'ujnt' | 'basecolor' | 'normal'): string | undefined => {
+    const rel = f[key];
+    if (!rel) return undefined;
+    const abs = resolveInside(folder, rel);
+    if (!abs || !fs.existsSync(abs)) { warnings.push(`${rel} is missing from the package`); return undefined; }
+    const bad = hashMismatch(man, rel, abs);
+    if (bad) { warnings.push(bad); return undefined; }
+    return abs;
+  };
   const staged = stageForUE(localId, {
-    dna: path.join(folder, f.dna),
-    ujnt: f.ujnt ? path.join(folder, f.ujnt) : undefined,
-    basecolor: f.basecolor ? path.join(folder, f.basecolor) : undefined,
-    normal: f.normal ? path.join(folder, f.normal) : undefined,
+    dna, ujnt: optional('ujnt'), basecolor: optional('basecolor'), normal: optional('normal'),
   });
+
   const dir = path.dirname(staged.dnaPath);
+  const dst = path.join(dir, 'grooms');
+  fs.rmSync(dst, { recursive: true, force: true });
   const grooms: string[] = [];
-  if (man.grooms && Object.keys(man.grooms).length) {
-    const dst = path.join(dir, 'grooms');
-    fs.mkdirSync(dst, { recursive: true });
-    for (const [slot, g] of Object.entries(man.grooms)) {
-      for (const rel of [g.strand, g.settings]) {
-        const src = path.join(folder, rel);
-        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dst, path.basename(src)));
-      }
-      grooms.push(slot);
+  for (const [slot, g] of Object.entries(man.grooms ?? {})) {
+    if (!UNREAL_GROOM_SLOTS.has(slot)) { warnings.push(`groom slot "${slot}" is not one this version knows`); continue; }
+    const strand = resolveInside(folder, g?.strand);
+    const settings = resolveInside(folder, g?.settings);
+    if (!strand || !settings || !fs.existsSync(strand) || !fs.existsSync(settings)) {
+      warnings.push(`${slot} groom is incomplete in the package`);
+      continue;
     }
+    const bad = hashMismatch(man, g.strand as string, strand) ?? hashMismatch(man, g.settings as string, settings);
+    if (bad) { warnings.push(bad); continue; }
+    // Unreal matches a groom to its component by FILE name, so the slot names
+    // the staged files whatever the package called them.
+    fs.mkdirSync(dst, { recursive: true });
+    fs.copyFileSync(strand, path.join(dst, `${slot}.ustrand`));
+    fs.copyFileSync(settings, path.join(dst, `${slot}.json`));
+    grooms.push(slot);
   }
-  return { ok: true, name: man.name, ...staged, groomsDir: path.join(dir, 'grooms'), grooms };
+  if (warnings.length) console.warn('[unreal-import]', man.name ?? localId, warnings);
+  return { ok: true, name: man.name, warnings, ...staged, groomsDir: dst, grooms };
 }
 
 export interface H3DResult {
