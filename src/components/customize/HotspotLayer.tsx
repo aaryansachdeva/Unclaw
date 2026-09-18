@@ -105,7 +105,8 @@ export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
                 />
               </span>
             )}
-            <SpotButton point={s.point} label={REGION_LABEL[s.id]} on={on} delay={delay}
+            <SpotButton point={s.point} label={REGION_LABEL[s.id]} on={hot === s.id}
+              selected={active === s.id} delay={delay}
               onHover={(v) => setHot(v ? s.id : null)} onOpen={() => onOpen(s.id)} />
             {!quiet && (
             // The wrapper owns the glide, the button owns the entrance: sharing
@@ -194,10 +195,12 @@ export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
  *  panel is open. The hit area stays 40 px, so it is easy to click and still
  *  invisible. Discoverability lives in the label and its leader line.
  */
-function SpotButton({ point, label, on, delay, onHover, onOpen }: {
+function SpotButton({ point, label, on, selected, delay, onHover, onOpen }: {
   point: Point;
   label: string;
   on: boolean;
+  /** Its panel is open: the marker wears the ember the panel title wears. */
+  selected?: boolean;
   delay: number;
   onHover: (v: boolean) => void;
   onOpen: () => void;
@@ -224,18 +227,23 @@ function SpotButton({ point, label, on, delay, onHover, onOpen }: {
     >
       <span style={{
         position: 'absolute', left: '50%', top: '50%', width: 18, height: 18, marginLeft: -9, marginTop: -9,
-        borderRadius: '50%', border: '1px solid rgba(255,233,214,0.85)', pointerEvents: 'none',
-        opacity: on ? 1 : 0, transform: on ? 'scale(1)' : 'scale(0.55)',
-        transition: 'opacity 200ms var(--ease-out-quart), transform 240ms var(--ease-out-quart)',
+        borderRadius: '50%', pointerEvents: 'none',
+        border: `1px solid ${selected ? 'var(--accent, #c44444)' : 'rgba(255,233,214,0.85)'}`,
+        boxShadow: selected ? '0 0 12px 1px rgba(196,68,68,0.5)' : 'none',
+        opacity: on || selected ? 1 : 0, transform: on || selected ? 'scale(1)' : 'scale(0.55)',
+        transition: 'opacity 200ms var(--ease-out-quart), transform 240ms var(--ease-out-quart), border-color 200ms var(--ease-out-quart)',
       }} />
       <span style={{
         position: 'absolute', left: '50%', top: '50%', width: 7, height: 7, marginLeft: -3.5, marginTop: -3.5,
-        borderRadius: '50%', background: 'var(--cz-bone, #fafafa)', pointerEvents: 'none',
-        boxShadow: on
-          ? '0 0 0 1px rgba(7,8,11,0.5), 0 0 12px 2px rgba(255,233,214,0.8)'
-          : '0 0 0 1px rgba(7,8,11,0.6), 0 0 6px 1px rgba(0,0,0,0.55)',
-        transform: on ? 'scale(1)' : 'scale(0.62)',
-        transition: 'transform 220ms var(--ease-out-quart), box-shadow 220ms var(--ease-out-quart)',
+        borderRadius: '50%', pointerEvents: 'none',
+        background: selected ? 'var(--accent, #c44444)' : 'var(--cz-bone, #fafafa)',
+        boxShadow: selected
+          ? '0 0 0 1px rgba(7,8,11,0.5), 0 0 14px 3px rgba(196,68,68,0.6)'
+          : on
+            ? '0 0 0 1px rgba(7,8,11,0.5), 0 0 12px 2px rgba(255,233,214,0.8)'
+            : '0 0 0 1px rgba(7,8,11,0.6), 0 0 6px 1px rgba(0,0,0,0.55)',
+        transform: on || selected ? 'scale(1)' : 'scale(0.62)',
+        transition: 'transform 220ms var(--ease-out-quart), box-shadow 220ms var(--ease-out-quart), background 200ms var(--ease-out-quart)',
       }} />
     </motion.button>
     </span>

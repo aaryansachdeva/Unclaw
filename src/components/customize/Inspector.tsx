@@ -1,31 +1,29 @@
 // The inspector: what opens beside her when you tap a spot. It is not a card.
 // A scrim rises out of the room's darkness at the right edge and the options
-// sit on it; the region's name flies in from its spot label (shared layoutId)
-// and a hairline ties the panel back to the part of her it edits.
+// sit on it, and the region's name flies in from its spot label (shared
+// layoutId). It used to draw a hairline back to the part it edits, which meant
+// a line straight across her body; now the spot on her and this title wear the
+// same ember mark instead, which says the same thing over her, not through her.
 
 import { useEffect, useRef, type ReactNode } from 'react';
 import { motion } from 'framer-motion';
 import { Check } from 'lucide-react';
 import type { WardrobeItem } from '../../wardrobe/catalog';
 import { EASE_OUT_EXPO } from './kit';
-import type { Point, RegionId } from './regions';
+import type { RegionId } from './regions';
 
 export const INSPECTOR_W = 212;
 const TOP = 112;
 
 export type ApplyPhase = 'idle' | 'applying' | 'landed';
 
-export function Inspector({ region, title, tabs, status, anchor, width, children }: {
+export function Inspector({ region, title, tabs, status, children }: {
   region: RegionId;
   title: string;
   tabs?: ReactNode;
   status?: ReactNode;
-  /** The spot this panel edits, for the tie line. Null hides the line. */
-  anchor: Point | null;
-  width: number;
   children: ReactNode;
 }) {
-  const left = width - INSPECTOR_W;
   return (
     <>
       <motion.div
@@ -39,23 +37,6 @@ export function Inspector({ region, title, tabs, status, anchor, width, children
           background: 'linear-gradient(to left, rgba(7,8,11,0.9) 0%, rgba(7,8,11,0.8) 58%, rgba(7,8,11,0) 100%)',
         }}
       />
-      {anchor && anchor.x < left - 24 && (
-        <motion.svg
-          aria-hidden
-          width="100%"
-          height="100%"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.5, ease: EASE_OUT_EXPO, delay: 0.7 }}
-          style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: 'visible' }}
-        >
-          <line x1={anchor.x} y1={anchor.y} x2={left + 4} y2={TOP + 16}
-            stroke="rgba(250,250,250,0.5)" strokeWidth={1} />
-          <circle cx={anchor.x} cy={anchor.y} r={4.5} fill="#fafafa" />
-          <circle cx={anchor.x} cy={anchor.y} r={11} fill="none" stroke="rgba(250,250,250,0.35)" />
-        </motion.svg>
-      )}
       <motion.aside
         aria-label={title}
         initial={{ opacity: 0, x: 16 }}
@@ -73,8 +54,16 @@ export function Inspector({ region, title, tabs, status, anchor, width, children
           style={{
             margin: 0, fontSize: 30, lineHeight: '34px', fontWeight: 800, letterSpacing: '-0.04em',
             color: 'var(--text-primary, #fafafa)', whiteSpace: 'nowrap', alignSelf: 'flex-start',
+            display: 'inline-flex', alignItems: 'center', gap: 9,
           }}
         >
+          {/* The spot on her wears this same mark. A shared colour ties the two
+              together without drawing a line across her. */}
+          <span aria-hidden style={{
+            width: 7, height: 7, borderRadius: '50%', flex: '0 0 auto',
+            background: 'var(--accent, #c44444)',
+            boxShadow: '0 0 10px 1px rgba(196,68,68,0.55)',
+          }} />
           {title}
         </motion.h2>
         <div style={{ minHeight: 20, marginTop: 2 }}>{status}</div>

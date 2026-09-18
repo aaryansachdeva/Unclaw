@@ -747,8 +747,6 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             key={`inspect-${region}`}
             region={region}
             title={REGION_LABEL[region]}
-            anchor={(() => { const p = pointFor(region); return p ? markerPoint(region, p, level) : null; })()}
-            width={box.w}
             tabs={region === 'shape'
               ? <WordTabs items={[{ id: 'face' as const, label: 'Shape' }, { id: 'colour' as const, label: 'Colour' }]}
                   value={tuneTab === 'colour' ? 'colour' : 'face'} onChange={setTuneTab} />
@@ -836,8 +834,6 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             key={`inspect-${region}`}
             region={region}
             title={REGION_LABEL[region]}
-            anchor={(() => { const p = pointFor(region); return p ? markerPoint(region, p, level) : null; })()}
-            width={box.w}
             status={
               <ApplyStatus
                 name={preview ?? activeItem?.name ?? ''}
