@@ -35,7 +35,7 @@ import {
   ApplyStatus, Inspector, RelitTile, Sweep, TileGrid, WordTabs, INSPECTOR_W, type ApplyPhase,
 } from './customize/Inspector';
 import {
-  FACE_REGIONS, REGION_CATEGORIES, REGION_LABEL, anchorPoint, framingFor, lightPoint, useUeHotspots,
+  FACE_REGIONS, REGION_CATEGORIES, REGION_LABEL, anchorPoint, framingFor, lightPoint, markerPoint, useUeHotspots,
   type Level, type RegionId, type UeSubscribe,
 } from './customize/regions';
 
@@ -565,7 +565,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
       // Only drop spots that are genuinely off the stage. A crown near the top
       // of frame is real: the label clamps clear of the header by itself.
       if (point && point.y > 24 && point.y < box.h - 24 && point.x > 8 && point.x < box.w - 8) {
-        spots.push({ id: r, point, detail: detailFor(r) });
+        spots.push({ id: r, point: markerPoint(r, point, level), detail: detailFor(r) });
       }
     }
   }
@@ -747,7 +747,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             key={`inspect-${region}`}
             region={region}
             title={REGION_LABEL[region]}
-            anchor={pointFor(region)}
+            anchor={(() => { const p = pointFor(region); return p ? markerPoint(region, p, level) : null; })()}
             width={box.w}
             tabs={region === 'shape'
               ? <WordTabs items={[{ id: 'face' as const, label: 'Shape' }, { id: 'colour' as const, label: 'Colour' }]}
@@ -836,7 +836,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             key={`inspect-${region}`}
             region={region}
             title={REGION_LABEL[region]}
-            anchor={pointFor(region)}
+            anchor={(() => { const p = pointFor(region); return p ? markerPoint(region, p, level) : null; })()}
             width={box.w}
             status={
               <ApplyStatus

@@ -74,7 +74,7 @@ export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
         const labelY = at.y;
         // The leader runs from the dot (which tracks her) to the label (which
         // is parked), so it stays honest while the text stays still.
-        const fromX = side === 'right' ? s.point.x + 12 : s.point.x - 12;
+        const fromX = side === 'right' ? s.point.x + 9 : s.point.x - 9;
         const toX = side === 'right' ? labelX - GAP : labelX + GAP;
         const dx = toX - fromX;
         const dy = labelY - s.point.y;
@@ -185,8 +185,15 @@ export function HotspotLayer({ spots, light, width, onOpen, quiet, active }: {
   );
 }
 
-/** A bone core with a slow breathing ring. The ring is the only idle motion on
- *  the surface, and it stops under reduced motion. */
+/** A point, not a badge.
+ *
+ *  The marker sits ON the thing it names -- her eye, her lip, her brow -- so at
+ *  rest it is a 4 px point with a dark rim to hold contrast against skin, and
+ *  nothing else: no fill to hide the feature, no pulsing ring sweeping over it.
+ *  It grows and gains a ring only while you are aiming at it, or while its
+ *  panel is open. The hit area stays 40 px, so it is easy to click and still
+ *  invisible. Discoverability lives in the label and its leader line.
+ */
 function SpotButton({ point, label, on, delay, onHover, onOpen }: {
   point: Point;
   label: string;
@@ -206,7 +213,7 @@ function SpotButton({ point, label, on, delay, onHover, onOpen }: {
       onClick={onOpen}
       onMouseEnter={() => onHover(true)}
       onMouseLeave={() => onHover(false)}
-      className="cz-focus"
+      className="cz-focus cz-spot"
       initial={{ opacity: 0, scale: 0.4 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.45, ease: EASE_OUT_EXPO, delay }}
@@ -215,14 +222,19 @@ function SpotButton({ point, label, on, delay, onHover, onOpen }: {
         background: 'none', border: 'none', padding: 0, cursor: 'pointer', pointerEvents: 'auto',
       }}
     >
-      <span className="cz-spot-ring" style={{ animationDelay: `${delay}s` }} />
       <span style={{
-        position: 'absolute', left: '50%', top: '50%', width: 10, height: 10, margin: -5, borderRadius: '50%',
-        background: 'var(--cz-bone, #fafafa)',
+        position: 'absolute', left: '50%', top: '50%', width: 18, height: 18, marginLeft: -9, marginTop: -9,
+        borderRadius: '50%', border: '1px solid rgba(255,233,214,0.85)', pointerEvents: 'none',
+        opacity: on ? 1 : 0, transform: on ? 'scale(1)' : 'scale(0.55)',
+        transition: 'opacity 200ms var(--ease-out-quart), transform 240ms var(--ease-out-quart)',
+      }} />
+      <span style={{
+        position: 'absolute', left: '50%', top: '50%', width: 7, height: 7, marginLeft: -3.5, marginTop: -3.5,
+        borderRadius: '50%', background: 'var(--cz-bone, #fafafa)', pointerEvents: 'none',
         boxShadow: on
-          ? '0 0 0 4px rgba(250,250,250,0.22), 0 0 18px 3px rgba(255,233,214,0.75)'
-          : '0 0 0 3px rgba(7,8,11,0.35), 0 0 14px 2px rgba(255,233,214,0.5)',
-        transform: on ? 'scale(1.25)' : 'scale(1)',
+          ? '0 0 0 1px rgba(7,8,11,0.5), 0 0 12px 2px rgba(255,233,214,0.8)'
+          : '0 0 0 1px rgba(7,8,11,0.6), 0 0 6px 1px rgba(0,0,0,0.55)',
+        transform: on ? 'scale(1)' : 'scale(0.62)',
         transition: 'transform 220ms var(--ease-out-quart), box-shadow 220ms var(--ease-out-quart)',
       }} />
     </motion.button>

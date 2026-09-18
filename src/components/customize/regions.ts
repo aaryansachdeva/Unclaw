@@ -114,6 +114,22 @@ const ANCHORS: Record<Framing, Partial<Record<RegionId, Anchor>>> = {
 
 export interface Point { x: number; y: number }
 
+/** In the close-up, a marker sitting on the middle of an eye or a lip hides the
+ *  very thing you are picking. Each one shifts this far toward its own label, so
+ *  it lands at the corner of the feature instead: still unmistakably that part,
+ *  with the leader carrying the eye outward to the name. The whole figure needs
+ *  none of this, where the same marker is a speck on a sweater. */
+export const FACE_MARKER_NUDGE = 15;
+
+/** Where the marker is DRAWN, which is not always where the part is. */
+export function markerPoint(region: RegionId, p: Point, level: Level): Point {
+  // The Face hub lands between her eyes on the whole figure, where her head is
+  // small, so it gets a smaller shift onto the cheek.
+  const by = level === 'face' ? FACE_MARKER_NUDGE : region === 'face' ? 9 : 0;
+  if (by === 0) return p;
+  return { x: p.x + (REGION_SIDE[region] === 'right' ? by : -by), y: p.y };
+}
+
 /** Fallback position of a region in pixels for a box of w x h. */
 export function anchorPoint(region: RegionId, framing: Framing, w: number, h: number): Point | null {
   const a = ANCHORS[framing][region];

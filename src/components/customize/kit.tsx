@@ -157,8 +157,9 @@ export function CustomizeStyles() {
       .cz-scroll { scrollbar-width: none; }
       .cz-scroll::-webkit-scrollbar { display: none; }
 
-      .cz-spot-ring { position: absolute; left: 50%; top: 50%; width: 30px; height: 30px; margin: -15px; border-radius: 50%; border: 1px solid rgba(255,233,214,0.7); animation: cz-breathe 2.8s cubic-bezier(0.16,1,0.3,1) infinite; pointer-events: none; }
-      @keyframes cz-breathe { 0% { transform: scale(0.45); opacity: 0.9; } 70% { opacity: 0; } 100% { transform: scale(1.35); opacity: 0; } }
+      /* The spot marker is deliberately tiny: it sits on her face. Nothing here
+         animates at rest, so nothing sweeps across the feature it marks. */
+      .cz-spot { line-height: 0; }
 
       .cz-relit { position: relative; aspect-ratio: 1 / 1.1; padding: 0; overflow: hidden; border-radius: 14px; cursor: pointer; background: #121419; border: none; font-family: inherit; box-shadow: 0 0 0 1px rgba(255,255,255,0.07) inset; transition: box-shadow 240ms cubic-bezier(0.16,1,0.3,1); }
       .cz-relit img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; filter: grayscale(0.7) contrast(1.32) brightness(0.8); transform: scale(1.06); transition: filter 300ms cubic-bezier(0.16,1,0.3,1), transform 500ms cubic-bezier(0.16,1,0.3,1); }
@@ -183,8 +184,7 @@ export function CustomizeStyles() {
       @keyframes cz-sweep { 0% { opacity: 1; background-position: 130% 0; } 85% { opacity: 1; } 100% { opacity: 0; background-position: -30% 0; } }
 
       @media (prefers-reduced-motion: reduce) {
-        .cz-orbit-pulse, .cz-spot-ring, .cz-sweep, .cz-relit.applying > img { animation: none !important; }
-        .cz-spot-ring { opacity: 0.5; transform: scale(1); }
+        .cz-orbit-pulse, .cz-sweep, .cz-relit.applying > img { animation: none !important; }
       }
       @keyframes cz-pulse { 0% { transform: scale(1); opacity: 0.55; } 100% { transform: scale(2.2); opacity: 0; } }
     `}</style>
