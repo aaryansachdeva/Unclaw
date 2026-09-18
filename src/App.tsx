@@ -1281,7 +1281,7 @@ function AppMain() {
     ((
       w: WardrobeSettings | null | undefined,
       agentId?: string | null,
-      opts?: { scope?: DressScope; epoch?: number },
+      opts?: { scope?: DressScope; epoch?: number; instance?: AgentInstance | null },
     ) => Promise<void>) | null
   >(null);
   // The cross-class swap in flight: set when we emit agentSwitch (the scene
@@ -3220,7 +3220,7 @@ function AppMain() {
   const applyInstanceWardrobe = useCallback(async (
     w: WardrobeSettings | null | undefined,
     agentIdForWardrobe?: string | null,
-    opts?: { scope?: DressScope; epoch?: number },
+    opts?: { scope?: DressScope; epoch?: number; instance?: AgentInstance | null },
   ) => {
     if (!pixelStreaming) return;
     // An instance with NO saved wardrobe still dresses: buildDressPayloads sends
@@ -3228,14 +3228,40 @@ function AppMain() {
     // switch instead of letting the previous character's outfit bleed through.
     const epoch = opts?.epoch ?? ++dressEpochRef.current;
     const isAlive = () => dressEpochRef.current === epoch;
-    // The instance being dressed: the one whose wardrobe object this is, else
-    // the one on stage. An imported MetaHuman keeps its own grooms.
-    const dressed = agentStackRef.current.find((i) => w && i.wardrobe === w) ?? currentInstanceRef.current;
+    // The instance being dressed, and with it whether to leave the grooms
+    // alone. The CALLER is the authority: every call site has the instance in
+    // hand. Deriving it here by wardrobe OBJECT IDENTITY failed in exactly the
+    // cases that matter, and failed silently:
+    //   * a freshly imported MetaHuman has no saved wardrobe, so `w` is
+    //     undefined and the find can never match;
+    //   * the cloud-restore path passes roster objects that are not the ones
+    //     in the stack, so identity comparison always misses;
+    //   * during Add-character `currentInstance` is null (onAddSlot).
+    // Each fell through to whatever was on stage, and an instance without
+    // `identity.groomsDir` means skipGrooms false, which sends the CATALOG
+    // hair index right after applyIdentity just applied the character's own
+    // groom. That reads as "the import came in without its hair".
+    const dressed = opts?.instance
+      ?? agentStackRef.current.find((i) => w && i.wardrobe === w)
+      ?? currentInstanceRef.current;
+    const wantAgent = (agentIdForWardrobe ?? dressed?.agentId ?? '').toLowerCase();
+    const ownsImportedGrooms = wantAgent.length > 0 && agentStackRef.current.some(
+      (i) => i.agentId?.toLowerCase() === wantAgent && !!i.identity?.groomsDir,
+    );
+    if (dressed?.identity?.groomsDir || ownsImportedGrooms) {
+      console.log('[dress] imported grooms own this character; catalog hair/brows/lashes withheld',
+        { agent: wantAgent, instance: dressed?.id ?? null, viaAgent: ownsImportedGrooms });
+    }
     await dressCharacter({
       wardrobe: w ?? {},
       agentId: agentIdForWardrobe,
       scope: opts?.scope ?? 'full',
-      skipGrooms: !!dressed?.identity?.groomsDir,
+      // Belt and braces: the resolved instance answers this, and if instance
+      // resolution ever fails again, the AGENT still answers it. agentId is the
+      // UE character class, and an imported MetaHuman has its own, so any
+      // instance of that agent carrying a grooms folder means the grooms on
+      // stage came from the import and the catalog must not touch them.
+      skipGrooms: !!dressed?.identity?.groomsDir || ownsImportedGrooms,
       emit: (payload) => {
         pixelStreaming.emitUIInteraction({
           ...payload,
@@ -3799,7 +3825,9 @@ function AppMain() {
       // race that ate hair descriptors on switch.
       void applyInstanceWardrobe(
         inst?.wardrobe, inst?.agentId,
-        continuesSwitch ? { scope: 'outfit', epoch: pending.epoch } : undefined,
+        continuesSwitch
+          ? { scope: 'outfit', epoch: pending.epoch, instance: inst }
+          : { instance: inst },
       ).then(() => {
         emitEyeColorRef.current?.(inst?.wardrobe);
         scheduleAppearanceResendRef.current?.(inst?.wardrobe);
@@ -3978,7 +4006,7 @@ function AppMain() {
         emitBodyBlendsRef.current?.(inst);
         // Colours AFTER the outfit, as at characterReady: the chain re-applies
         // the groom, and a colour sent ahead of that leaves with the old groom.
-        void applyInstanceWardrobe(inst.wardrobe, inst.agentId).then(() => {
+        void applyInstanceWardrobe(inst.wardrobe, inst.agentId, { instance: inst }).then(() => {
           emitEyeColorRef.current?.(inst.wardrobe);
           scheduleAppearanceResendRef.current?.(inst.wardrobe);
         });
@@ -4202,7 +4230,7 @@ function AppMain() {
           if (live) {
             emitApplyIdentityRef.current?.(live);
             emitBodyBlendsRef.current?.(live);
-            void Promise.resolve(applyInstanceWardrobeRef.current?.(live.wardrobe, live.agentId))
+            void Promise.resolve(applyInstanceWardrobeRef.current?.(live.wardrobe, live.agentId, { instance: live }))
               .then(() => {
                 emitEyeColorRef.current?.(live.wardrobe);
                 scheduleAppearanceResendRef.current?.(live.wardrobe);
