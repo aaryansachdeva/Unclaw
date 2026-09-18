@@ -20,7 +20,7 @@ import { StreamEffects } from './components/StreamEffects';
 import { dressCharacter, type DressScope } from './wardrobe/dressCharacter';
 import { wardrobeDefaultsFor } from './wardrobe/catalog';
 import { cameraCustomize, cameraCustomizeFace, cameraSetup, cameraPanelShift, cameraForMode, cameraDefaultFor, type CameraMode } from './wardrobe/camera';
-import { blendAxesForCamera } from './wardrobe/camera';
+import { resolveBlendAxes } from './wardrobe/camera';
 import { PulseGrid } from './components/PulseGrid';
 import { hexToRgb01, round3 } from './components/ColorPickerPanel';
 import { useEnvironment } from './hooks/useEnvironment';
@@ -3314,35 +3314,29 @@ function AppMain() {
   // identity so the body matches the face. Harmless on non-unified hosts: the
   // subsystem logs "no BodyBlendComponent" and returns false.
   const emitBodyBlends = useCallback((inst?: AgentInstance | null) => {
-    const build = inst?.identity?.build;
-    const gender = inst?.identity?.gender;
-    if ((!build && !gender) || !pixelStreaming) return;
-
+    if (!pixelStreaming) return;
     // The unified rig exposes 8 body axes and 16 face axes as <Axis>_Lo/_Hi
     // morph pairs. BodyBlendComponent dispatches a single descriptor to BOTH
     // meshes (it picks FaceData or BodyData per component), so the face follows
     // the body automatically and a heavier or more feminine body cannot end up
     // wearing a head that does not match it.
-    // Shared with the camera correction, deliberately: the framing is computed
-    // from these same numbers, so two copies would silently drift and the face
-    // would sit off-centre for reasons nobody could find.
     //
-    // Every value is mid-range, never near +/-1. A wrong guess about a stranger
-    // should read as "close enough" rather than as a caricature, and the
-    // extremes belong to the user's sliders.
-    const axes = blendAxesForCamera(gender, build);
-
-    // HEIGHT IS NEVER SENT, on purpose. A Height axis exists on both meshes, but
-    // it is the user's slider: including it here would silently overwrite their
-    // choice on every spawn and every warm reconnect, which is the same re-apply
-    // trap that made the backdrop revert.
+    // One resolver feeds this, the camera and the Customize sliders. Unreal
+    // applies exactly what it is given and reads every omitted axis as 0, so
+    // three separate answers meant whichever spoke last silently reset the
+    // others: the photo read used to be sent alone on every spawn, which wiped
+    // any sliders the user had saved.
+    const axes = resolveBlendAxes({
+      gender: inst?.identity?.gender, build: inst?.identity?.build,
+      bodyAxes: inst?.identity?.bodyAxes, saved: inst?.wardrobe?.blendAxes,
+    });
     if (Object.keys(axes).length === 0) return;
     pixelStreaming.emitUIInteraction({
       EventType: 'setBlendsUnified',
       axes,
       Timestamp: new Date().toISOString(),
     });
-    console.log('[identity] setBlendsUnified sent for', inst?.agentId, { gender, build, axes });
+    console.log('[identity] setBlendsUnified sent for', inst?.agentId, axes);
   }, [pixelStreaming]);
 
   const emitBodyBlendsRef = useRef(emitBodyBlends);
@@ -3573,9 +3567,10 @@ function AppMain() {
     // Body shape moves the head: MascFem alone shifts it 12.2 cm end to end, and
     // the build axes add several more. Without this the face drifts up or down
     // in frame depending on how the character is built.
-    const axes = blendAxesForCamera(
-      currentInstance?.identity?.gender, currentInstance?.identity?.build,
-    );
+    const axes = resolveBlendAxes({
+      gender: currentInstance?.identity?.gender, build: currentInstance?.identity?.build,
+      bodyAxes: currentInstance?.identity?.bodyAxes, saved: currentInstance?.wardrobe?.blendAxes,
+    });
     const [cx, y, z] = customizationActive
       ? (customizeCloseUp ? cameraCustomizeFace(aid, axes) : cameraCustomize(aid, axes))
       : setupActive
@@ -3595,7 +3590,8 @@ function AppMain() {
     });
   }, [pixelStreaming, activeAgentId, customizationActive, customizeCloseUp, customizePanelPx, cameraMode,
       setupActive,
-      currentInstance?.identity?.gender, currentInstance?.identity?.build]);
+      currentInstance?.identity?.gender, currentInstance?.identity?.build,
+      currentInstance?.identity?.bodyAxes, currentInstance?.wardrobe?.blendAxes]);
   const applyCameraRef = useRef(applyCamera);
   applyCameraRef.current = applyCamera;
 
@@ -4935,6 +4931,13 @@ function AppMain() {
             }}
             initial={{
               ...(currentInstance?.wardrobe ?? {}),
+              // The sliders open on the body she is actually wearing (an import's
+              // solved body, a photo's read), not on zero: they save ALL axes at
+              // once, so starting from zero would flatten her on the first drag.
+              blendAxes: resolveBlendAxes({
+                gender: currentInstance?.identity?.gender, build: currentInstance?.identity?.build,
+                bodyAxes: currentInstance?.identity?.bodyAxes, saved: currentInstance?.wardrobe?.blendAxes,
+              }),
               // Environment (backdrop + light + effect) is GLOBAL: overlay the
               // current globals so the pane opens on them, not on any stale
               // per-instance copy left in the wardrobe blob.
@@ -4993,7 +4996,7 @@ function AppMain() {
             key="add-custom"
             authToken={authToken ?? null}
             onClose={() => setAddCustomOpen(false)}
-            onIdentityReady={({ dnaPath, blobPath, baseColorPath, jointsPath, normalPath, groomsDir, grooming, unrealName }) => {
+            onIdentityReady={({ dnaPath, blobPath, baseColorPath, jointsPath, normalPath, groomsDir, bodyAxes, grooming, unrealName }) => {
               // The local pipeline produced the identity artifacts: create the
               // custom instance on the generic host and switch to it. The
               // characterReady handler sends applyIdentity once UE reports the
@@ -5001,7 +5004,7 @@ function AppMain() {
               // lands the user in the customization UI to name + style it.
               const id = addInstance(UNIFIED_AGENT.agentId);
               setInstanceIdentity(id, {
-                dnaPath, blobPath, baseColorPath, jointsPath, normalPath, groomsDir,
+                dnaPath, blobPath, baseColorPath, jointsPath, normalPath, groomsDir, bodyAxes,
                 gender: grooming?.gender, build: grooming?.build,
               });
               // Vision-picked grooming becomes the instance's starting

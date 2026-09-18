@@ -193,9 +193,25 @@ export function cameraForMode(
   return [d[0] + (f[0] - d[0]) * t, d[1] + (f[1] - d[1]) * t, d[2] + (f[2] - d[2]) * t + WAIST_RAISE];
 }
 
-/** The axes the photo read produces, in one place so the camera correction and
- *  the `setBlendsUnified` descriptor can never drift apart. Height is absent on
- *  purpose: it belongs to the user's slider and is never sent automatically. */
+/** The axes the photo read produces. Height is absent on purpose: a photo says
+ *  nothing about it. Callers want `resolveBlendAxes`, which layers the rest. */
+/** The body and face sliders a character wears right now, from one place so
+ *  the descriptor sent to Unreal, the camera and the Customize sliders all
+ *  agree.
+ *
+ *  A saved snapshot wins outright: Customize saves ALL axes at once, starting
+ *  from whatever this returned, so it already contains everything below it.
+ *  Without one, the character's own body (an Unreal import's solved sliders)
+ *  overrides the coarse photo read axis by axis. */
+export function resolveBlendAxes(src: {
+  gender?: string | null; build?: string | null;
+  bodyAxes?: Record<string, number> | null;
+  saved?: Record<string, number> | null;
+}): Record<string, number> {
+  if (src.saved && Object.keys(src.saved).length) return { ...src.saved };
+  return { ...blendAxesForCamera(src.gender, src.build), ...(src.bodyAxes ?? {}) };
+}
+
 export function blendAxesForCamera(
   gender?: string | null, build?: string | null,
 ): Record<string, number> {

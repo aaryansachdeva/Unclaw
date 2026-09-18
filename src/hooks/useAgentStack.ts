@@ -67,6 +67,10 @@ export interface AgentInstance {
     /** Folder of exported grooms (<slot>.ustrand + .json) staged beside the
      *  .dna by an Unreal import; the host rebuilds and binds them at runtime. */
     groomsDir?: string;
+    /** Body slider values solved by the Unreal exporter from the character's
+     *  own body, so the host body arrives at its height and build. The
+     *  starting point for the Customize sliders, not a lock on them. */
+    bodyAxes?: Record<string, number>;
   };
 }
 

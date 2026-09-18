@@ -788,6 +788,11 @@ export async function importUnrealPackage(
  *  would ignore the file, so it is dropped here with a warning instead. */
 const UNREAL_GROOM_SLOTS = new Set(['Hair', 'Eyebrows', 'Eyelashes', 'Mustache', 'Beard']);
 const UNREAL_EXPORT_FORMAT = 1;
+/** The body sliders an export may set, and how far. The exporter solves these
+ *  from the character's body; anything else in the block is ignored, and the
+ *  clamp is the range the clothes are known to fit. */
+const UNREAL_BODY_AXES = new Set(['mascFem', 'height', 'fat', 'musc', 'shoulder', 'chest', 'waistHip', 'neck']);
+const UNREAL_BODY_AXIS_LIMIT = 1.5;
 
 type UnrealManifest = {
   format?: number;
@@ -795,6 +800,7 @@ type UnrealManifest = {
   files?: Record<string, string | null>;
   grooms?: Record<string, { strand?: string; settings?: string }>;
   hashes?: Record<string, { sha1?: string; size?: number }>;
+  body?: { axes?: Record<string, unknown>; fit?: { medianCm?: number } };
   compat?: { ok?: boolean; errors?: string[] };
 };
 
@@ -827,7 +833,7 @@ function hashMismatch(man: UnrealManifest, rel: string, abs: string): string | n
 export function importUnrealExport(localId: string, folder: string): {
   ok: boolean; error?: string; name?: string; warnings?: string[];
   dnaPath?: string; jointsPath?: string; tablePath?: string; baseColorPath?: string; normalPath?: string;
-  groomsDir?: string; grooms?: string[];
+  groomsDir?: string; grooms?: string[]; bodyAxes?: Record<string, number>;
 } {
   const manifestPath = path.join(folder, 'manifest.json');
   if (!fs.existsSync(manifestPath)) return { ok: false, error: 'no manifest.json in that folder' };
@@ -889,8 +895,19 @@ export function importUnrealExport(localId: string, folder: string): {
     fs.copyFileSync(settings, path.join(dst, `${slot}.json`));
     grooms.push(slot);
   }
+  const bodyAxes: Record<string, number> = {};
+  for (const [axis, value] of Object.entries(man.body?.axes ?? {})) {
+    if (!UNREAL_BODY_AXES.has(axis) || typeof value !== 'number' || !Number.isFinite(value)) continue;
+    bodyAxes[axis] = Math.max(-UNREAL_BODY_AXIS_LIMIT, Math.min(UNREAL_BODY_AXIS_LIMIT, value));
+  }
+  if (f.bodyDna && !Object.keys(bodyAxes).length) {
+    warnings.push('this export has no solved body sliders (exporter older than 0.3); the character keeps the host body');
+  }
   if (warnings.length) console.warn('[unreal-import]', man.name ?? localId, warnings);
-  return { ok: true, name: man.name, warnings, ...staged, groomsDir: dst, grooms };
+  return {
+    ok: true, name: man.name, warnings, ...staged, groomsDir: dst, grooms,
+    ...(Object.keys(bodyAxes).length ? { bodyAxes } : {}),
+  };
 }
 
 export interface H3DResult {

@@ -746,7 +746,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     importUnreal: (args: { localId: string; path?: string }): Promise<{
       ok: boolean; error?: string; name?: string; warnings?: string[];
       dnaPath?: string; jointsPath?: string; tablePath?: string; baseColorPath?: string; normalPath?: string;
-      groomsDir?: string; grooms?: string[];
+      groomsDir?: string; grooms?: string[]; bodyAxes?: Record<string, number>;
     }> => ipcRenderer.invoke('identity:import-unreal', args),
     /** Real filesystem path of a File from a drop (File.path is gone in Electron 32+). */
     pathForFile: (file: File): string => {

@@ -229,7 +229,7 @@ interface ElectronAPI {
     importUnreal: (args: { localId: string; path?: string }) => Promise<{
       ok: boolean; error?: string; name?: string; warnings?: string[];
       dnaPath?: string; jointsPath?: string; tablePath?: string; baseColorPath?: string; normalPath?: string;
-      groomsDir?: string; grooms?: string[];
+      groomsDir?: string; grooms?: string[]; bodyAxes?: Record<string, number>;
     }>;
     /** Real filesystem path of a dropped File. */
     pathForFile?: (file: File) => string;

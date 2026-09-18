@@ -409,6 +409,8 @@ export function AddCustomOverlay({
     normalPath?: string;
     /** Exported grooms folder, Unreal import only. */
     groomsDir?: string;
+    /** Body sliders solved by the exporter, Unreal import only. */
+    bodyAxes?: Record<string, number>;
     /** Unreal import only: the export's character name (manifest), which
      *  starts the name / personality / voice setup. */
     unrealName?: string;
@@ -467,6 +469,7 @@ export function AddCustomOverlay({
         baseColorPath: res.baseColorPath,
         normalPath: res.normalPath,
         groomsDir: res.grooms && res.grooms.length ? res.groomsDir : undefined,
+        bodyAxes: res.bodyAxes,
         unrealName: res.name || 'New character',
         blobPath: '',
       });
