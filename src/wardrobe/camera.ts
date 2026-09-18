@@ -123,17 +123,18 @@ export function cameraCustomize(agentId?: string | null, axes?: BlendAxes): Came
  *  chest close-up with the head out of shot.
  *
  *  Two moves. Pulling back (y up) fits head and shoulders into what is left.
- *  The camera then sits BELOW its chat height (z down), which LIFTS the subject
- *  in frame, because the camera looks level.
+ *  The height is the counterintuitive one: the camera looks level, so RAISING
+ *  it drops the subject in frame and LOWERING it lifts them. Both values were
+ *  tuned against the running app, one screenshot at a time.
  *
- *  Tuned against the running app rather than reasoned about, and all three
- *  points were needed: z-26 with no pull-back crops the head off the top
- *  entirely; z+3 drops the face well under the centre of the visible stage and
- *  leaves a dead gap between the greeting and the head; z-9 with the pull-back
- *  puts the head on that centre with the shoulders carrying down to the
- *  sheet. */
-const SETUP_PULLBACK = 30;
-const SETUP_RAISE = -9;
+ *    z-26, no pull-back : head cropped off the top entirely
+ *    z+3,  pull-back 34 : face far below centre, dead gap under the greeting
+ *    z-18, pull-back 22 : hair colliding with the greeting text
+ *    z-6,  pull-back 22 : head clear of the greeting, face upper-middle,
+ *                         shoulders anchoring into the sheet
+ */
+const SETUP_PULLBACK = 22;
+const SETUP_RAISE = -6;
 
 export function cameraSetup(base: CameraLoc): CameraLoc {
   return [base[0], base[1] + SETUP_PULLBACK, base[2] + SETUP_RAISE];
