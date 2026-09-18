@@ -148,6 +148,10 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   // its dependency array, which is evaluated during render, so a later const
   // would be a temporal dead zone at runtime even though tsc stays quiet.
   const [tuneTab, setTuneTab] = useState<'body' | 'face' | 'colour'>('body');
+  // The eye menu holds three different things: the colour of the eyes, the
+  // lashes on them and the brows over them. Colour is not a wardrobe category,
+  // so it gets its own tab value alongside the two that are.
+  const [eyeTab, setEyeTab] = useState<'colour' | CustomCategory>('colour');
   const [sceneTab, setSceneTab] = useState<SceneTab>('light');
 
   const openRegion = useCallback((r: RegionId | null) => {
@@ -167,6 +171,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     const list = regionPanes(r);
     const remembered = lastPaneRef.current[r];
     setPane(remembered && list.includes(remembered) ? remembered : (list[0] ?? 'scene'));
+    if (r === 'eyes') setEyeTab('colour');
     if (r === 'shape') setTuneTab((t) => (t === 'body' ? 'face' : t));
     if (r === 'body') setTuneTab('body');
   }, [region, pane, regionPanes, faceRegions]);
@@ -277,6 +282,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   }, [onEffect]);
 
   const isGarment = !!region && pane !== 'body' && pane !== 'scene';
+  // Colour has no tiles, but the panel is still the eye menu.
   const items: WardrobeItem[] = isGarment ? catItems(pane) : [];
   const selected = isGarment ? value(pane) : 0;
 
@@ -537,8 +543,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
     switch (r) {
       case 'face': return [nameOf('hair'), ...(wardrobe.categories.includes('beard') && value('beard') !== GROOM_NONE_INDEX ? [nameOf('beard')] : [])].filter(Boolean).join(', ') || 'Hair and grooms';
       case 'hair': return nameOf('hair');
-      case 'brows': return nameOf('eyebrow');
-      case 'lashes': return nameOf('eyelash');
+      case 'eyes': return EYE_COLORS.find((e) => e.iris === eyeColor?.iris)?.label ?? 'Colour, lashes, brows';
       case 'beard': return groomName('beard');
       case 'mustache': return groomName('mustache');
       case 'shape': return 'Shape and colour';
@@ -556,6 +561,8 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
   const lp = lightPoint(lightingAngle, box.w, box.h);
 
   const facialPane = pane === 'beard' || pane === 'mustache';
+  const eyesOnColour = region === 'eyes' && eyeTab === 'colour';
+  const eyeColorName = EYE_COLORS.find((e) => e.iris === eyeColor?.iris)?.label ?? 'As read';
   const regionTabs = region && region !== 'scene' && region !== 'face' && region !== 'body'
     ? regionPanes(region).map((c) => ({ id: c, label: PANE_LABELS[c] }))
     : [];
@@ -729,24 +736,12 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             region={region}
             title={REGION_LABEL[region]}
             tabs={region === 'shape'
-              ? <WordTabs items={[{ id: 'face' as const, label: 'Shape' }, { id: 'colour' as const, label: 'Colour' }]}
+              ? <WordTabs items={[{ id: 'face' as const, label: 'Shape' }, { id: 'colour' as const, label: 'Skin' }]}
                   value={tuneTab === 'colour' ? 'colour' : 'face'} onChange={setTuneTab} />
               : undefined}
           >
             {region === 'shape' && tuneTab === 'colour' ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-                <SwatchRow
-                  label="Hair"
-                  items={HAIR_COLORS.map((h, i) => ({ key: String(i), hex: h.hex, name: h.label }))}
-                  activeKey={hairColor?.preset !== undefined ? String(hairColor.preset) : null}
-                  onPick={(k) => pickHair(Number(k))}
-                />
-                <SwatchRow
-                  label="Eyes"
-                  items={EYE_COLORS.map((e) => ({ key: e.iris, hex: e.hex, name: e.label }))}
-                  activeKey={eyeColor?.iris ?? null}
-                  onPick={pickEyes}
-                />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-primary)' }}>Skin</span>
                   {(skins?.length ?? 0) > 1 && (
@@ -816,22 +811,44 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
             region={region}
             title={REGION_LABEL[region]}
             status={
-              <ApplyStatus
-                name={preview ?? activeItem?.name ?? ''}
-                position={preview ? 'Preview' : position}
-                phase={preview ? 'idle' : apply.cat === pane ? apply.phase : 'idle'}
-                who={whoName}
-              />
+              eyesOnColour ? (
+                <ApplyStatus name={eyeColorName} phase="idle" who={whoName} />
+              ) : (
+                <ApplyStatus
+                  name={preview ?? activeItem?.name ?? ''}
+                  position={preview ? 'Preview' : position}
+                  phase={preview ? 'idle' : apply.cat === pane ? apply.phase : 'idle'}
+                  who={whoName}
+                />
+              )
             }
-            tabs={<WordTabs items={regionTabs} value={pane} onChange={(p) => setPane(p)} />}
+            tabs={region === 'eyes'
+              ? (
+                <WordTabs<'colour' | CustomCategory>
+                  items={[{ id: 'colour' as const, label: 'Colour' },
+                    ...regionPanes('eyes').map((c) => ({ id: c as CustomCategory, label: PANE_LABELS[c] }))]}
+                  value={eyeTab}
+                  onChange={(t) => { setEyeTab(t); if (t !== 'colour') setPane(t); }}
+                />
+              )
+              : <WordTabs items={regionTabs} value={pane} onChange={(p) => setPane(p)} />}
           >
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {(region === 'hair' || region === 'brows') && unified && (
+              {region === 'hair' && unified && (
                 <SwatchRow
                   label="Colour"
                   items={HAIR_COLORS.map((h, i) => ({ key: String(i), hex: h.hex, name: h.label }))}
                   activeKey={hairColor?.preset !== undefined ? String(hairColor.preset) : null}
                   onPick={(k) => pickHair(Number(k))}
+                />
+              )}
+              {/* The eye menu opens on colour; lashes and brows are its tabs. */}
+              {region === 'eyes' && eyeTab === 'colour' && (
+                <SwatchRow
+                  label="Eye colour"
+                  items={EYE_COLORS.map((e) => ({ key: e.iris, hex: e.hex, name: e.label }))}
+                  activeKey={eyeColor?.iris ?? null}
+                  onPick={pickEyes}
                 />
               )}
               {colourable && (
@@ -888,6 +905,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
                   </AnimatePresence>
                 </div>
               )}
+              {!eyesOnColour && (
               <TileGrid label={PANE_LABELS[pane]}>
                 {items.map((it) => (
                   <RelitTile
@@ -900,6 +918,7 @@ export function CustomWardrobe({ agentId, initial, onEmit, onSave, onCancel, onE
                   />
                 ))}
               </TileGrid>
+              )}
               {facialPane && items.length <= 1 && (
                 <span style={{ fontSize: 12, color: 'var(--text-ghost)' }}>No styles for this character.</span>
               )}

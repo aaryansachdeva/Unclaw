@@ -21,7 +21,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { CustomCategory } from '../../wardrobe/catalog';
 
 export type RegionId =
-  | 'face' | 'hair' | 'brows' | 'lashes' | 'beard' | 'mustache' | 'shape'
+  | 'face' | 'hair' | 'eyes' | 'beard' | 'mustache' | 'shape'
   | 'top' | 'legs' | 'shoes' | 'body' | 'scene';
 
 /** Which set of spots is on screen. */
@@ -34,8 +34,9 @@ export type Framing = 'body' | 'face';
 export const REGION_CATEGORIES: Record<RegionId, CustomCategory[]> = {
   face: [],
   hair: ['hair'],
-  brows: ['eyebrow'],
-  lashes: ['eyelash'],
+  // One menu for the eyes: their colour, the lashes on them and the brows over
+  // them. Three spots crowding one feature was three ways to say "eyes".
+  eyes: ['eyelash', 'eyebrow'],
   beard: ['beard'],
   mustache: ['mustache'],
   shape: [],
@@ -47,13 +48,12 @@ export const REGION_CATEGORIES: Record<RegionId, CustomCategory[]> = {
 };
 
 /** The face level, in the order they are laid out. */
-export const FACE_REGIONS: RegionId[] = ['hair', 'brows', 'lashes', 'mustache', 'beard', 'shape'];
+export const FACE_REGIONS: RegionId[] = ['hair', 'eyes', 'mustache', 'beard', 'shape'];
 
 export const REGION_LABEL: Record<RegionId, string> = {
   face: 'Face',
   hair: 'Hair',
-  brows: 'Brows',
-  lashes: 'Lashes',
+  eyes: 'Eyes',
   beard: 'Beard',
   mustache: 'Mustache',
   shape: 'Shape',
@@ -78,8 +78,7 @@ export const REGION_SIDE: Record<RegionId, 'left' | 'right'> = {
   scene: 'left',
   // Face level.
   hair: 'right',
-  brows: 'left',
-  lashes: 'right',
+  eyes: 'right',
   mustache: 'left',
   beard: 'right',
   shape: 'left',
@@ -104,8 +103,7 @@ const ANCHORS: Record<Framing, Partial<Record<RegionId, Anchor>>> = {
   },
   face: {
     hair: [-0.02, -0.26],
-    brows: [-0.09, -0.07],
-    lashes: [0.08, -0.03],
+    eyes: [0.08, -0.03],
     mustache: [-0.06, 0.09],
     beard: [0.02, 0.17],
     shape: [0.12, 0.02],
@@ -143,6 +141,10 @@ export function lightPoint(angle: number, w: number, h: number): Point & { behin
   const a = (angle * Math.PI) / 180;
   return { x: Math.max(56, 0.12 * w) + Math.sin(a) * 14, y: h - Math.max(150, 0.2 * w + 40), behind: Math.cos(a) < 0 };
 }
+
+/** Unreal reports anatomy, the app groups it. Eyes is our grouping, so it takes
+ *  the point Unreal sends for the lashes: the eye itself. */
+const UE_KEY: Partial<Record<RegionId, string>> = { eyes: 'lashes' };
 
 export type UeSubscribe = (fn: (raw: string) => void) => () => void;
 
@@ -204,6 +206,10 @@ export function useUeHotspots(subscribe: UeSubscribe | undefined, w: number, h: 
   const out: Partial<Record<RegionId, Point>> = {};
   for (const [k, v] of Object.entries(norm)) {
     if (v) out[k as RegionId] = { x: v[0] * w, y: v[1] * h };
+  }
+  for (const [region, key] of Object.entries(UE_KEY)) {
+    const p = norm[key as RegionId];
+    if (p) out[region as RegionId] = { x: p[0] * w, y: p[1] * h };
   }
   return out;
 }
