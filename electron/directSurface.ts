@@ -124,14 +124,41 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
   // about a minute while the source surfaces stayed perfect (mode 1 sampler
   // proved that). Steady state here is: zero imports, zero transfers, one
   // tiny IPC ping per frame telling the renderer which surface just updated.
-  const importedIds = new Set<number>();
-  const held: { release: () => void }[] = [];
+  // Unreal hands out NEW surface ids every time it recreates its swapchain: a
+  // window resize, a resolution change, a reconnect. The first cut kept every
+  // import for the life of the connection, so each generation of full-window
+  // surfaces stayed pinned -- measured 2026-09-17 at 16 held after a few hours,
+  // a renderer at 3.9GB resident with 3.3GB more in swap, against ~300MB on the
+  // WebRTC path. So: keep the current generation, release the rest, on BOTH
+  // sides (the renderer holds its own reference, and a texture only dies when
+  // both let go).
+  const MAX_HELD = 6;
+  const imports = new Map<number, { imported: { release: () => void }; w: number; h: number; seen: number }>();
+  let tick = 0;
+
+  /** Let go of one generation's surface here and in the renderer. */
+  const evict = (sid: number, why: string) => {
+    const entry = imports.get(sid);
+    if (!entry) return;
+    imports.delete(sid);
+    try { entry.imported.release(); } catch { /* already gone */ }
+    try {
+      if (!win.isDestroyed()) win.webContents.send('direct-surface:release', { surfaceId: sid });
+    } catch { /* window mid-teardown */ }
+    console.log(`[direct] released surface ${sid} (${why}, ${imports.size} held)`);
+  };
 
   const ok = a.startFrames(service, (f) => {
     if (win.isDestroyed()) return;
     try {
-      if (!importedIds.has(f.surfaceId)) {
-        importedIds.add(f.surfaceId);
+      const known = imports.get(f.surfaceId);
+      if (known) { known.seen = ++tick; }
+      if (!known) {
+        // A different size means Unreal rebuilt its swapchain: the old
+        // generation can never be drawn again, so it goes now.
+        for (const [sid, e] of [...imports]) {
+          if (e.w !== f.width || e.h !== f.height) evict(sid, 'stale size');
+        }
         const imported = sharedTexture.importSharedTexture({
           textureInfo: {
             codedSize: { width: f.width, height: f.height },
@@ -146,9 +173,15 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
             handle: { ioSurface: f.ioSurface },
           },
         });
-        // Held for the connection's lifetime: the renderer keeps its
-        // reference too, and release happens for both on stop().
-        held.push(imported);
+        imports.set(f.surfaceId, { imported, w: f.width, h: f.height, seen: ++tick });
+        // Same size but a fresh id (a reconnect reusing the resolution): keep
+        // the ring, drop whatever has gone longest without a frame.
+        while (imports.size > MAX_HELD) {
+          let oldest = -1; let oldestSeen = Infinity;
+          for (const [sid, e] of imports) if (e.seen < oldestSeen) { oldestSeen = e.seen; oldest = sid; }
+          if (oldest < 0) break;
+          evict(oldest, 'over the cap');
+        }
         sharedTexture
           .sendSharedTexture({
             frame: win.webContents.mainFrame,
@@ -164,12 +197,10 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
           })
           .catch((err: unknown) => {
             console.error('[direct] sendSharedTexture failed:', err);
-            importedIds.delete(f.surfaceId);
-            // The failed import never reached the renderer; drop our
-            // reference too, or repeated failures for one surface grow
-            // `held` unboundedly, each entry pinning a GPU-process mailbox.
-            const i = held.indexOf(imported);
-            if (i >= 0) held.splice(i, 1);
+            // The failed import never reached the renderer; drop our reference
+            // too, or repeated failures for one surface grow the map
+            // unboundedly, each entry pinning a GPU-process mailbox.
+            imports.delete(f.surfaceId);
             try { imported.release(); } catch { /* already gone */ }
           });
         return;
@@ -190,9 +221,8 @@ function startFramePump(a: Addon, win: BrowserWindow, service: string): boolean 
       try {
         if (!win.isDestroyed()) win.webContents.send('direct-surface:reset');
       } catch { /* window mid-teardown */ }
-      for (const h of held) { try { h.release(); } catch { /* gone */ } }
-      held.length = 0;
-      importedIds.clear();
+      for (const e of imports.values()) { try { e.imported.release(); } catch { /* gone */ } }
+      imports.clear();
     };
   }
   return ok;

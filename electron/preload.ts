@@ -997,6 +997,16 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
       }
       heldTextures.get(sid)?.release();
       heldTextures.set(sid, data.importedSharedTexture);
+      // Main evicts stale generations and says so on direct-surface:release.
+      // This cap is only a backstop in case that message is ever missed: a
+      // pinned full-window surface costs megabytes, and they used to pile up
+      // one generation per resize (2026-09-17: 16 held, renderer at 3.9GB).
+      while (heldTextures.size > 8) {
+        const oldest = heldTextures.keys().next().value as number | undefined;
+        if (oldest === undefined || oldest === sid) break;
+        try { heldTextures.get(oldest)?.release(); } catch { /* gone */ }
+        heldTextures.delete(oldest);
+      }
       console.log(`[direct-canvas] surface ${sid} received (${heldTextures.size} held)`);
     });
 
@@ -1409,6 +1419,12 @@ if (process.platform === 'darwin' && process.env.UNCLAW_DIRECT_SURFACE === '2') 
 
     ipcRenderer.on('direct-surface:frame', (_e, f: { surfaceId: number }) => {
       drawSurface(f.surfaceId);
+    });
+    ipcRenderer.on('direct-surface:release', (_e, f: { surfaceId: number }) => {
+      const t = heldTextures.get(f.surfaceId);
+      if (!t) return;
+      heldTextures.delete(f.surfaceId);
+      try { t.release(); } catch { /* gone */ }
     });
     ipcRenderer.on('direct-surface:reset', () => {
       for (const t of heldTextures.values()) { try { t.release(); } catch { /* gone */ } }
