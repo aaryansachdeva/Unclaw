@@ -84,7 +84,7 @@ import { AddCharacterPicker, type StoreEntry } from './components/AddCharacterPi
 import { AddCustomOverlay } from './components/AddCustomOverlay';
 import { CommunityOverlay } from './components/market/CommunityOverlay';
 import { ShareSheet } from './components/market/ShareSheet';
-import { canShare, captureCharacterThumb, downloadListingFiles, type Listing } from './services/market';
+import { canShare, captureCharacterThumb, downloadListingFiles, replaceListingThumb, type Listing } from './services/market';
 import { cloneVoice, listCustomVoices } from './services/voices';
 import { StreamLeaseOverlay } from './components/StreamLeaseOverlay';
 import { ClawsBalance } from './components/ClawsBalance';
@@ -593,7 +593,12 @@ function AppMain() {
   // once it is on stage and nothing else is open.
   const [communityOpen, setCommunityOpen] = useState(false);
   const [shareFor, setShareFor] = useState<{ instanceId: string; thumb: Blob; voiceName?: string } | null>(null);
-  const [shareOfferFor, setShareOfferFor] = useState<string | null>(null);
+  // Something to do with a character once it is on stage and nothing else is
+  // open: offer to share it, or take a new picture for its listing.
+  const [stageTask, setStageTask] = useState<{ instanceId: string; kind: 'share' | 'retake'; listingId?: string } | null>(null);
+  // How Community reopens after a stage task (which tab, and what to say).
+  const [communityTab, setCommunityTab] = useState<'browse' | 'yours'>('browse');
+  const [communityNotice, setCommunityNotice] = useState<string | null>(null);
   // Which instance Unreal last reported on stage (characterReady / reconcile).
   const [stageReadyFor, setStageReadyFor] = useState<string | null>(null);
   // A package sent from the Unreal exporter; `n` remounts the import screen so
@@ -4451,30 +4456,51 @@ function AppMain() {
   }, []);
   openCustomizationRef.current = openCustomization;
 
-  // COMMUNITY: offer to share a character once it is on stage and nothing else
-  // is open (after a new import is named, voiced and dressed; or when the user
-  // picked "Share" in Community). The portrait is taken from the live stage
-  // before the sheet exists, after the camera has settled on its resting shot.
+  // COMMUNITY stage tasks. Both need the character on stage and nothing else
+  // open, with the camera settled on its resting shot, because the picture is
+  // taken from the live stage:
+  //   share  : after a new import is named, voiced and dressed, or "Share" in
+  //            Community. Opens the Share sheet with the picture.
+  //   retake : "New picture" on a published character. Uploads it and goes
+  //            back to Community, Yours.
   useEffect(() => {
-    if (!shareOfferFor || !authToken) return;
+    if (!stageTask || !authToken) return;
     if (customizationActive || setupFor || shareFor || addPickerOpen || communityOpen) return;
-    if (currentInstance?.id !== shareOfferFor || stageReadyFor !== shareOfferFor) return;
+    if (currentInstance?.id !== stageTask.instanceId || stageReadyFor !== stageTask.instanceId) return;
     const inst = currentInstance;
+    const task = stageTask;
     // Only the wait is cancellable. Once the capture starts it runs to the
-    // end: clearing the offer re-runs this effect, and a cleanup that also
-    // cancelled the capture would swallow the sheet it was about to open.
+    // end: clearing the task re-runs this effect, and a cleanup that also
+    // cancelled the capture would swallow what it was about to open.
     const t = window.setTimeout(async () => {
-      if (!canShare(inst) || inst.sharedListingId) { setShareOfferFor(null); return; }
-      const thumb = await captureCharacterThumb();
-      let voiceName: string | undefined;
-      if (thumb && inst.voice) {
-        try { voiceName = (await listCustomVoices()).find((v) => v.slug === inst.voice)?.name; } catch { /* name is optional */ }
+      if (task.kind === 'share') {
+        if (!canShare(inst) || inst.sharedListingId) { setStageTask(null); return; }
+        const thumb = await captureCharacterThumb();
+        let voiceName: string | undefined;
+        if (thumb && inst.voice) {
+          try { voiceName = (await listCustomVoices()).find((v) => v.slug === inst.voice)?.name; } catch { /* name is optional */ }
+        }
+        if (thumb) setShareFor({ instanceId: inst.id, thumb, voiceName });
+        setStageTask(null);
+        return;
       }
-      if (thumb) setShareFor({ instanceId: inst.id, thumb, voiceName });
-      setShareOfferFor(null);
+      const thumb = await captureCharacterThumb();
+      let notice = 'The picture could not be taken. Try again.';
+      if (thumb && task.listingId) {
+        try {
+          await replaceListingThumb(authToken, task.listingId, thumb);
+          notice = `New picture saved for ${inst.name?.trim() || 'your character'}.`;
+        } catch (e) {
+          notice = e instanceof Error ? e.message : notice;
+        }
+      }
+      setStageTask(null);
+      setCommunityNotice(notice);
+      setCommunityTab('yours');
+      setCommunityOpen(true);
     }, 1600);
     return () => window.clearTimeout(t);
-  }, [shareOfferFor, authToken, customizationActive, setupFor, shareFor, addPickerOpen, communityOpen, currentInstance, stageReadyFor]);
+  }, [stageTask, authToken, customizationActive, setupFor, shareFor, addPickerOpen, communityOpen, currentInstance, stageReadyFor]);
 
   // Add a community character: download its package and voice, import the
   // package through the normal Unreal import, clone the voice through soul,
@@ -5164,7 +5190,7 @@ function AppMain() {
             onFinish={(r) => {
               setInstancePersona(setupFor.instanceId, r);
               // Once they are dressed too, offer (once) to share them.
-              setShareOfferFor(setupFor.instanceId);
+              setStageTask({ instanceId: setupFor.instanceId, kind: 'share' });
               setSetupFor(null);
               // Named, given a vibe and a voice: the last thing anyone wants to
               // do with a new character is look at them. Hand straight over to
@@ -5181,15 +5207,26 @@ function AppMain() {
           <CommunityOverlay
             key="community"
             token={authToken}
-            onClose={() => setCommunityOpen(false)}
+            onClose={() => { setCommunityOpen(false); setCommunityNotice(null); setCommunityTab('browse'); }}
+            initialTab={communityTab}
+            notice={communityNotice}
             onInstall={installCommunityCharacter}
             shareables={agentStack
               .filter((i) => canShare(i) && !i.sharedListingId)
               .map((i) => ({ id: i.id, name: i.name?.trim() || 'Custom' }))}
             onShare={(instanceId) => {
               setCommunityOpen(false);
-              setShareOfferFor(instanceId);
+              setStageTask({ instanceId, kind: 'share' });
               selectInstance(instanceId, 1);
+            }}
+            retakeable={agentStack.filter((i) => i.sharedListingId).map((i) => i.sharedListingId as string)}
+            onRetake={(listingId) => {
+              const owner = agentStack.find((i) => i.sharedListingId === listingId);
+              if (!owner) return;
+              setCommunityOpen(false);
+              setCommunityNotice(null);
+              setStageTask({ instanceId: owner.id, kind: 'retake', listingId });
+              selectInstance(owner.id, 1);
             }}
             onDeleted={(listingId) => {
               const owner = agentStack.find((i) => i.sharedListingId === listingId);

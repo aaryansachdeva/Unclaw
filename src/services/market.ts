@@ -43,6 +43,8 @@ export interface Listing {
   name: string;
   blurb: string;
   ownerName: string;
+  /** Stable public id of the creator (not the account id): "More from". */
+  creatorKey: string;
   mine: boolean;
   visibility: Visibility;
   hasVoice: boolean;
@@ -91,10 +93,15 @@ async function call<T>(token: string, path: string, init: RequestInit = {}): Pro
   return (await res.json()) as T;
 }
 
-export function browseListings(token: string, opts: { q?: string; cursor?: string | null } = {}) {
+export type BrowseSort = 'newest' | 'popular';
+
+/** Public listings. `q` searches name, description and creator. */
+export function browseListings(token: string, opts: { q?: string; cursor?: string | null; sort?: BrowseSort; creator?: string } = {}) {
   const qs = new URLSearchParams();
   if (opts.q) qs.set('q', opts.q);
   if (opts.cursor) qs.set('cursor', opts.cursor);
+  if (opts.sort === 'popular') qs.set('sort', 'popular');
+  if (opts.creator) qs.set('creator', opts.creator);
   return call<{ listings: Listing[]; nextCursor: string | null }>(token, `/market/characters?${qs}`);
 }
 
@@ -104,6 +111,23 @@ export async function myListings(token: string): Promise<Listing[]> {
 
 export function updateListing(token: string, id: string, patch: { visibility?: Visibility; name?: string; blurb?: string }) {
   return call<Listing>(token, `/market/characters/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+}
+
+/** Replace a listing's picture (the only file that can change after publishing). */
+export async function replaceListingThumb(token: string, id: string, thumb: Blob): Promise<void> {
+  const res = await fetch(`${marketStoreUrl()}/market/characters/${id}/files/thumb.jpg`, {
+    method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'image/jpeg' }, body: thumb,
+  });
+  if (!res.ok) throw new MarketError('The new picture did not upload.');
+}
+
+/** "Sep 19" or "Sep 19, 2025" when it is not this year. */
+export function sharedDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString(undefined, opts);
 }
 
 export async function deleteListing(token: string, id: string): Promise<void> {
@@ -129,23 +153,56 @@ export function listingThumb(token: string, id: string, version: string): Promis
   return p;
 }
 
+/** True when a portrait is an empty stage: the character had not faded in
+ *  yet, so the middle of the frame is flat backdrop. Measured as the spread
+ *  of brightness across the centre, where a face always has contrast. */
+async function looksEmpty(jpeg: Blob): Promise<boolean> {
+  try {
+    const bmp = await createImageBitmap(jpeg);
+    const c = document.createElement('canvas');
+    c.width = 30; c.height = 38;
+    const x = c.getContext('2d');
+    if (!x) return false;
+    x.drawImage(bmp, 0, 0, c.width, c.height);
+    const d = x.getImageData(8, 8, 14, 20).data;
+    let sum = 0, sq = 0;
+    const n = d.length / 4;
+    for (let k = 0; k < d.length; k += 4) {
+      const y = 0.2126 * d[k] + 0.7152 * d[k + 1] + 0.0722 * d[k + 2];
+      sum += y; sq += y * y;
+    }
+    const mean = sum / n;
+    return Math.sqrt(Math.max(0, sq / n - mean * mean)) < 12;
+  } catch {
+    return false;
+  }
+}
+
 /** A portrait of whoever is on stage right now. The direct renderer cannot be
  *  read back from the page, so the main process captures the window while
- *  every piece of the app's interface is hidden for that one frame. */
+ *  every piece of the app's interface is hidden for that one frame. A
+ *  character that has only just been switched in may still be fading in, so
+ *  an empty frame is retried a few times before giving up. */
 export async function captureCharacterThumb(): Promise<Blob | null> {
   const api = window.electronAPI?.market;
   if (!api?.captureThumb) return null;
-  const hide = document.createElement('style');
-  hide.textContent = 'body *{visibility:hidden!important} canvas,video{visibility:visible!important}';
-  document.head.appendChild(hide);
-  try {
-    // Two frames, so the hidden interface is actually off screen before the capture.
-    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-    const bytes = await api.captureThumb();
-    return bytes && bytes.length ? new Blob([bytes as BlobPart], { type: 'image/jpeg' }) : null;
-  } finally {
-    hide.remove();
+  let last: Blob | null = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt) await new Promise((r) => window.setTimeout(r, 1200));
+    const hide = document.createElement('style');
+    hide.textContent = 'body *{visibility:hidden!important} canvas,video{visibility:visible!important}';
+    document.head.appendChild(hide);
+    try {
+      // Two frames, so the hidden interface is actually off screen before the capture.
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const bytes = await api.captureThumb();
+      last = bytes && bytes.length ? new Blob([bytes as BlobPart], { type: 'image/jpeg' }) : null;
+    } finally {
+      hide.remove();
+    }
+    if (last && !(await looksEmpty(last))) return last;
   }
+  return null;
 }
 
 /** The instance's identity folder id (the main process keeps its package there). */
