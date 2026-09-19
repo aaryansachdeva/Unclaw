@@ -818,6 +818,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
+  // Community marketplace files (electron/marketplace.ts).
+  market: {
+    prepare: (args: { localId: string; voice?: string }): Promise<
+      { ok: true; packagePath: string; packageBytes: number; voicePath: string | null } | { ok: false; error: string }
+    > => ipcRenderer.invoke('market:prepare', args),
+    upload: (args: {
+      storeUrl: string; token: string; listingId: string; name: 'character.unclawchar' | 'voice.wav'; filePath: string;
+    }): Promise<{ ok: boolean; status?: number; error?: string }> => ipcRenderer.invoke('market:upload', args),
+    /** A portrait of the live character (the renderer hides its UI first). */
+    captureThumb: (): Promise<Uint8Array | null> => ipcRenderer.invoke('market:capture-thumb'),
+    download: (args: { storeUrl: string; token: string; listingId: string; withVoice: boolean }): Promise<
+      { ok: true; packagePath: string; voice?: Uint8Array } | { ok: false; error: string }
+    > => ipcRenderer.invoke('market:download', args),
+  },
   // Deep link (unclaw://...). onDeepLink fires for links that arrive while
   // running; getPendingDeepLink pulls one that arrived during cold start.
   onDeepLink: (cb: (url: string) => void): (() => void) => {

@@ -296,6 +296,18 @@ interface ElectronAPI {
 
   /** unclaw:// deep link arriving while the app is running (the Polar
    *  checkout-complete page bounces through it). Returns unsubscribe. */
+  market?: {
+    prepare: (args: { localId: string; voice?: string }) => Promise<
+      { ok: true; packagePath: string; packageBytes: number; voicePath: string | null } | { ok: false; error: string }
+    >;
+    upload: (args: {
+      storeUrl: string; token: string; listingId: string; name: 'character.unclawchar' | 'voice.wav'; filePath: string;
+    }) => Promise<{ ok: boolean; status?: number; error?: string }>;
+    captureThumb: () => Promise<Uint8Array | null>;
+    download: (args: { storeUrl: string; token: string; listingId: string; withVoice: boolean }) => Promise<
+      { ok: true; packagePath: string; voice?: Uint8Array } | { ok: false; error: string }
+    >;
+  };
   onDeepLink: (cb: (url: string) => void) => () => void;
   /** Pull a deep link that arrived during cold start, or null. */
   getPendingDeepLink: () => Promise<string | null>;

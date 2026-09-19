@@ -50,6 +50,11 @@ export interface AgentInstance {
   voiceFrom?: string;
   /** This character's own personality; absent = the user's onboarding vibe. */
   vibe?: CharacterVibe;
+  /** The community listing this character is shared as (the user's own). */
+  sharedListingId?: string;
+  /** The community listing this character was added from (someone else's).
+   *  Such a character is not the user's to share again. */
+  fromListingId?: string;
   identity?: {
     /** The capture/build session id — also the identity folder name under
      *  /Identity/. Older saves lack it; readers fall back to parsing
@@ -223,6 +228,21 @@ export function useAgentStack() {
     });
   }, []);
 
+  /** Record a community link on an instance (see sharedListingId / fromListingId). */
+  const setInstanceCommunity = useCallback((id: string, patch: { sharedListingId?: string | null; fromListingId?: string }) => {
+    setStack((prev) => {
+      const next = prev.map((i) => {
+        if (i.id !== id) return i;
+        const out = { ...i };
+        if (patch.sharedListingId !== undefined) out.sharedListingId = patch.sharedListingId || undefined;
+        if (patch.fromListingId !== undefined) out.fromListingId = patch.fromListingId || undefined;
+        return out;
+      });
+      save(next);
+      return next;
+    });
+  }, []);
+
   const setInstanceWardrobe = useCallback((id: string, wardrobe: WardrobeSettings) => {
     setStack((prev) => {
       const next = prev.map((i) => (i.id === id ? { ...i, wardrobe } : i));
@@ -251,5 +271,5 @@ export function useAgentStack() {
     setStack(next);
   }, []);
 
-  return { stack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, setInstanceVoice, setInstancePersona, resetStack, hydrateStack };
+  return { stack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, setInstanceVoice, setInstancePersona, setInstanceCommunity, resetStack, hydrateStack };
 }

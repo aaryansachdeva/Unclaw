@@ -13,7 +13,7 @@
 
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { ArrowLeft, Plus, X, Pencil, Lock, Download, ScanFace } from 'lucide-react';
+import { ArrowLeft, Plus, X, Pencil, Lock, Download, ScanFace, Users } from 'lucide-react';
 import { AGENTS, type Agent } from '../types';
 import type { AgentInstance } from '../hooks/useAgentStack';
 import { agentPortrait } from '../assets/agents';
@@ -55,6 +55,8 @@ interface AddCharacterPickerProps {
   onCancel: () => void;
   /** Opens the photo-capture flow (QR -> Unclaw Scan -> custom character). */
   onAddCustom: () => void;
+  /** Opens Community (characters others shared). Absent when signed out. */
+  onOpenCommunity?: () => void;
   /** Saved photo-identity characters (roster instances on the generic host),
    *  rendered as pickable cards after the catalog. */
   customInstances?: { instanceId: string; name: string }[];
@@ -67,7 +69,7 @@ interface AddCharacterPickerProps {
 
 export function AddCharacterPicker({
   entries, bundle, roster, agentById, baseInstanceId,
-  onPick, onBuy, onDownload, onRename, onRemove, onCancel, onAddCustom,
+  onPick, onBuy, onDownload, onRename, onRemove, onCancel, onAddCustom, onOpenCommunity,
   customInstances, onPickInstance, allowCustom = true,
 }: AddCharacterPickerProps) {
   useEffect(() => {
@@ -196,6 +198,9 @@ export function AddCharacterPicker({
         ))}
         {allowCustom && (
           <AddCustomCard delay={0.12 + (entries.length + (customInstances?.length ?? 0)) * 0.05} onClick={onAddCustom} />
+        )}
+        {allowCustom && onOpenCommunity && (
+          <CommunityCard delay={0.12 + (entries.length + (customInstances?.length ?? 0) + 1) * 0.05} onClick={onOpenCommunity} />
         )}
       </div>
 
@@ -639,6 +644,43 @@ function CustomInstanceCard({ name, delay, onClick }: { name: string; delay: num
         textShadow: '0 1px 4px rgba(0,0,0,0.7)',
       }}>
         {name}
+      </span>
+    </motion.button>
+  );
+}
+
+// Community: characters other people made and shared. The same quiet
+// invitation as Add custom, so the two read as a pair at the end of the grid.
+function CommunityCard({ delay, onClick }: { delay: number; onClick: () => void }) {
+  return (
+    <motion.button
+      type="button"
+      onClick={onClick}
+      initial={{ opacity: 0, y: 10, scale: 0.96 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ duration: 0.5, ease: EASE_OUT_EXPO, delay }}
+      whileHover={{ y: -3, scale: 1.03 }}
+      whileTap={{ scale: 0.97 }}
+      style={{
+        pointerEvents: 'auto', position: 'relative', width: 116, height: 148, padding: 0, overflow: 'hidden',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10,
+        background: 'var(--glass-bg, rgba(40, 48, 65, 0.38))', border: '1px dashed rgba(255, 255, 255, 0.18)',
+        borderRadius: 14, backdropFilter: 'var(--glass-blur)', WebkitBackdropFilter: 'var(--glass-blur)',
+        cursor: 'pointer', color: 'var(--text-primary)', boxShadow: '0 10px 28px -12px rgba(0,0,0,0.6)',
+        transition: 'border-color 200ms var(--ease-out-quart)',
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'color-mix(in srgb, var(--accent, #c44444) 55%, transparent)'; }}
+      onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.18)'; }}
+    >
+      <Users size={26} strokeWidth={1.6} style={{ color: 'var(--text-secondary)', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))' }} />
+      <span style={{
+        fontSize: 10.5, fontWeight: 700, letterSpacing: '0.14em', textIndent: '0.14em', textTransform: 'uppercase',
+        color: 'var(--text-secondary)', textShadow: '0 1px 3px rgba(0,0,0,0.6)',
+      }}>
+        Community
+      </span>
+      <span style={{ margin: '0 12px', fontSize: 9, lineHeight: 1.45, color: 'var(--text-ghost)', textShadow: '0 1px 2px rgba(0,0,0,0.55)' }}>
+        Characters others shared
       </span>
     </motion.button>
   );

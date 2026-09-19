@@ -24,6 +24,7 @@ import { MANIFEST, characterPakForPlatform } from './setupManifest';
 import { runUpdateCheck, getUpdateSnapshot } from './updateCoordinator';
 import { runLocalIdentityInference, runLocalPhotoInference, type GroomArgs } from './identityInference';
 import { listBasecolors, regenerateBasecolor, runH3DPhotoToCharacter, importUnrealExport, importUnrealPackage } from './h3dPipeline';
+import { packageForListing, voiceClipPath, uploadListingFile, downloadListing } from './marketplace';
 import { getAppShellState, quitAndInstallAppUpdate } from './appShellUpdater';
 import * as directSurface from './directSurface';
 import * as streamLease from './streamLease';
@@ -1588,6 +1589,39 @@ ipcMain.handle(
 // on the same identity:progress channel.
 // Bring-your-own MetaHuman: the user picks the folder the Unreal exporter
 // wrote; main stages it into the UE container and returns the identity paths.
+// Community marketplace: the files. Listings, visibility and the thumbnail go
+// from the renderer straight to the store; the package and voice clip stream
+// between disk and the store here (electron/marketplace.ts).
+ipcMain.handle('market:prepare', (_event, args: { localId: string; voice?: string }) => {
+  const pkg = packageForListing(String(args?.localId ?? ''));
+  if (!pkg.ok) return pkg;
+  const voicePath = args?.voice ? voiceClipPath(String(args.voice)) : null;
+  return { ok: true, packagePath: pkg.path, packageBytes: pkg.bytes, voicePath };
+});
+// The listing thumbnail. The direct renderer's canvas reads back black, so the
+// frame comes from the composited window instead: the renderer hides its own
+// interface for this one capture, and this crops a centred 4:5 portrait.
+ipcMain.handle('market:capture-thumb', async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const shot = await mainWindow.webContents.capturePage();
+  const { width: W, height: H } = shot.getSize();
+  if (!W || !H) return null;
+  // Head and shoulders at the resting camera: the face sits near the middle
+  // of the window, the crown about a sixth of the way down, the shoulders
+  // about four fifths.
+  const h = Math.round(H * 0.64);
+  const w = Math.min(W, Math.round(h * 0.8));
+  const y = Math.round(H * 0.15);
+  const crop = shot.crop({ x: Math.round((W - w) / 2), y, width: w, height: Math.min(h, H - y) });
+  return new Uint8Array(crop.resize({ width: 600, quality: 'best' }).toJPEG(86));
+});
+ipcMain.handle('market:upload', (_event, args: {
+  storeUrl: string; token: string; listingId: string; name: 'character.unclawchar' | 'voice.wav'; filePath: string;
+}) => uploadListingFile(args));
+ipcMain.handle('market:download', (_event, args: {
+  storeUrl: string; token: string; listingId: string; withVoice: boolean;
+}) => downloadListing(args));
+
 ipcMain.handle('identity:import-unreal', async (_event, args: { localId: string; path?: string }) => {
   if (!args?.localId) return { ok: false, error: 'invalid_args' };
   // A file dropped on the import screen arrives as a path; without one, ask.

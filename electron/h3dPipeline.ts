@@ -775,6 +775,9 @@ export async function importUnrealPackage(
   const dest = path.join(app.getPath('userData'), 'identities', localId, 'unpacked');
   fs.rmSync(dest, { recursive: true, force: true });
   await extractZip(window as BrowserWindow, zipPath, dest);
+  // Kept as it arrived: sharing this character to the marketplace uploads
+  // exactly the file that was imported (electron/marketplace.ts).
+  fs.copyFileSync(zipPath, path.join(app.getPath('userData'), 'identities', localId, 'package.unclawchar'));
   let folder = dest;
   if (!fs.existsSync(path.join(folder, 'manifest.json'))) {
     const sub = fs.readdirSync(dest).find((d) => fs.existsSync(path.join(dest, d, 'manifest.json')));

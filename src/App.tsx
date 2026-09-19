@@ -82,6 +82,10 @@ import { AGENTS, GENERIC_MALE_AGENT, UNIFIED_AGENT, type Agent } from './types';
 import { useAgentStack, BASE_AGENT, BASE_INSTANCE_ID, type AgentInstance } from './hooks/useAgentStack';
 import { AddCharacterPicker, type StoreEntry } from './components/AddCharacterPicker';
 import { AddCustomOverlay } from './components/AddCustomOverlay';
+import { CommunityOverlay } from './components/market/CommunityOverlay';
+import { ShareSheet } from './components/market/ShareSheet';
+import { canShare, captureCharacterThumb, downloadListingFiles, type Listing } from './services/market';
+import { cloneVoice, listCustomVoices } from './services/voices';
 import { StreamLeaseOverlay } from './components/StreamLeaseOverlay';
 import { ClawsBalance } from './components/ClawsBalance';
 import { fetchClaws, earnClaws, spendOnCharacter, CHARACTER_CLAW_COST } from './services/claws';
@@ -563,7 +567,7 @@ function AppMain() {
   // switcher carousel is selected. The carousel is [...stack, ADD_SLOT]; the
   // ADD_SLOT opens the picker over a blank stage. `selectedInstanceId` holds a
   // real roster instance id or ADD_SLOT.
-  const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, setInstanceVoice, setInstancePersona, resetStack, hydrateStack } = useAgentStack();
+  const { stack: agentStack, addInstance, removeInstance, renameInstance, setInstanceWardrobe, setInstanceIdentity, setInstanceVoice, setInstancePersona, setInstanceCommunity, resetStack, hydrateStack } = useAgentStack();
   const agentStackForDevRef = useRef<AgentInstance[]>([]);
   agentStackForDevRef.current = agentStack;
   // Global environment — backdrop + key light + post effect (persists across
@@ -584,6 +588,14 @@ function AppMain() {
   // the picker. Deliberately NOT gated on isConnected: losing the stream
   // mid-capture must not tear down the session/QR.
   const [addCustomOpen, setAddCustomOpen] = useState(false);
+  // Community: the browse/manage overlay, the Share sheet (with the portrait
+  // taken just before it opened), and a pending offer to share a character
+  // once it is on stage and nothing else is open.
+  const [communityOpen, setCommunityOpen] = useState(false);
+  const [shareFor, setShareFor] = useState<{ instanceId: string; thumb: Blob; voiceName?: string } | null>(null);
+  const [shareOfferFor, setShareOfferFor] = useState<string | null>(null);
+  // Which instance Unreal last reported on stage (characterReady / reconcile).
+  const [stageReadyFor, setStageReadyFor] = useState<string | null>(null);
   // A package sent from the Unreal exporter; `n` remounts the import screen so
   // a second send while it is open starts a fresh import.
   const [unrealHandoff, setUnrealHandoff] = useState<{ path: string; n: number } | null>(null);
@@ -1135,7 +1147,8 @@ function AppMain() {
   // window: the sheet in the dock, the character, and nothing else. Naming a
   // character while the greeting, the glance column and a live character
   // switcher sat around it made setup read as a popup over a running app.
-  const setupActive = !!setupFor;
+  // The Share sheet takes the same slot and the same focus as setup.
+  const setupActive = !!setupFor || !!shareFor;
   const activeAgentId = currentInstance?.agentId ?? null;
 
   // Placed after currentInstance is declared, deliberately: the dependency
@@ -3817,6 +3830,7 @@ function AppMain() {
       // synchronous UE-side so the dress chain can pipeline behind it.
       emitApplyIdentityRef.current?.(inst);
       emitBodyBlendsRef.current?.(inst);
+      setStageReadyFor(inst?.id ?? null);
       // Fresh-generation landing: open the customization UI (name + style)
       // once the newly created custom character is actually on stage.
       // Case-insensitive for the same reason the guard above is: UE echoes the
@@ -4024,6 +4038,7 @@ function AppMain() {
         // Identity before outfit, same as the characterReady path: this
         // reconcile lands on an already-live character with no ready signal.
         emitApplyIdentityRef.current?.(inst);
+        setStageReadyFor(inst?.id ?? null);
         emitBodyBlendsRef.current?.(inst);
         // Colours AFTER the outfit, as at characterReady: the chain re-applies
         // the groom, and a colour sent ahead of that leaves with the old groom.
@@ -4435,6 +4450,68 @@ function AppMain() {
     setCustomizationActive(true);
   }, []);
   openCustomizationRef.current = openCustomization;
+
+  // COMMUNITY: offer to share a character once it is on stage and nothing else
+  // is open (after a new import is named, voiced and dressed; or when the user
+  // picked "Share" in Community). The portrait is taken from the live stage
+  // before the sheet exists, after the camera has settled on its resting shot.
+  useEffect(() => {
+    if (!shareOfferFor || !authToken) return;
+    if (customizationActive || setupFor || shareFor || addPickerOpen || communityOpen) return;
+    if (currentInstance?.id !== shareOfferFor || stageReadyFor !== shareOfferFor) return;
+    const inst = currentInstance;
+    // Only the wait is cancellable. Once the capture starts it runs to the
+    // end: clearing the offer re-runs this effect, and a cleanup that also
+    // cancelled the capture would swallow the sheet it was about to open.
+    const t = window.setTimeout(async () => {
+      if (!canShare(inst) || inst.sharedListingId) { setShareOfferFor(null); return; }
+      const thumb = await captureCharacterThumb();
+      let voiceName: string | undefined;
+      if (thumb && inst.voice) {
+        try { voiceName = (await listCustomVoices()).find((v) => v.slug === inst.voice)?.name; } catch { /* name is optional */ }
+      }
+      if (thumb) setShareFor({ instanceId: inst.id, thumb, voiceName });
+      setShareOfferFor(null);
+    }, 1600);
+    return () => window.clearTimeout(t);
+  }, [shareOfferFor, authToken, customizationActive, setupFor, shareFor, addPickerOpen, communityOpen, currentInstance, stageReadyFor]);
+
+  // Add a community character: download its package and voice, import the
+  // package through the normal Unreal import, clone the voice through soul,
+  // and set it up the way its creator had it. It skips the naming setup: the
+  // listing already carries name, personality and voice.
+  const installCommunityCharacter = useCallback(async (listing: Listing, onStep: (words: string) => void) => {
+    if (!authToken) throw new Error('Sign in to add community characters.');
+    onStep('Downloading');
+    const files = await downloadListingFiles(authToken, listing);
+    onStep('Bringing them in');
+    const api = window.electronAPI?.identity;
+    if (!api?.importUnreal) throw new Error('This build cannot import characters.');
+    const res = await api.importUnreal({ localId: `ue_${Date.now().toString(36)}`, path: files.packagePath });
+    if (!res.ok || !res.dnaPath) throw new Error(res.error || 'The character file would not import.');
+    let voice: string | undefined;
+    if (files.voice) {
+      onStep('Learning their voice');
+      voice = (await cloneVoice(listing.setup.voiceName || listing.name, files.voice, 'voice.wav')).slug;
+    }
+    const id = addInstance(UNIFIED_AGENT.agentId);
+    setInstanceIdentity(id, {
+      dnaPath: res.dnaPath, blobPath: '', baseColorPath: res.baseColorPath, jointsPath: res.jointsPath, normalPath: res.normalPath,
+      groomsDir: res.grooms && res.grooms.length ? res.groomsDir : undefined,
+      bodyAxes: res.bodyAxes ?? listing.setup.bodyAxes,
+    });
+    setInstancePersona(id, {
+      name: listing.name, vibe: listing.setup.vibe, voice, voiceFrom: voice ? undefined : listing.setup.voiceFrom,
+    });
+    if (listing.setup.wardrobe) setInstanceWardrobe(id, listing.setup.wardrobe);
+    setInstanceCommunity(id, { fromListingId: listing.id });
+    setSelectedInstanceId(id);
+    setAddPickerOpen(false);
+    setCommunityOpen(false);
+    // Selecting is not switching: bring them on stage, as picking a catalog
+    // character does. characterReady then applies identity, grooms and outfit.
+    switchUeToAgent(UNIFIED_AGENT.agentId, 1, listing.setup.wardrobe ?? null);
+  }, [authToken, addInstance, setInstanceIdentity, setInstancePersona, setInstanceWardrobe, setInstanceCommunity, switchUeToAgent]);
 
   const isConnected = connectionState === 'connected';
 
@@ -4994,6 +5071,7 @@ function AppMain() {
             onRemove={handleRemoveInstance}
             onCancel={handleCancelAdd}
             onAddCustom={() => setAddCustomOpen(true)}
+            onOpenCommunity={authToken ? () => setCommunityOpen(true) : undefined}
             allowCustom={CUSTOM_CHARACTERS_ENABLED}
             customInstances={agentStack
               .filter((i) => IDENTITY_HOSTS.has(i.agentId))
@@ -5085,6 +5163,8 @@ function AppMain() {
             }}
             onFinish={(r) => {
               setInstancePersona(setupFor.instanceId, r);
+              // Once they are dressed too, offer (once) to share them.
+              setShareOfferFor(setupFor.instanceId);
               setSetupFor(null);
               // Named, given a vibe and a voice: the last thing anyone wants to
               // do with a new character is look at them. Hand straight over to
@@ -5094,6 +5174,46 @@ function AppMain() {
             }}
           />
         )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {communityOpen && authToken && (
+          <CommunityOverlay
+            key="community"
+            token={authToken}
+            onClose={() => setCommunityOpen(false)}
+            onInstall={installCommunityCharacter}
+            shareables={agentStack
+              .filter((i) => canShare(i) && !i.sharedListingId)
+              .map((i) => ({ id: i.id, name: i.name?.trim() || 'Custom' }))}
+            onShare={(instanceId) => {
+              setCommunityOpen(false);
+              setShareOfferFor(instanceId);
+              selectInstance(instanceId, 1);
+            }}
+            onDeleted={(listingId) => {
+              const owner = agentStack.find((i) => i.sharedListingId === listingId);
+              if (owner) setInstanceCommunity(owner.id, { sharedListingId: null });
+            }}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {shareFor && authToken && (() => {
+          const inst = agentStack.find((i) => i.id === shareFor.instanceId);
+          return inst ? (
+            <ShareSheet
+              key={`share-${shareFor.instanceId}`}
+              token={authToken}
+              inst={inst}
+              thumb={shareFor.thumb}
+              voiceName={shareFor.voiceName}
+              onClose={() => setShareFor(null)}
+              onShared={(listingId) => setInstanceCommunity(shareFor.instanceId, { sharedListingId: listingId })}
+            />
+          ) : null;
+        })()}
       </AnimatePresence>
 
       {/* Settings modal, separate from CustomizationOverlay so the two
