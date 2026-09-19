@@ -396,9 +396,12 @@ export function AddCustomOverlay({
   authToken,
   onClose,
   onIdentityReady,
+  importPath,
 }: {
   authToken: string | null;
   onClose: () => void;
+  /** A .unclawchar handed over by the Unreal exporter's Send to Unclaw. */
+  importPath?: string | null;
   /** DEV local-inference completion: artifacts are staged and ready for the
    *  applyIdentity descriptor. Parent creates the roster instance + switches. */
   onIdentityReady?: (r: {
@@ -479,6 +482,17 @@ export function AddCustomOverlay({
       setImporting(false);
     }
   }, []);
+
+  // Sent straight from the Unreal exporter (unclaw://import?path=...): open on
+  // the import and start it, exactly as if the file had been dropped here. The
+  // main process applies the same checks to it as to any dropped file.
+  const handedOffRef = useRef(false);
+  useEffect(() => {
+    if (!importPath || handedOffRef.current) return;
+    handedOffRef.current = true;
+    setMode('import');
+    void importFromUnreal(importPath);
+  }, [importPath, importFromUnreal]);
 
   const startPhotoInference = useCallback(async (file: File) => {
     const api = window.electronAPI?.identity;

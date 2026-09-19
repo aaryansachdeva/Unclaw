@@ -584,6 +584,9 @@ function AppMain() {
   // the picker. Deliberately NOT gated on isConnected: losing the stream
   // mid-capture must not tear down the session/QR.
   const [addCustomOpen, setAddCustomOpen] = useState(false);
+  // A package sent from the Unreal exporter; `n` remounts the import screen so
+  // a second send while it is open starts a fresh import.
+  const [unrealHandoff, setUnrealHandoff] = useState<{ path: string; n: number } | null>(null);
   // Which instance the switcher returns to when the Add picker is cancelled.
   const addReturnRef = useRef<string>(BASE_INSTANCE_ID);
   // Characters UE reports as actually loaded (mount-aware), via the
@@ -1650,6 +1653,19 @@ function AppMain() {
   useEffect(() => {
     const onLink = (url: string) => {
       if (/store|purchased|checkout/.test(url)) void refreshEntitlements();
+      // The Unreal exporter's Send to Unclaw: unclaw://import?path=<.unclawchar>.
+      // Only the file type is checked here; the main process validates the
+      // package itself (paths, checksums, format) before anything is staged.
+      if (/^unclaw:\/\/import\b/.test(url)) {
+        let pkg: string | null = null;
+        try { pkg = new URL(url).searchParams.get('path'); } catch { pkg = null; }
+        if (pkg && /\.unclawchar$/i.test(pkg)) {
+          setUnrealHandoff((h) => ({ path: pkg as string, n: (h?.n ?? 0) + 1 }));
+          setAddCustomOpen(true);
+        } else {
+          console.warn('[deep-link] import link without a .unclawchar path:', url);
+        }
+      }
       if (/^unclaw:\/\/passthrough/.test(url)) {
         setPassthrough(!/[?&]off\b/.test(url));
         // Deliberately NO focusWindow() here. This link fires whenever the
@@ -4993,9 +5009,10 @@ function AppMain() {
       <AnimatePresence>
         {CUSTOM_CHARACTERS_ENABLED && addCustomOpen && (
           <AddCustomOverlay
-            key="add-custom"
+            key={`add-custom-${unrealHandoff?.n ?? 0}`}
             authToken={authToken ?? null}
-            onClose={() => setAddCustomOpen(false)}
+            importPath={unrealHandoff?.path ?? null}
+            onClose={() => { setAddCustomOpen(false); setUnrealHandoff(null); }}
             onIdentityReady={({ dnaPath, blobPath, baseColorPath, jointsPath, normalPath, groomsDir, bodyAxes, grooming, unrealName }) => {
               // The local pipeline produced the identity artifacts: create the
               // custom instance on the generic host and switch to it. The
@@ -5028,6 +5045,7 @@ function AppMain() {
               if (wardrobe) setInstanceWardrobe(id, wardrobe);
               setSelectedInstanceId(id);
               setAddCustomOpen(false);
+              setUnrealHandoff(null);
               setAddPickerOpen(false);
               if (unrealName) {
                 // An Unreal export arrives dressed and groomed: ask who it is
