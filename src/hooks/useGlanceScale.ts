@@ -17,7 +17,7 @@ const DESIGN_HEIGHT = 780;
 const MAX_GROWTH = 2;
 
 /** How much each tier grows at MAX_GROWTH. */
-const RAMP = { display: 0.40, text: 0.18, label: 0.08 } as const;
+const RAMP = { display: 0.42, text: 0.30, label: 0.16 } as const;
 
 export interface GlanceType {
   /** The greeting headline. */
