@@ -150,7 +150,7 @@ export const WeatherGlance = forwardRef<HTMLDivElement, Props>(function WeatherG
   };
 
   const ghost = (text: string) => (
-    <div style={{ padding: '3px 8px 6px', fontSize: 12.5, fontWeight: 500, color: 'var(--text-ghost)', textShadow: 'var(--text-shadow-floating)' }}>
+    <div style={{ padding: '3px 8px 6px', fontSize: 'calc(12.5px * var(--glance-text, 1))', fontWeight: 500, color: 'var(--text-ghost)', textShadow: 'var(--text-shadow-floating)' }}>
       {text}
     </div>
   );
@@ -167,7 +167,7 @@ export const WeatherGlance = forwardRef<HTMLDivElement, Props>(function WeatherG
       <GlanceRow onClick={opts.clickable ? onOpen : undefined} ariaLabel={opts.place ? `Open weather (${opts.place})` : 'Open weather'} align="flex-start">
         <Icon size={22} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 1, filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))' }} aria-hidden />
         <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
-          <span style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.3 }}>
+          <span style={{ fontSize: 'calc(13px * var(--glance-text, 1))', fontWeight: 500, lineHeight: 1.3 }}>
             <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{deg(cur.temp_c)}</span>
             {' '}{cur.condition}
             {Math.round(cur.feels_like_c) !== Math.round(cur.temp_c) && (
@@ -203,8 +203,8 @@ export const WeatherGlance = forwardRef<HTMLDivElement, Props>(function WeatherG
               <GlanceRow key={h.ts}>
                 <span style={{ ...GLANCE_META_STYLE, minWidth: 34 }}>{hourLabel(h.ts)}</span>
                 <HI size={14} strokeWidth={2} style={{ flexShrink: 0, opacity: 0.85 }} aria-hidden />
-                <span style={{ fontSize: 13, fontWeight: 500, fontVariantNumeric: 'tabular-nums', minWidth: 30 }}>{deg(h.temp_c)}</span>
-                <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{h.condition}</span>
+                <span style={{ fontSize: 'calc(13px * var(--glance-text, 1))', fontWeight: 500, fontVariantNumeric: 'tabular-nums', minWidth: 30 }}>{deg(h.temp_c)}</span>
+                <span style={{ fontSize: 'calc(12.5px * var(--glance-text, 1))', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{h.condition}</span>
               </GlanceRow>
             );
           })}
@@ -219,10 +219,10 @@ export const WeatherGlance = forwardRef<HTMLDivElement, Props>(function WeatherG
               <GlanceRow key={day.date}>
                 <span style={{ ...GLANCE_META_STYLE, minWidth: 34 }}>{dayLabel(day.date)}</span>
                 <DI size={14} strokeWidth={2} style={{ flexShrink: 0, opacity: 0.85 }} aria-hidden />
-                <span style={{ fontSize: 13, fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>
+                <span style={{ fontSize: 'calc(13px * var(--glance-text, 1))', fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>
                   {deg(day.hi_c)} <span style={{ color: 'var(--text-secondary)' }}>{deg(day.lo_c)}</span>
                 </span>
-                <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{day.condition}</span>
+                <span style={{ fontSize: 'calc(12.5px * var(--glance-text, 1))', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{day.condition}</span>
               </GlanceRow>
             );
           })}
@@ -262,7 +262,7 @@ export const WeatherGlance = forwardRef<HTMLDivElement, Props>(function WeatherG
               onRemove={onPlacesChange ? () => removePlace(p.id) : undefined}
             />
           ))}
-          <div style={{ ...GLANCE_LABEL_STYLE, textTransform: 'none', letterSpacing: '0.02em', fontSize: 11, color: 'var(--text-secondary)', padding: '10px 8px 3px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <div style={{ ...GLANCE_LABEL_STYLE, textTransform: 'none', letterSpacing: '0.02em', fontSize: 'calc(11px * var(--glance-label, 1))', color: 'var(--text-secondary)', padding: '10px 8px 3px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {[nameOf(selected), isAuto(selected) ? subOf(selected) : null].filter(Boolean).join(' · ')}
           </div>
         </div>
@@ -356,11 +356,11 @@ function PlaceRow({
         }}
       >
         <Icon size={14} strokeWidth={2} style={{ flexShrink: 0, opacity: data ? 0.9 : 0.4 }} aria-hidden />
-        <span style={{ fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums', minWidth: 30 }}>
+        <span style={{ fontSize: 'calc(13px * var(--glance-text, 1))', fontWeight: 600, fontVariantNumeric: 'tabular-nums', minWidth: 30 }}>
           {data ? deg(data.current.temp_c) : off ? deg(null) : '…'}
         </span>
         <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
-          <span style={{ fontSize: 13, fontWeight: selected ? 600 : 500, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 'calc(13px * var(--glance-text, 1))', fontWeight: selected ? 600 : 500, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {name}
           </span>
           {sub && (

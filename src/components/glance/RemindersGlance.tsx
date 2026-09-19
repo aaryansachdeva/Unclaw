@@ -276,7 +276,7 @@ function MonthCalendar({
                 border: 'none',
                 borderRadius: 8,
                 fontFamily: 'inherit',
-                fontSize: 12,
+                fontSize: 'calc(12px * var(--glance-text, 1))',
                 fontWeight: isSelected || isToday ? 600 : 500,
                 fontVariantNumeric: 'tabular-nums',
                 cursor: 'pointer',
@@ -311,7 +311,7 @@ function MonthCalendar({
 
 function Ghost({ children }: { children: ReactNode }) {
   return (
-    <div style={{ padding: '3px 8px 6px', fontSize: 12.5, fontWeight: 500, color: 'var(--text-ghost)', textShadow: 'var(--text-shadow-floating)' }}>
+    <div style={{ padding: '3px 8px 6px', fontSize: 'calc(12.5px * var(--glance-text, 1))', fontWeight: 500, color: 'var(--text-ghost)', textShadow: 'var(--text-shadow-floating)' }}>
       {children}
     </div>
   );
@@ -327,7 +327,7 @@ function GhostButton({ children, onClick, icon }: { children: ReactNode; onClick
         display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
         padding: '4px 8px 5px', borderRadius: 8,
         background: 'transparent', border: 'none',
-        fontFamily: 'inherit', fontSize: 12.5, fontWeight: 500,
+        fontFamily: 'inherit', fontSize: 'calc(12.5px * var(--glance-text, 1))', fontWeight: 500,
         color: 'var(--text-ghost)', cursor: 'pointer',
         textShadow: 'var(--text-shadow-floating)',
         transition: 'background 0.15s var(--ease-out-quart), color 0.15s var(--ease-out-quart)',
@@ -398,7 +398,7 @@ function ReminderRow({
           textDecoration: checked ? 'line-through' : 'none',
         }}
       >
-        <span style={{ maxWidth: 196, fontSize: 13, fontWeight: 500, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <span style={{ maxWidth: 'calc(196px * var(--glance-text, 1))', fontSize: 'calc(13px * var(--glance-text, 1))', fontWeight: 500, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {reminder.title}
         </span>
         <span style={{ ...GLANCE_META_STYLE, color: when.overdue ? 'var(--danger)' : 'var(--text-secondary)', opacity: when.overdue ? 1 : 0.8 }}>

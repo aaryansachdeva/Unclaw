@@ -50,7 +50,7 @@ import { WeatherGlance } from './WeatherGlance';
 import { StocksGlance } from './StocksGlance';
 import { NewsGlance } from './NewsGlance';
 import { GLANCE_LABEL_STYLE } from './GlanceSection';
-import { useGlanceScale } from '../../hooks/useGlanceScale';
+import { useGlanceType } from '../../hooks/useGlanceScale';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 export const GLANCE_COLUMN_LEFT = 22;
@@ -89,17 +89,17 @@ interface Props {
 }
 
 export function GlanceColumn({
-  top: topProp, reminders, onCompleteReminder, onRemindersChanged, activeWidget, onOpen, onClose, refreshKey, faded = false,
+  top, reminders, onCompleteReminder, onRemindersChanged, activeWidget, onOpen, onClose, refreshKey, faded = false,
   glance, onGlanceChange, onSummarizeArticle, onAddReminder,
   customWidgets = [], onCustomWidgetsChanged,
 }: Props) {
   const reduce = useReducedMotion() ?? false;
   const [now, setNow] = useState(() => new Date());
   const columnRef = useRef<HTMLDivElement>(null);
-  // Grows with the window (hooks/useGlanceScale): the column widens and its
-  // content is zoomed, so every widget keeps its default-size proportions.
-  const scale = useGlanceScale();
-  const top = topProp + 28 * (scale - 1);
+  // A bigger window grows the reading text a little and the labels less
+  // (hooks/useGlanceScale). Every widget reads the ramp from the CSS
+  // variables set below; the column widens only as far as its text does.
+  const type = useGlanceType();
   const [layout, setLayout] = useState<GlanceLayout>(() => loadGlanceLayout());
   const [editing, setEditing] = useState(false);
 
@@ -215,7 +215,9 @@ export function GlanceColumn({
         position: 'absolute',
         top,
         left: GLANCE_COLUMN_LEFT,
-        width: GLANCE_COLUMN_WIDTH * scale,
+        width: GLANCE_COLUMN_WIDTH * type.text,
+        ['--glance-text' as string]: type.text,
+        ['--glance-label' as string]: type.label,
         maxWidth: 'calc(100% - 44px)',
         maxHeight: `calc(100% - ${top + BOTTOM_CLEARANCE}px)`,
         overflowY: 'auto',
@@ -225,10 +227,8 @@ export function GlanceColumn({
         WebkitMaskImage: 'linear-gradient(to bottom, #000 calc(100% - 28px), transparent)',
         maskImage: 'linear-gradient(to bottom, #000 calc(100% - 28px), transparent)',
         paddingBottom: 28,
-        // The rows' -8 px hover bleed is zoomed with them, so the room kept
-        // for it scales too and the text stays at x = 22 under the greeting.
-        paddingLeft: 8 * scale,
-        marginLeft: -8 * scale,
+        paddingLeft: 8,
+        marginLeft: -8,
         zIndex: 20,
         pointerEvents: faded ? 'none' : 'auto',
         opacity: faded ? 0 : 1,
@@ -238,7 +238,6 @@ export function GlanceColumn({
       }}
       aria-hidden={faded || undefined}
     >
-      <div style={{ zoom: scale }}>
       {editing ? (
         /* Edit mode: headers only, drag to reorder, x to remove, hidden
            widgets offered back below, Done at the foot. */
@@ -275,7 +274,7 @@ export function GlanceColumn({
                 }}
                 exit={reduce ? { opacity: 0 } : { opacity: 0, y: -6, transition: { duration: 0.15, ease: EASE_OUT_EXPO } }}
                 transition={{ layout: { duration: 0.32, ease: EASE_OUT_EXPO } }}
-                style={{ marginTop: i === 0 ? 0 : 26, marginLeft: -8 }}
+                style={{ marginTop: i === 0 ? 0 : 'calc(26px * var(--glance-text, 1))', marginLeft: -8 }}
               >
                 {nodeFor(key)}
               </motion.div>
@@ -326,7 +325,6 @@ export function GlanceColumn({
           )}
         </motion.div>
       )}
-      </div>
     </div>
   );
 }
@@ -377,7 +375,7 @@ function FootButton({
         display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
         padding: '4px 8px 5px', borderRadius: 8,
         background: 'transparent', border: 'none',
-        fontFamily: 'inherit', fontSize: 12.5, fontWeight: 500,
+        fontFamily: 'inherit', fontSize: 'calc(12.5px * var(--glance-text, 1))', fontWeight: 500,
         color, cursor: 'pointer',
         textShadow: 'var(--text-shadow-floating)',
         transition: 'background 0.15s var(--ease-out-quart), color 0.15s var(--ease-out-quart)',

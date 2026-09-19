@@ -41,7 +41,7 @@ function Headline({ a, lines = 2 }: { a: NewsArticle; lines?: number }) {
   return (
     <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
       <span style={{
-        fontSize: 13, fontWeight: 500, lineHeight: 1.3,
+        fontSize: 'calc(13px * var(--glance-text, 1))', fontWeight: 500, lineHeight: 1.3,
         display: '-webkit-box', WebkitLineClamp: lines, WebkitBoxOrient: 'vertical',
         overflow: 'hidden', maxWidth: 208,
       }}>
@@ -81,7 +81,7 @@ export const NewsGlance = forwardRef<HTMLDivElement, Props>(function NewsGlance(
   const shown = articles && articles.length ? articles[idx] : null;
 
   const ghost = (text: string) => (
-    <div style={{ padding: '3px 8px 6px', fontSize: 12.5, fontWeight: 500, color: 'var(--text-ghost)', textShadow: 'var(--text-shadow-floating)' }}>
+    <div style={{ padding: '3px 8px 6px', fontSize: 'calc(12.5px * var(--glance-text, 1))', fontWeight: 500, color: 'var(--text-ghost)', textShadow: 'var(--text-shadow-floating)' }}>
       {text}
     </div>
   );
@@ -90,7 +90,7 @@ export const NewsGlance = forwardRef<HTMLDivElement, Props>(function NewsGlance(
     <div>
       {articles.length === 0 && ghost('No headlines right now')}
       {articles.map((a, i) => (
-        <div key={a.url || a.title} style={{ marginTop: i === 0 ? 0 : 12 }}>
+        <div key={a.url || a.title} style={{ marginTop: i === 0 ? 0 : 'calc(12px * var(--glance-text, 1))' }}>
           <GlanceRow onClick={() => openArticle(a, onOpen)} ariaLabel={`Open article: ${a.title}`} align="flex-start">
             <Headline a={a} lines={3} />
           </GlanceRow>

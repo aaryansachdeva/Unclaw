@@ -9,7 +9,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { useGlanceScale } from '../hooks/useGlanceScale';
+import { useGlanceType } from '../hooks/useGlanceScale';
 
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -37,10 +37,10 @@ export const GREETING_TOP = 72;
 export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
   const reduce = useReducedMotion() ?? false;
   const rootRef = useRef<HTMLDivElement>(null);
-  // Grows with the window like the glance column under it (hooks/
-  // useGlanceScale). The anchor stays put; the content is zoomed, and the
-  // reported offsetHeight is the zoomed height, so the column still clears it.
-  const scale = useGlanceScale();
+  // On a bigger window the headline grows the most, the clock and the quote
+  // a little, the attribution barely (hooks/useGlanceScale). The anchor stays
+  // put, and the reported height is the real one, so the column clears it.
+  const type = useGlanceType();
   const [now, setNow] = useState(() => new Date());
 
   // The clock shows hours and minutes (a ticking seconds counter at the
@@ -98,13 +98,12 @@ export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
         top: GREETING_TOP,
         left: 22,
         right: 22,
-        maxWidth: 520 * scale,
+        maxWidth: 520 * type.display,
         zIndex: 5,
         pointerEvents: 'none',
         userSelect: 'none',
       }}
     >
-      <div style={{ zoom: scale }}>
       {/* Time + date row. Time is the lead; date sits beside it in a
           quieter tone with a hairline dot separator. Tabular numerics
           on both so the row never reflows tick to tick. */}
@@ -115,14 +114,14 @@ export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
         style={{
           display: 'inline-flex',
           alignItems: 'baseline',
-          gap: 10,
-          marginBottom: 10,
+          gap: 10 * type.text,
+          marginBottom: 10 * type.text,
           color: 'var(--text-secondary)',
           textShadow: 'var(--text-shadow-floating)',
         }}
       >
         <span style={{
-          fontSize: 13,
+          fontSize: 13 * type.text,
           fontWeight: 500,
           letterSpacing: '0.01em',
           fontVariantNumeric: 'tabular-nums',
@@ -137,7 +136,7 @@ export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
           alignSelf: 'center',
         }} />
         <span style={{
-          fontSize: 11.5,
+          fontSize: 11.5 * type.label,
           fontWeight: 500,
           letterSpacing: '0.04em',
           textTransform: 'uppercase',
@@ -156,7 +155,7 @@ export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
           ease: EASE_OUT_EXPO,
         }}
         style={{
-          fontSize: 34,
+          fontSize: 34 * type.display,
           fontWeight: 600,
           color: 'var(--text-primary)',
           letterSpacing: '-0.028em',
@@ -192,7 +191,7 @@ export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
         // never changes this block's height: the glance column starts
         // right under the greeting and would otherwise shift with every
         // rotation.
-        style={{ marginTop: 18, minHeight: 66 }}
+        style={{ marginTop: 18 * type.text, minHeight: 66 * type.text }}
       >
         <AnimatePresence mode="wait">
           <motion.p
@@ -202,7 +201,7 @@ export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
             exit={reduce ? { opacity: 0 } : { opacity: 0, y: -3 }}
             transition={{ duration: 0.5, ease: EASE_OUT_EXPO }}
             style={{
-              fontSize: 14.5,
+              fontSize: 14.5 * type.text,
               fontWeight: 400,
               fontStyle: 'italic',
               color: 'var(--text-secondary)',
@@ -210,15 +209,15 @@ export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
               letterSpacing: '-0.005em',
               margin: 0,
               textShadow: 'var(--text-shadow-floating)',
-              maxWidth: 360,
+              maxWidth: 360 * type.text,
             }}
           >
             “{quote.text}”
             <span style={{
               display: 'block',
-              marginTop: 6,
+              marginTop: 6 * type.text,
               fontStyle: 'normal',
-              fontSize: 11,
+              fontSize: 11 * type.label,
               fontWeight: 600,
               letterSpacing: '0.08em',
               textTransform: 'uppercase',
@@ -230,7 +229,6 @@ export function Greeting({ userName = 'friend', onHeight }: GreetingProps) {
           </motion.p>
         </AnimatePresence>
       </motion.div>
-      </div>
     </div>
   );
 }

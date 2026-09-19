@@ -104,7 +104,7 @@ export function GlanceSearch<T>({
             background: 'transparent', border: 'none', outline: 'none',
             borderBottom: '1px solid rgba(255,255,255,0.18)',
             padding: '0 0 3px',
-            fontFamily: 'inherit', fontSize: 13, fontWeight: 500,
+            fontFamily: 'inherit', fontSize: 'calc(13px * var(--glance-text, 1))', fontWeight: 500,
             color: 'var(--text-primary)',
             textShadow: 'var(--text-shadow-floating)',
           }}
@@ -139,7 +139,7 @@ export function GlanceSearch<T>({
           >
             {Icon && <Icon size={14} strokeWidth={2} style={{ flexShrink: 0, opacity: 0.85 }} aria-hidden />}
             <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
-              <span style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <span style={{ fontSize: 'calc(13px * var(--glance-text, 1))', fontWeight: 500, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {it.primary}
               </span>
               {it.secondary && (
@@ -157,7 +157,7 @@ export function GlanceSearch<T>({
 
 function Hint({ children }: { children: ReactNode }) {
   return (
-    <div style={{ padding: '3px 8px 4px', fontSize: 12.5, fontWeight: 500, color: 'var(--text-ghost)', textShadow: 'var(--text-shadow-floating)' }}>
+    <div style={{ padding: '3px 8px 4px', fontSize: 'calc(12.5px * var(--glance-text, 1))', fontWeight: 500, color: 'var(--text-ghost)', textShadow: 'var(--text-shadow-floating)' }}>
       {children}
     </div>
   );
@@ -174,7 +174,7 @@ export function GlanceAddButton({ children, onClick }: { children: ReactNode; on
         display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
         padding: '4px 8px 5px', borderRadius: 8,
         background: 'transparent', border: 'none',
-        fontFamily: 'inherit', fontSize: 12.5, fontWeight: 500,
+        fontFamily: 'inherit', fontSize: 'calc(12.5px * var(--glance-text, 1))', fontWeight: 500,
         color: 'var(--text-ghost)', cursor: 'pointer',
         textShadow: 'var(--text-shadow-floating)',
         transition: 'background 0.15s var(--ease-out-quart), color 0.15s var(--ease-out-quart)',

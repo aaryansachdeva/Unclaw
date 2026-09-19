@@ -28,7 +28,7 @@ export const GLANCE_ROW_STYLE = {
 } as const;
 
 export const GLANCE_LABEL_STYLE = {
-  fontSize: 10,
+  fontSize: 'calc(10px * var(--glance-label, 1))',
   fontWeight: 600,
   letterSpacing: '0.16em',
   textTransform: 'uppercase',
@@ -38,7 +38,7 @@ export const GLANCE_LABEL_STYLE = {
 
 /** Small caps meta text used under or beside a primary line. */
 export const GLANCE_META_STYLE = {
-  fontSize: 10.5,
+  fontSize: 'calc(10.5px * var(--glance-label, 1))',
   fontWeight: 600,
   lineHeight: 1.3,
   letterSpacing: '0.04em',
@@ -98,7 +98,7 @@ export const GlanceSection = forwardRef<HTMLDivElement, Props>(function GlanceSe
             <GripVertical size={13} strokeWidth={2.2} />
           </span>
         )}
-        <span style={{ ...GLANCE_LABEL_STYLE, ...(editing ? { color: 'var(--text-secondary)', fontSize: 11 } : {}) }}>
+        <span style={{ ...GLANCE_LABEL_STYLE, ...(editing ? { color: 'var(--text-secondary)', fontSize: 'calc(11px * var(--glance-label, 1))' } : {}) }}>
           {label}
           {!editing && note && (
             /* The note is usually a name (a place, a count): it keeps its own

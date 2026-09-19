@@ -41,7 +41,7 @@ const money = (n: number) => n.toLocaleString(undefined, { minimumFractionDigits
 function QuoteLine({ q }: { q: StockQuote }) {
   const up = q.change_pct >= 0;
   return (
-    <span style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 13, lineHeight: 1.3, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+    <span style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 'calc(13px * var(--glance-text, 1))', lineHeight: 1.3, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
       <span style={{ fontWeight: 600, letterSpacing: '0.02em', minWidth: 44 }}>{q.symbol}</span>
       <span style={{ fontWeight: 500 }}>{money(q.price)}</span>
       <span style={{ ...GLANCE_META_STYLE, color: up ? 'var(--live)' : 'var(--danger)', opacity: 1 }}>
@@ -125,7 +125,7 @@ export const StocksGlance = forwardRef<HTMLDivElement, Props>(function StocksGla
   };
 
   const ghost = (text: string) => (
-    <div style={{ padding: '3px 8px 6px', fontSize: 12.5, fontWeight: 500, color: 'var(--text-ghost)', textShadow: 'var(--text-shadow-floating)' }}>
+    <div style={{ padding: '3px 8px 6px', fontSize: 'calc(12.5px * var(--glance-text, 1))', fontWeight: 500, color: 'var(--text-ghost)', textShadow: 'var(--text-shadow-floating)' }}>
       {text}
     </div>
   );
@@ -264,7 +264,7 @@ function StockRow({
       >
         <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0, flex: 1, overflow: 'hidden' }}>
           {quote ? <QuoteLine q={quote} /> : (
-            <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '0.02em', lineHeight: 1.3, whiteSpace: 'nowrap' }}>{symbol}</span>
+            <span style={{ fontSize: 'calc(13px * var(--glance-text, 1))', fontWeight: 600, letterSpacing: '0.02em', lineHeight: 1.3, whiteSpace: 'nowrap' }}>{symbol}</span>
           )}
           <span style={{ ...GLANCE_META_STYLE, textTransform: 'none', letterSpacing: '0.01em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: editable ? 150 : 196 }}>
             {quote ? quote.name : pending ? 'Fetching quote…' : 'No quote for this symbol'}

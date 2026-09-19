@@ -32,18 +32,18 @@ interface Props {
 }
 
 const ghost = (text: string) => (
-  <div style={{ ...GLANCE_ROW_STYLE, color: 'var(--text-ghost)', fontSize: 12.5, cursor: 'default' }}>{text}</div>
+  <div style={{ ...GLANCE_ROW_STYLE, color: 'var(--text-ghost)', fontSize: 'calc(12.5px * var(--glance-text, 1))', cursor: 'default' }}>{text}</div>
 );
 
 function ItemLine({ item }: { item: WidgetItem }) {
   return (
     <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0, flex: 1, overflow: 'hidden' }}>
       <span style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
-        <span style={{ fontSize: 13, lineHeight: 1.3, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }}>
+        <span style={{ fontSize: 'calc(13px * var(--glance-text, 1))', lineHeight: 1.3, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }}>
           {item.title}
         </span>
         {item.value && (
-          <span style={{ fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{item.value}</span>
+          <span style={{ fontSize: 'calc(13px * var(--glance-text, 1))', fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{item.value}</span>
         )}
       </span>
       {item.meta && (
@@ -60,7 +60,7 @@ function MetricLine({ value, unit, delta, caption }: { value?: string; unit?: st
   return (
     <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
       <span style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
-        <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: '-0.01em' }}>{value}</span>
+        <span style={{ fontSize: 'calc(15px * var(--glance-text, 1))', fontWeight: 600, letterSpacing: '-0.01em' }}>{value}</span>
         {unit && <span style={{ ...GLANCE_META_STYLE }}>{unit}</span>}
         {delta && (
           <span style={{ ...GLANCE_META_STYLE, color: up ? 'var(--live)' : 'var(--danger)', opacity: 1 }}>{delta}</span>
@@ -84,7 +84,7 @@ function DraftDecision({ onKeep, onDiscard }: { onKeep: () => void; onDiscard: (
         background: primary ? 'var(--glass-bg-hover)' : 'transparent',
         border: '1px solid var(--glass-border)',
         color: primary ? 'var(--text-primary)' : 'var(--text-secondary)',
-        fontFamily: 'inherit', fontSize: 11.5, fontWeight: 600, letterSpacing: '0.02em',
+        fontFamily: 'inherit', fontSize: 'calc(11.5px * var(--glance-text, 1))', fontWeight: 600, letterSpacing: '0.02em',
         cursor: 'pointer', textShadow: 'var(--text-shadow-floating)',
       }}
     >
@@ -142,7 +142,7 @@ export const CustomGlance = forwardRef<HTMLDivElement, Props>(function CustomGla
     ) : (
       <GlanceRow onClick={onOpen} ariaLabel={`Open ${spec.label}`}>
         <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
-          <span style={{ fontSize: 13, lineHeight: 1.35, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{data?.text}</span>
+          <span style={{ fontSize: 'calc(13px * var(--glance-text, 1))', lineHeight: 1.35, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{data?.text}</span>
           {data?.meta && <span style={{ ...GLANCE_META_STYLE, textTransform: 'none', letterSpacing: '0.01em' }}>{data.meta}</span>}
         </span>
       </GlanceRow>
@@ -177,7 +177,7 @@ export const CustomGlance = forwardRef<HTMLDivElement, Props>(function CustomGla
           style={{ ...GLANCE_ROW_STYLE, cursor: data?.url ? 'pointer' : 'default', color: 'var(--text-primary)' }}
         >
           <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            <span style={{ fontSize: 13, lineHeight: 1.4 }}>{data?.text}</span>
+            <span style={{ fontSize: 'calc(13px * var(--glance-text, 1))', lineHeight: 1.4 }}>{data?.text}</span>
             {data?.meta && <span style={{ ...GLANCE_META_STYLE, textTransform: 'none', letterSpacing: '0.01em' }}>{data.meta}</span>}
           </span>
         </div>
