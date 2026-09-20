@@ -74,6 +74,9 @@ interface SettingsPanelProps {
   /** Build ships DLSS but the user's ReShade tooling is not in place yet,
    *  so offer to install it rather than showing a switch that does nothing. */
   dlss5CanInstall?: boolean;
+  /** Build ships DLSS at all. Gates the DLSS switch; `dlss5Available` only
+   *  decides how that one switch is worded. */
+  dlssPresent?: boolean;
 }
 
 type SaveState =
@@ -138,6 +141,8 @@ interface PaneContext {
   dlss5Available: boolean;
   /** See SettingsPanelProps.dlss5CanInstall. */
   dlss5CanInstall: boolean;
+  /** See SettingsPanelProps.dlssPresent. */
+  dlssPresent: boolean;
   /** Latest /validate_keys outcome, surfaced to facets that need to
    *  render keyless status (Claude Code subscription install + auth). */
   validation: KeyValidationResult | null;
@@ -153,7 +158,7 @@ interface PaneContext {
 // =============================================================================
 
 export function SettingsPanel({
-  open, onClose, onSaved, dlss5Available, dlss5CanInstall,
+  open, onClose, onSaved, dlss5Available, dlss5CanInstall, dlssPresent,
 }: SettingsPanelProps) {
   const [draft, setDraft] = useState<ApiKeysProfile>(DEFAULT_API_KEYS);
   const [original, setOriginal] = useState<ApiKeysProfile>(DEFAULT_API_KEYS);
@@ -414,6 +419,7 @@ export function SettingsPanel({
     draft, update, setProvider, liveModelsByProvider, thinkingCapsByModel,
     isProbingKey, graphicsChanged, dlss5Available: dlss5Available ?? false,
     dlss5CanInstall: dlss5CanInstall ?? false,
+    dlssPresent: dlssPresent ?? false,
     validation, profile: profileDraft, updateProfile,
   };
 
@@ -1138,7 +1144,7 @@ function AgenticFacet({ draft, update, validation, isProbingKey, liveModelsByPro
 // =============================================================================
 
 function GraphicsFacet({
-  draft, update, graphicsChanged, dlss5Available, dlss5CanInstall,
+  draft, update, graphicsChanged, dlss5Available, dlss5CanInstall, dlssPresent,
 }: PaneContext) {
   const tiers: { id: GraphicsQuality; label: string; copy: string; rings: number }[] = [
     { id: 'low',    label: 'Low',    copy: '50% backbuffer. Stays cool on a laptop.',         rings: 2 },
@@ -1171,13 +1177,14 @@ function GraphicsFacet({
           Deliberately NOT part of the preset tiles above and deliberately not
           wired to `graphicsChanged`: the preset needs a restart, this takes
           effect the moment it is saved. */}
-      {dlss5Available && (
-        <NeuralRenderingRow
+      {dlssPresent && (
+        <DlssRow
           value={draft.dlss5_enabled}
           onChange={(v) => update('dlss5_enabled', v)}
+          neural={dlss5Available}
         />
       )}
-      {!dlss5Available && dlss5CanInstall && <NeuralRenderingInstallRow />}
+      {dlss5CanInstall && <NeuralRenderingInstallRow />}
     </Composition>
   );
 }
@@ -1273,11 +1280,16 @@ function NeuralRenderingInstallRow() {
 
 // A secondary switch under the preset tiles: quieter than a tile row, because
 // it is one boolean and not a choice between three renderings.
-function NeuralRenderingRow({
-  value, onChange,
+function DlssRow({
+  value, onChange, neural,
 }: {
   value: boolean;
   onChange: (v: boolean) => void;
+  /** The user's DLSS 5 tooling is installed, so this same switch also carries
+   *  Neural Rendering. ONE switch either way: UnclawNeuralRendering writes
+   *  r.NGX.DLSS.Enable, and the NR pass is the ReShade addon hooking DLSS's
+   *  output - it cannot exist with DLSS off, and has no CVar of its own. */
+  neural: boolean;
 }) {
   return (
     <div style={{
@@ -1299,7 +1311,7 @@ function NeuralRenderingRow({
             color: 'var(--text-secondary)',
             marginBottom: 8,
           }}>
-            Neural rendering
+            {neural ? 'Neural rendering' : 'Upscaling'}
           </div>
           <div style={{
             fontSize: 13.5,
@@ -1307,7 +1319,7 @@ function NeuralRenderingRow({
             letterSpacing: '-0.01em',
             marginBottom: 6,
           }}>
-            DLSS 5
+            {neural ? 'DLSS 5' : 'DLSS'}
           </div>
           <div style={{
             fontSize: 11.5,
@@ -1315,9 +1327,15 @@ function NeuralRenderingRow({
             lineHeight: 1.5,
             maxWidth: 420,
           }}>
-            Refines skin, hair and fabric while the frame is still rendering, so
-            the desktop, the browser panel and your phone all see the same
-            picture. Runs on the DLSS 5 runtime you installed yourself.
+            {neural
+              ? `Refines skin, hair and fabric while the frame is still rendering,
+                 so the desktop, the browser panel and your phone all see the same
+                 picture. Runs on the DLSS 5 runtime you installed yourself.`
+                  .replace(/\s+/g, ' ')
+              : `Renders the character below native resolution and reconstructs
+                 the detail, so it costs less GPU without looking softer. Turn it
+                 off to render at full resolution instead.`
+                  .replace(/\s+/g, ' ')}
           </div>
         </div>
         <div style={{

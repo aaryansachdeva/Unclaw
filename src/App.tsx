@@ -547,6 +547,10 @@ function AppMain() {
   // Build ships DLSS but the user's own files are not in place yet, so Settings
   // offers to install them instead of showing a switch that would do nothing.
   const [dlss5CanInstall, setDlss5CanInstall] = useState(false);
+  // The build ships DLSS at all. Gates the DLSS switch itself, which is
+  // ordinary DLSS - Neural Rendering rides on the same CVar when the user's
+  // ReShade tooling is present, so there is only ever one switch.
+  const [dlssPresent, setDlssPresent] = useState(false);
   // Ask the main process whether the user installed the tooling. UE knows the
   // same thing and announces it, but PS2's UE->frontend Response channel does
   // not currently deliver to this app (see the listener below), so the file
@@ -561,6 +565,7 @@ function AppMain() {
         .then((st: { buildHasDlss: boolean; ready: boolean }) => {
           setDlss5Available(!!st?.ready);
           setDlss5CanInstall(!!st?.buildHasDlss && !st?.ready);
+          setDlssPresent(!!st?.buildHasDlss);
           // eslint-disable-next-line no-console
           console.log('[dlss5] tooling status:', st);
         })
@@ -4665,6 +4670,7 @@ function AppMain() {
         onSaved={() => void refreshActiveLlmModel()}
         dlss5Available={dlss5Available}
         dlss5CanInstall={dlss5CanInstall}
+        dlssPresent={dlssPresent}
       />
 
       {/* Greeting + ambient widgets. Gated only on a connected stream
