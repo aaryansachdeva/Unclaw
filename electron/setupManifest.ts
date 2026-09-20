@@ -170,7 +170,7 @@ export const MANIFEST: SetupManifest = {
   // Bumped whenever ANY bundle below changes, so existing installs re-run the
   // wizard for the new artifacts. Shared by all three platforms (each bundle
   // carries its own per-platform version), so no platform suffix here.
-  releaseTag: '2026.0912.01',
+  releaseTag: '2026.0920.01',
   pythonVersion: '3.11',
   minFreeDiskBytes: 15 * 1024 * 1024 * 1024, // 15 GB
 
@@ -250,10 +250,10 @@ export const MANIFEST: SetupManifest = {
   // 0 alone, or 0+5, and grace_custom spawns with no body. The previous comment
   // here said "pakchunk0 + pakchunk5 only" — that predates Syd and was wrong.
   unrealWindows: {
-    url: 'https://files.fotonlabs.com/unreal/2026.0910.02.zip',
-    sha256: 'e4fa42dcf4702d6ab614d949b52e51009d890ba0fb6264f3a987c037d3ae12bd',
-    sizeBytes: 3_397_257_380,
-    version: '2026.0910.02',
+    url: 'https://files.fotonlabs.com/unreal/2026.0920.01.zip',
+    sha256: 'e6023c5b6ba9e8ef6f96a40750c49b84cbca5e2be3394bef1a810aeb673428b2',
+    sizeBytes: 3_445_924_460,
+    version: '2026.0920.01',
   },
 
   // runtimeAssetsWindows 2026.0912.01: adds soul-models/pocket/ — the Kyutai
@@ -290,10 +290,10 @@ export const MANIFEST: SetupManifest = {
   // The assets bundle is byte-identical to the Windows one (pure ONNX + python,
   // no platform bits) — same sha, two keys. That duplication is deliberate.
   unrealLinux: {
-    url: 'https://files.fotonlabs.com/linux/unreal/unreal-2026.0910.02-linux.zip',
-    sha256: 'b6e81bb69ba5d009121c67da2ae503ad52fa8d99a8c3effde22b3c1c46014c21',
-    sizeBytes: 3_332_850_121,
-    version: '2026.0910.02',
+    url: 'https://files.fotonlabs.com/linux/unreal/unreal-2026.0920.01-linux.zip',
+    sha256: '139bcb342e45b9827fb75df00817c9474627bfe3b3d1076d72aa977fe076cc7d',
+    sizeBytes: 3_333_505_499,
+    version: '2026.0920.01',
   },
 
   runtimeAssetsLinux: {
@@ -337,69 +337,69 @@ export const MANIFEST: SetupManifest = {
   characterPaks: {
     ava: {
       characterId: 'ava',
-      version: '2026.0910.02',
+      version: '2026.0920.01',
       url: 'https://store.unclaw.io/store/characters/ava/download',
       mac: {
         sha256: '949ba8ab7d0a1193bee9a8cc2ca016346ce143d36227e0c17423967e9b7e4a39',
         sizeBytes: 167_088_287,
       },
       windows: {
-        sha256: '66b19d15b662c0a757267754d42eeb9a346f07597d06abe6190daeb63c833689',
+        sha256: '2bf7e633ccd69e896231fcae7f90dec023f543165c895ff397c8d64b71ddb4e6',
         sizeBytes: 163_903_556,
       },
       linux: {
-        sha256: '3e98404b3fe87dc21cb9aacd630a4756c1560dfaf4aa43affad927b5cc3bcbf0',
+        sha256: '221253b7cf7de6bec657d847bf23a58fe69d0c7868a32aecc10c78a5baa86f60',
         sizeBytes: 162_186_610,
       },
     },
     goblin: {
       characterId: 'goblin',
-      version: '2026.0910.02',
+      version: '2026.0920.01',
       url: 'https://store.unclaw.io/store/characters/goblin/download',
       mac: {
         sha256: '69a838e24e4aa81fa6a0e65d29ab8d7f768281dff0472e527cea5b96801e629a',
         sizeBytes: 126_354_548,
       },
       windows: {
-        sha256: '42a1f4478db5f6175e3e1f70f0cb0f0bbe7a4533eea26d6cabf248623957459a',
+        sha256: '96f89bb917950a15b154c64438a0f0024d771d722a66ab0bf26b63ff05f61849',
         sizeBytes: 123_177_517,
       },
       linux: {
-        sha256: 'f767ed1322c85f888b6549eb9e871e5e75ff867c30e213859ad23f41c4a0fdf2',
+        sha256: '6c4f1c4356c6d0b55dfb1adc070d758747db81178acb80d6de1c1f0a1cb4916b',
         sizeBytes: 121_491_685,
       },
     },
     chris: {
       characterId: 'chris',
-      version: '2026.0910.02',
+      version: '2026.0920.01',
       url: 'https://store.unclaw.io/store/characters/chris/download',
       mac: {
         sha256: '6e7f9aabd3cbc4f0b343de286cd45c910d59a7c0af8b1e9dd742fcdd212f3556',
         sizeBytes: 164_216_981,
       },
       windows: {
-        sha256: '762f5ed9b08f0bd8e560b1fc1f5edc999f6dd615fb6d162f255cefa895af4316',
+        sha256: '9df3f3da1e3d7b4f3244e1a230513c5d251de266520f046e4471076592403cb5',
         sizeBytes: 161_153_296,
       },
       linux: {
-        sha256: 'd8da19671a019a98da1ef85426f483139673da867581a0be401d0d5381e5a553',
+        sha256: '488e8d3322874169b8ff9b737f1d68bc0de1bb5bd35d515fe776ad0f89b90c12',
         sizeBytes: 159_602_067,
       },
     },
     joi: {
       characterId: 'joi',
-      version: '2026.0910.02',
+      version: '2026.0920.01',
       url: 'https://store.unclaw.io/store/characters/joi/download',
       mac: {
         sha256: 'a8eb5c89e207ebdee48b0a531536073a5e80919db26e204b12ba1b64173d4213',
         sizeBytes: 174_802_419,
       },
       windows: {
-        sha256: '3a62bfdc0229ec6eb942b994371d3017e69dfabfc619fcdd35172de2ba4206f3',
+        sha256: '530d995e2115af6503fa2cf51730925f93469a7156617f1bde81cccbd2e1280a',
         sizeBytes: 171_620_977,
       },
       linux: {
-        sha256: '309e3020311d3354829d6b7a11352c0d04f4c9887c83e6a9240efddaa0c7492a',
+        sha256: '596f2cad6bb148291b62041e137c02f98133a6da9bdfa125ef3dd9a428cf4650',
         sizeBytes: 169_922_150,
       },
     },
