@@ -71,6 +71,9 @@ interface SettingsPanelProps {
    *  (EventType unclawNeuralRenderingState) and we hide the control otherwise
    *  - a switch that cannot do anything is worse than no switch. */
   dlss5Available?: boolean;
+  /** Build ships DLSS but the user's ReShade tooling is not in place yet,
+   *  so offer to install it rather than showing a switch that does nothing. */
+  dlss5CanInstall?: boolean;
 }
 
 type SaveState =
@@ -133,6 +136,8 @@ interface PaneContext {
   graphicsChanged: boolean;
   /** See SettingsPanelProps.dlss5Available. */
   dlss5Available: boolean;
+  /** See SettingsPanelProps.dlss5CanInstall. */
+  dlss5CanInstall: boolean;
   /** Latest /validate_keys outcome, surfaced to facets that need to
    *  render keyless status (Claude Code subscription install + auth). */
   validation: KeyValidationResult | null;
@@ -147,7 +152,9 @@ interface PaneContext {
 // Root
 // =============================================================================
 
-export function SettingsPanel({ open, onClose, onSaved, dlss5Available }: SettingsPanelProps) {
+export function SettingsPanel({
+  open, onClose, onSaved, dlss5Available, dlss5CanInstall,
+}: SettingsPanelProps) {
   const [draft, setDraft] = useState<ApiKeysProfile>(DEFAULT_API_KEYS);
   const [original, setOriginal] = useState<ApiKeysProfile>(DEFAULT_API_KEYS);
   const [loading, setLoading] = useState(true);
@@ -406,6 +413,7 @@ export function SettingsPanel({ open, onClose, onSaved, dlss5Available }: Settin
   const ctx: PaneContext = {
     draft, update, setProvider, liveModelsByProvider, thinkingCapsByModel,
     isProbingKey, graphicsChanged, dlss5Available: dlss5Available ?? false,
+    dlss5CanInstall: dlss5CanInstall ?? false,
     validation, profile: profileDraft, updateProfile,
   };
 
@@ -1129,7 +1137,9 @@ function AgenticFacet({ draft, update, validation, isProbingKey, liveModelsByPro
 // GRAPHICS, render quality preset
 // =============================================================================
 
-function GraphicsFacet({ draft, update, graphicsChanged, dlss5Available }: PaneContext) {
+function GraphicsFacet({
+  draft, update, graphicsChanged, dlss5Available, dlss5CanInstall,
+}: PaneContext) {
   const tiers: { id: GraphicsQuality; label: string; copy: string; rings: number }[] = [
     { id: 'low',    label: 'Low',    copy: '50% backbuffer. Stays cool on a laptop.',         rings: 2 },
     { id: 'medium', label: 'Medium', copy: '75% backbuffer. Richer subsurface scattering.',   rings: 3 },
@@ -1167,7 +1177,97 @@ function GraphicsFacet({ draft, update, graphicsChanged, dlss5Available }: PaneC
           onChange={(v) => update('dlss5_enabled', v)}
         />
       )}
+      {!dlss5Available && dlss5CanInstall && <NeuralRenderingInstallRow />}
     </Composition>
+  );
+}
+
+/** Shown when the build HAS DLSS but the user's own DLSS 5 files are not in
+ *  place. Three files have to sit next to the character executable, buried
+ *  several folders inside the runtime directory; finding that folder by hand is
+ *  the entire difficulty, so this does it for them.
+ *
+ *  We ship none of the files and never will - nvngx_dlssnr.dll is pre-release
+ *  NVIDIA under NDA. This is for users who already have their own copies. */
+function NeuralRenderingInstallRow() {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const install = async () => {
+    const api = window.electronAPI as unknown as {
+      dlss5InstallTooling?: () => Promise<{
+        ok: boolean; installed: string[]; missing: string[];
+        ignored: string[]; error?: string;
+      }>;
+    };
+    if (!api?.dlss5InstallTooling) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await api.dlss5InstallTooling();
+      if (r.error === 'cancelled') setNote(null);
+      else if (r.error) setNote(`Could not install: ${r.error}`);
+      else if (r.ok) setNote('Installed. Restart the character to use it.');
+      else setNote(`Still missing: ${r.missing.join(', ')}`);
+    } catch (e) {
+      setNote(`Could not install: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{
+      marginTop: 26,
+      paddingTop: 22,
+      borderTop: '1px solid var(--glass-border)',
+    }}>
+      <div style={{
+        fontSize: 10.5,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        color: 'var(--text-secondary)',
+        marginBottom: 8,
+      }}>
+        Neural Rendering
+      </div>
+      <div style={{
+        fontSize: 12.5,
+        lineHeight: 1.5,
+        color: 'var(--text-secondary)',
+        marginBottom: 14,
+      }}>
+        If you have early access to DLSS 5, select your three files and Unclaw
+        will put them where the character can find them, and apply the tuned
+        settings. Nothing is downloaded.
+      </div>
+      <button
+        type="button"
+        onClick={install}
+        disabled={busy}
+        style={{
+          padding: '7px 14px',
+          fontSize: 12,
+          borderRadius: 7,
+          border: '1px solid var(--glass-border)',
+          background: 'transparent',
+          color: 'var(--text-primary)',
+          cursor: busy ? 'default' : 'pointer',
+          opacity: busy ? 0.55 : 1,
+        }}
+      >
+        {busy ? 'Installing…' : 'Select DLSS 5 files…'}
+      </button>
+      {note && (
+        <div style={{
+          marginTop: 10,
+          fontSize: 12,
+          color: 'var(--text-secondary)',
+        }}>
+          {note}
+        </div>
+      )}
+    </div>
   );
 }
 

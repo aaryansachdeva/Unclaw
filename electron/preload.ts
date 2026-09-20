@@ -453,6 +453,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dlss5ToolingPresent: (): Promise<boolean> =>
     ipcRenderer.invoke('dlss5:tooling-present'),
 
+  /** The same question, answered in detail, so the UI can tell "your build
+   *  has no DLSS" (hide everything) from "it does, but you have not put your
+   *  files in yet" (offer to install them). */
+  dlss5ToolingStatus: (): Promise<{
+    supported: boolean; buildHasDlss: boolean;
+    hasProxy: boolean; hasAddon: boolean; hasNR: boolean;
+    ready: boolean; binDir: string | null;
+  }> => ipcRenderer.invoke('dlss5:tooling-status'),
+
+  /** Opens a file picker and copies the user's OWN DLSS 5 files next to the
+   *  character executable, then seeds ReShade.ini with the tuned look.
+   *  We ship none of those files; this only saves them finding the folder. */
+  dlss5InstallTooling: (): Promise<{
+    ok: boolean; installed: string[]; missing: string[];
+    ignored: string[]; error?: string;
+  }> => ipcRenderer.invoke('dlss5:install-tooling'),
+
+  dlss5RemoveTooling: (): Promise<{ ok: boolean; removed: string[] }> =>
+    ipcRenderer.invoke('dlss5:remove-tooling'),
+
   // Window controls.
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close'),

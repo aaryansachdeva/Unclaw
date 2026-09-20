@@ -14,6 +14,7 @@ import {
   systemPreferences,
   Display,
   IpcMainEvent,
+  dialog,
 } from 'electron';
 import path from 'path';
 import fs from 'fs';
@@ -662,9 +663,27 @@ function createTray() {
 // channel does not currently deliver to this app (UE sends, addressed to the
 // right player id; the frontend listener never fires). UE still logs its own
 // readback, which is what support should read.
-ipcMain.handle('dlss5:tooling-present', (): boolean => {
+ipcMain.handle('dlss5:tooling-present', (): boolean => dlss5Status().ready);
+
+/** Everything the DLSS 5 UI needs, in one call.
+ *
+ *  `buildHasDlss` is the build probe: NVIDIA's NGX.Build.cs stages
+ *  nvngx_dlss.dll next to the DLSS plugin, so its presence IS "this build has
+ *  DLSS in it". Without it there is no r.NGX.DLSS.Enable to toggle and the
+ *  whole surface stays hidden rather than offering a dead switch.
+ *
+ *  The rest is the user's own ReShade tooling, which we never ship. */
+function dlss5Status(): {
+  supported: boolean; buildHasDlss: boolean;
+  hasProxy: boolean; hasAddon: boolean; hasNR: boolean;
+  ready: boolean; binDir: string | null;
+} {
+  const none = {
+    supported: false, buildHasDlss: false, hasProxy: false,
+    hasAddon: false, hasNR: false, ready: false, binDir: null,
+  };
   try {
-    if (process.platform !== 'win32') return false;
+    if (process.platform !== 'win32') return none;
     // run_soul.ps1 writes the executable it actually launched; that is the only
     // reliable source, because a dev run points somewhere other than the
     // packaged runtime. Fall back to the packaged layout when it is absent.
@@ -674,35 +693,143 @@ ipcMain.handle('dlss5:tooling-present', (): boolean => {
       if (fs.existsSync(marker)) {
         // Strip the BOM: Windows PowerShell 5.1's Set-Content -Encoding utf8
         // always writes one, and it survives trim() straight into path.dirname.
-        const exe = fs.readFileSync(marker, 'utf8').replace(/^﻿/, '').trim();
+        const exe = fs.readFileSync(marker, 'utf8').replace(/^\uFEFF/, '').trim();
         if (exe) exeDir = path.dirname(exe);
       }
     } catch { /* fall through to the packaged guess */ }
     if (!exeDir) exeDir = path.join(getRuntimeDir(), 'unreal');
+
     const binDir = path.join(exeDir, 'AudioTestProject02', 'Binaries', 'Win64');
-    // The build must actually SHIP DLSS, or there is no r.NGX.DLSS.Enable for
-    // the control to toggle and it would be a dead switch. NVIDIA's
-    // NGX.Build.cs stages nvngx_dlss.dll next to the DLSS plugin, so its
-    // presence is exactly "this build has DLSS in it".
-    //
-    // This is what keeps the setting invisible in the no-DLSS release, and
-    // what makes it reappear on its own if a later build ships DLSS again -
-    // no flag to remember either way.
-    const dlssDll = path.join(
+    const buildHasDlss = fs.existsSync(path.join(
       exeDir, 'AudioTestProject02', 'Plugins', 'DLSS',
       'Binaries', 'ThirdParty', 'Win64', 'nvngx_dlss.dll',
-    );
-    const buildHasDlss = fs.existsSync(dlssDll);
+    ));
     const hasProxy = fs.existsSync(path.join(binDir, 'dxgi.dll'));
-    const hasAddon = hasProxy
+    const hasAddon = fs.existsSync(binDir)
       && fs.readdirSync(binDir).some((f) => f.toLowerCase().endsWith('.addon64'));
-    const ok = buildHasDlss && hasAddon;
-    console.log(`[dlss5] tooling check: ${binDir} `
-      + `buildHasDlss=${buildHasDlss} dxgi=${hasProxy} addon=${hasAddon} -> ${ok}`);
-    return ok;
+    const hasNR = fs.existsSync(path.join(binDir, 'nvngx_dlssnr.dll'));
+    return {
+      supported: buildHasDlss,
+      buildHasDlss, hasProxy, hasAddon, hasNR,
+      // The UE plugin arms on proxy+addon alone; nvngx_dlssnr.dll is what makes
+      // the feature actually do anything, so all three are required for "ready".
+      ready: buildHasDlss && hasProxy && hasAddon && hasNR,
+      binDir,
+    };
   } catch {
-    return false;
+    return none;
   }
+}
+
+ipcMain.handle('dlss5:tooling-status', () => dlss5Status());
+
+// The three files DLSS 5 needs, all in the ONE folder that holds the real
+// executable (verified against a live process's loaded-module list - they do
+// NOT go in the plugin ThirdParty dirs, which is where stray copies once
+// misled a whole debugging session).
+//
+// We ship none of them and never will: nvngx_dlssnr.dll is pre-release NVIDIA
+// under NDA. This only helps a user who already has their own copies put them
+// in the right place, which is otherwise a fiddly manual step.
+const DLSS5_WANTED = {
+  proxy: 'dxgi.dll',                 // ReShade 6.x with addon support
+  nr:    'nvngx_dlssnr.dll',         // NVIDIA pre-release
+  // the addon is matched by extension: RenoDX has renamed the file before
+} as const;
+
+// The addon persists these under [RenoDX.DLSS5]. Seeding them matters because
+// we run HEADLESS: ReShade's overlay needs a window, so a user can never open
+// the menu to tune anything. Without this they silently get stock defaults
+// instead of the look these values were chosen for.
+const DLSS5_RESHADE_INI = [
+  '[RenoDX.DLSS5]',
+  'NeuralUplift=1',
+  'NREnableUpscaling=0',
+  'NRPreset=3',
+  'NRStyle=2',
+  'NRIntensity=1.010000',
+  'NRLocalTone=1',
+  'NRLocalStructure=0.990000',
+  'NRSkinStructure=-1',
+  'NRPaperWhiteScale=1.047000',
+  '',
+].join('\r\n');
+
+ipcMain.handle('dlss5:install-tooling', async (): Promise<{
+  ok: boolean; installed: string[]; missing: string[];
+  ignored: string[]; error?: string;
+}> => {
+  const st = dlss5Status();
+  const fail = (error: string) => ({ ok: false, installed: [], missing: [], ignored: [], error });
+  if (process.platform !== 'win32') return fail('windows_only');
+  if (!st.binDir) return fail('runtime_not_found');
+  if (!st.buildHasDlss) return fail('build_has_no_dlss');
+
+  const picked = await dialog.showOpenDialog({
+    title: 'Select your DLSS 5 files',
+    message: 'Choose dxgi.dll, the .addon64 file, and nvngx_dlssnr.dll',
+    properties: ['openFile', 'multiSelections', 'dontAddToRecent'],
+    filters: [{ name: 'DLSS 5 tooling', extensions: ['dll', 'addon64'] }],
+  });
+  if (picked.canceled || !picked.filePaths.length) return fail('cancelled');
+
+  const installed: string[] = [];
+  const ignored: string[] = [];
+  for (const src of picked.filePaths) {
+    const base = path.basename(src);
+    const lower = base.toLowerCase();
+    // Copy ONLY the three known files. A picker that copied whatever it was
+    // handed into the runtime would be a fine way to sideload anything.
+    const wanted = lower === DLSS5_WANTED.proxy
+      || lower === DLSS5_WANTED.nr
+      || lower.endsWith('.addon64');
+    if (!wanted) { ignored.push(base); continue; }
+    try {
+      fs.copyFileSync(src, path.join(st.binDir, base));
+      installed.push(base);
+    } catch (e) {
+      return fail(`copy_failed: ${base}: ${(e as Error).message}`);
+    }
+  }
+
+  const after = dlss5Status();
+  const missing: string[] = [];
+  if (!after.hasProxy) missing.push(DLSS5_WANTED.proxy);
+  if (!after.hasAddon) missing.push('*.addon64');
+  if (!after.hasNR) missing.push(DLSS5_WANTED.nr);
+
+  // Seed the tuned look, but never clobber a user who has already tuned it.
+  try {
+    const ini = path.join(st.binDir, 'ReShade.ini');
+    const existing = fs.existsSync(ini) ? fs.readFileSync(ini, 'utf8') : '';
+    if (!existing.includes('[RenoDX.DLSS5]')) {
+      const sep = existing && !existing.endsWith('\n') ? '\r\n' : '';
+      fs.writeFileSync(ini, existing + sep + DLSS5_RESHADE_INI, 'utf8');
+      installed.push('ReShade.ini (tuned defaults)');
+    }
+  } catch { /* the files still work with stock defaults */ }
+
+  console.log(`[dlss5] install -> ${st.binDir} installed=[${installed}] `
+    + `missing=[${missing}] ignored=[${ignored}]`);
+  return { ok: missing.length === 0, installed, missing, ignored };
+});
+
+ipcMain.handle('dlss5:remove-tooling', (): { ok: boolean; removed: string[] } => {
+  const st = dlss5Status();
+  const removed: string[] = [];
+  if (!st.binDir) return { ok: false, removed };
+  try {
+    for (const f of fs.readdirSync(st.binDir)) {
+      const lower = f.toLowerCase();
+      if (lower === DLSS5_WANTED.proxy || lower === DLSS5_WANTED.nr
+          || lower.endsWith('.addon64')) {
+        fs.unlinkSync(path.join(st.binDir, f));
+        removed.push(f);
+      }
+    }
+  } catch { /* partial removal still reports what went */ }
+  console.log(`[dlss5] removed=[${removed}]`);
+  return { ok: true, removed };
 });
 
 ipcMain.handle('stream-lease:force', async (_e, holder: 'local' | 'remote' | null) => {

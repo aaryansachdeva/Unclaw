@@ -544,6 +544,9 @@ function AppMain() {
   // and the Settings control stays hidden until it says yes.
   const [dlss5Wanted, setDlss5Wanted] = useState(true);
   const [dlss5Available, setDlss5Available] = useState(false);
+  // Build ships DLSS but the user's own files are not in place yet, so Settings
+  // offers to install them instead of showing a switch that would do nothing.
+  const [dlss5CanInstall, setDlss5CanInstall] = useState(false);
   // Ask the main process whether the user installed the tooling. UE knows the
   // same thing and announces it, but PS2's UE->frontend Response channel does
   // not currently deliver to this app (see the listener below), so the file
@@ -551,9 +554,25 @@ function AppMain() {
   useEffect(() => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const api = (window as any).electronAPI;
+    // Prefer the detailed status; fall back to the boolean so an older preload
+    // still lights the toggle, just without the install prompt.
+    if (api?.dlss5ToolingStatus) {
+      void api.dlss5ToolingStatus()
+        .then((st: { buildHasDlss: boolean; ready: boolean }) => {
+          setDlss5Available(!!st?.ready);
+          setDlss5CanInstall(!!st?.buildHasDlss && !st?.ready);
+          // eslint-disable-next-line no-console
+          console.log('[dlss5] tooling status:', st);
+        })
+        .catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn('[dlss5] tooling status failed:', err);
+        });
+      return;
+    }
     if (!api?.dlss5ToolingPresent) {
       // eslint-disable-next-line no-console
-      console.log('[dlss5] electronAPI.dlss5ToolingPresent missing — control hidden');
+      console.log('[dlss5] electronAPI.dlss5Tooling* missing — control hidden');
       return;
     }
     void api.dlss5ToolingPresent()
@@ -4645,6 +4664,7 @@ function AppMain() {
         onClose={() => setSettingsOpen(false)}
         onSaved={() => void refreshActiveLlmModel()}
         dlss5Available={dlss5Available}
+        dlss5CanInstall={dlss5CanInstall}
       />
 
       {/* Greeting + ambient widgets. Gated only on a connected stream
