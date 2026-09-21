@@ -592,6 +592,14 @@ function createWindow() {
     });
   }
 
+  // A reload (Cmd+R, an HMR full refresh) drops the renderer's memory of an
+  // open chat pane while the window is still carrying the width it reserved
+  // for it. Hand that width back on every load so the window never stays
+  // wide around a pane that is no longer there.
+  mainWindow.webContents.on('did-finish-load', () => {
+    reserveSide(0);
+  });
+
   // The renderer's console lines are invisible to every log file; mirror the
   // stream-relevant ones ([direct-canvas], [ps]) and all warnings/errors to
   // stdout so a headless check can reconstruct the connection story. Lives
@@ -694,6 +702,65 @@ ipcMain.handle('stream-lease:disconnect', async () => {
 
 ipcMain.on('window:minimize', () => mainWindow?.minimize());
 ipcMain.on('window:close', () => app.quit());
+
+// ---------------------------------------------------------------------
+// Side panel reservation. The chat history pane used to be carved out of
+// the window, so opening it squeezed the streamed character into what was
+// left. Instead the window itself GROWS by the width of the pane, so the
+// stage keeps its exact pixel size and the pane arrives beside it.
+//
+// The renderer names the width it wants; this returns the width actually
+// added, which is less when the display runs out of room (the renderer
+// squeezes the stage by the shortfall). Growth goes rightward first; a
+// window already against the right edge, which is where Unclaw usually
+// lives, moves left instead. `sideShiftedX` remembers how far it moved so
+// closing the pane puts it back exactly where it was.
+// ---------------------------------------------------------------------
+let sideReserved = 0;
+let sideShiftedX = 0;
+
+function reserveSide(want: number): number {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return 0;
+  // A full-screen or maximized window cannot grow. Report nothing
+  // reserved and let the renderer fall back to squeezing the stage.
+  if (win.isFullScreen() || win.isMaximized()) {
+    sideReserved = 0;
+    sideShiftedX = 0;
+    return 0;
+  }
+  const b = win.getBounds();
+  const area = screen.getDisplayMatching(b).workArea;
+  const delta = Math.round(want) - sideReserved;
+  if (delta === 0) return sideReserved;
+
+  if (delta > 0) {
+    const roomRight = Math.max(0, area.x + area.width - (b.x + b.width));
+    const roomLeft = Math.max(0, b.x - area.x);
+    const grow = Math.min(delta, roomRight + roomLeft);
+    if (grow <= 0) return sideReserved;
+    const fromRight = Math.min(grow, roomRight);
+    const fromLeft = grow - fromRight;
+    win.setBounds({ x: b.x - fromLeft, y: b.y, width: b.width + grow, height: b.height });
+    sideShiftedX += fromLeft;
+    sideReserved += grow;
+  } else {
+    const shrink = Math.min(-delta, sideReserved);
+    // Never shrink below the window's own minimum.
+    const width = Math.max(320, b.width - shrink);
+    const applied = b.width - width;
+    const back = Math.min(sideShiftedX, applied);
+    win.setBounds({ x: b.x + back, y: b.y, width, height: b.height });
+    sideShiftedX -= back;
+    sideReserved -= applied;
+  }
+  return sideReserved;
+}
+
+ipcMain.handle('window:reserve-side', (_event, want: unknown) => {
+  const px = Math.max(0, Math.round(Number(want) || 0));
+  return reserveSide(px);
+});
 
 // Explicit focus from the renderer. The PixelStreaming library
 // captures pointer events on the streamed <video> to forward to UE

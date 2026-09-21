@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Check, AlertTriangle, Newspaper } from 'lucide-react';
 import { Titlebar } from './components/Titlebar';
@@ -305,6 +305,24 @@ function dispatchActionToUE(
 // usePixelStreaming so this getter always returns the live port by
 // the time it's called.
 function signalingUrl(): string { return getSignallingPlayerUrl(); }
+
+/** How wide the chat history pane should be for a window of `win` px, given
+ *  whatever width the user last dragged it to.
+ *
+ *  Opening the pane widens the WINDOW rather than taking the space out of
+ *  the stage, so this is a width the window has to find room for, not a
+ *  share of what is already there: half the window, but never so wide that
+ *  the lines stop being readable, and never so narrow that a timestamp and
+ *  its message fight over the same row. Nothing here is clamped against the
+ *  window, which is about to change; the stage's own floor is applied where
+ *  the stage is laid out, for the case where the display could not give the
+ *  window the room. */
+const PANE_MIN = 280;
+const PANE_MAX = 640;
+function paneWidthFor(win: number, user: number | null): number {
+  const want = user ?? Math.min(440, Math.max(320, win * 0.5));
+  return Math.round(Math.min(PANE_MAX, Math.max(PANE_MIN, want)));
+}
 
 /**
  * Top-level gate: don't mount the main UI (and therefore the pixel-
@@ -829,24 +847,21 @@ function AppMain() {
     };
   }, []);
 
-  // Pane width, 50% of the window by default, but the user can
-  // override by dragging the resize handle on the pane's left edge.
-  // `userPaneWidth` is null until they drag, then sticks at whatever
-  // pixel value they landed on. Persisted to localStorage so the
-  // chosen split survives reloads.
+  // Pane width. The user can override it by dragging the resize handle on
+  // the pane's left edge; `userPaneWidth` is null until they do, then
+  // sticks at whatever pixel value they landed on. Persisted to
+  // localStorage so the chosen width survives reloads.
   const [userPaneWidth, setUserPaneWidth] = useState<number | null>(() => {
     if (typeof localStorage === 'undefined') return null;
     const v = localStorage.getItem('unclaw.chatPaneWidth');
     return v ? Number(v) || null : null;
   });
-  // Floor 280 so the pane is always readable; ceiling at winWidth-280
-  // so the workspace (stream + input) never disappears entirely.
-  const chatPaneWidth = Math.round(
-    Math.min(
-      Math.max(280, winWidth - 280),
-      Math.max(280, userPaneWidth ?? winWidth * 0.5),
-    ),
-  );
+  // The width the pane opened at, frozen for as long as it is open. The
+  // window GROWS to hold the pane (see the layout effect below), so a width
+  // that kept tracking the window would feed itself: wider window, wider
+  // pane, wider window.
+  const [openPaneWidth, setOpenPaneWidth] = useState<number | null>(null);
+  const chatPaneWidth = openPaneWidth ?? paneWidthFor(winWidth, userPaneWidth);
 
   // Unified tool-event timeline. Each tool the escalation uses lands
   // here as its own timestamped item; ChatPane merges these with the
@@ -866,9 +881,14 @@ function AppMain() {
 
   // Resize handler, owns a pointermove/pointerup pair on the document
   // so dragging continues even when the cursor leaves the 6px handle
-  // strip. Clamped via the same min/max as chatPaneWidth above so the
-  // workspace can't be reduced below 280px. Persists to localStorage
-  // so the chosen split survives reloads.
+  // strip. Clamped via the same min/max as paneWidthFor above so the
+  // stage can't be reduced below 280px. Persists to localStorage so the
+  // chosen width survives reloads.
+  //
+  // The stage gives up the space WHILE the handle is moving, because
+  // resizing the OS window on every pointermove stutters. On release the
+  // window takes the difference over and the stage springs back to the
+  // width it had, so a wider pane costs a wider window, not a smaller her.
   // Aborts any in-flight pane drag's document listeners if AppMain unmounts
   // mid-drag (sign-out / reset flows): the only listener pair in this file
   // that otherwise had no unmount path.
@@ -883,23 +903,28 @@ function AppMain() {
       // Pane is right-anchored, so width = (winWidth - cursorX).
       const next = Math.round(
         Math.min(
-          Math.max(280, window.innerWidth - 280),
-          Math.max(280, window.innerWidth - ev.clientX),
+          PANE_MAX,
+          Math.max(PANE_MIN, window.innerWidth - 280),
+          Math.max(PANE_MIN, window.innerWidth - ev.clientX),
         ),
       );
       setUserPaneWidth(next);
+      setOpenPaneWidth(next);
     };
     const onUp = () => {
       drag.abort();
       // Persist the final width AFTER the drag ends so we don't write
       // localStorage on every pixel of motion.
+      const v = userPaneWidthRef.current;
       try {
-        const v = userPaneWidthRef.current;
         if (typeof v === 'number') {
           localStorage.setItem('unclaw.chatPaneWidth', String(v));
         }
       } catch {
         // Ignore, quota / private browsing.
+      }
+      if (typeof v === 'number') {
+        void window.electronAPI?.reserveSidePanel?.(v);
       }
     };
     document.addEventListener('pointermove', onMove, { signal: drag.signal });
@@ -909,6 +934,60 @@ function AppMain() {
   // captured at drag-start time can see the latest value.
   const userPaneWidthRef = useRef<number | null>(userPaneWidth);
   userPaneWidthRef.current = userPaneWidth;
+  const openPaneWidthRef = useRef<number | null>(openPaneWidth);
+  openPaneWidthRef.current = openPaneWidth;
+
+  // The stage's width in pixels while it is being held still, else null.
+  //
+  // Opening the chat pane widens the WINDOW by the width of the pane, so
+  // the streamed character keeps the exact size she had and the pane
+  // arrives beside her instead of pushing her in. The window grows a frame
+  // or two after React commits `chatPaneOpen`, though, and in that gap a
+  // stage anchored `right: chatPaneWidth` would be a pane's width too
+  // narrow: the stream would flinch inward and spring back. So the stage is
+  // pinned to its current pixel width for the length of the gap, and only
+  // goes back to following the window once the width has actually landed.
+  const [heldStage, setHeldStage] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    // A layout effect, not an effect: this runs in the same frame as the
+    // open, before the browser paints, so there is no squeezed frame.
+    const api = typeof window !== 'undefined' ? window.electronAPI : undefined;
+    const live = typeof window !== 'undefined' ? window.innerWidth : 0;
+    let done = false;
+    if (chatPaneOpen) {
+      const want = paneWidthFor(live, userPaneWidthRef.current);
+      setOpenPaneWidth(want);
+      setHeldStage(live);
+      if (!api?.reserveSidePanel) {
+        // Browser dev, or an older preload: no window to widen, so the
+        // stage gives up the space the way it always did.
+        setHeldStage(null);
+        return undefined;
+      }
+      void api.reserveSidePanel(want).then(() => { if (!done) setHeldStage(null); });
+    } else {
+      setHeldStage(Math.max(280, live - (openPaneWidthRef.current ?? 0)));
+      if (!api?.reserveSidePanel) {
+        setHeldStage(null);
+        setOpenPaneWidth(null);
+        return undefined;
+      }
+      void api.reserveSidePanel(0).then(() => {
+        if (done) return;
+        setHeldStage(null);
+        setOpenPaneWidth(null);
+      });
+    }
+    return () => { done = true; };
+  }, [chatPaneOpen]);
+
+  // Where the stage ends. While the pane is open the window is wider by the
+  // pane's width, so this lands on the same pixel width the stage had
+  // before; if the display had no room to grow, the window came back
+  // smaller than asked and the stage absorbs whatever is left over.
+  const stageBox: CSSProperties = heldStage != null
+    ? { left: 0, width: heldStage }
+    : { left: 0, right: chatPaneOpen ? Math.min(chatPaneWidth, Math.max(0, winWidth - 280)) : 0 };
 
   // Refs to each widget icon so SheetPanel can restore focus on close.
   const reminderRef = useRef<HTMLButtonElement | null>(null);
@@ -1077,6 +1156,12 @@ function AppMain() {
   useEffect(() => {
     if (setupFor) { setChatPaneOpen(false); setActiveWidget(null); }
   }, [setupFor]);
+  // And for the Add character picker, which covers the whole window. The
+  // pane stops being rendered under it either way; left open it would also
+  // hold the window at its widened size around nothing.
+  useEffect(() => {
+    if (addPickerOpen) setChatPaneOpen(false);
+  }, [addPickerOpen]);
 
   // Apply the user's custom assistant name (set in onboarding) only on
   // the default Grace persona, Mark stays Mark. This way the user can
@@ -4958,20 +5043,17 @@ function AppMain() {
           usable). Rendered first at the top level so no later sibling's
           stacking context can trap it behind the chrome. */}
       <StreamLeaseOverlay />
-      {/* Workspace, everything that should physically shrink when the
-          chat pane opens. The `right` value animates from 0 →
-          chatPaneWidth so StreamView, the input bar, and every
-          right-anchored floating element move inward together. The
-          Titlebar + SignInScreen + ChatPane sit OUTSIDE this wrapper
-          so they keep their full-window framing. */}
+      {/* The stage: everything that belongs to the streamed character.
+          Opening the chat pane no longer takes any of it, the window grows
+          to the right instead, so the stage holds its size and nothing in
+          it moves (see `stageBox`). The Titlebar + SignInScreen + ChatPane
+          sit OUTSIDE this wrapper so they keep their full-window framing. */}
       <div
         style={{
           position: 'absolute',
           top: 0,
-          left: 0,
           bottom: 0,
-          right: chatPaneOpen ? chatPaneWidth : 0,
-          transition: 'right 0.32s cubic-bezier(0.16, 1, 0.3, 1)',
+          ...stageBox,
         }}
       >
       <StreamView
@@ -5320,7 +5402,6 @@ function AppMain() {
         onClose={handleCloseSheet}
         onRemindersChanged={() => setRemindersCount((c) => c + 1)}
         refreshKey={refreshKey}
-        faded={chatPaneOpen}
         glance={profile?.glance ?? null}
         onGlanceChange={handleGlanceChange}
         onSummarizeArticle={handleSummarizeArticle}
@@ -5346,16 +5427,14 @@ function AppMain() {
         </>
       )}
 
-      {/* Status pills, attached screenshots, and the InputBar all
-          moved out of this conditional, they now live in the
-          App-level "dock layer" container below, which slides between
-          the workspace bottom and the chat-pane bottom as a single
-          unit (so the user can keep typing while reading history,
-          without losing textarea focus or in-flight voice state). */}
+      {/* Status pills, attached screenshots, and the InputBar all moved
+          out of this conditional, they now live in the App-level "dock
+          layer" container below, which spans the stage whether or not
+          the chat pane is open. */}
 
         </>
       )}
-      </div>{/* /workspace wrapper */}
+      </div>{/* /stage */}
 
       {/* Onboarding wizard. Lives OUTSIDE the hasSession-gated workspace
           fragment so it can mount pre-auth: first run boots straight into
@@ -5399,27 +5478,23 @@ function AppMain() {
         )}
       </AnimatePresence>
 
-      {/* Dock layer, single sliding container for the InputBar, the
-          escalation status pills, and the attached-screenshot strip.
-          When the chat pane is closed, the layer spans the full window
-          (left:0, right:0) so the bar sits at the workspace bottom.
-          When the pane opens, the layer slides over to the pane region
-          via its `left` value, taking all three children with it as
-          one unit. The InputBar is mounted exactly once across both
-          states, so typing/voice/textarea-focus state survives toggles.
-          Z-index 38 sits above the chat pane (35) so the bar reads
-          on top of the gray pane surface, and below the titlebar (50). */}
+      {/* Dock layer, single container for the InputBar, the escalation
+          status pills, and the attached-screenshot strip. It spans the
+          stage, and it stays there when the chat pane opens: the pane
+          brings its own space with it, so the bar, the widget rail and
+          the camera toggle keep the places the user knows them by. (It
+          used to slide over into the pane region, which is what put the
+          widgets behind the history.) Z-index 38 sits above the chat pane
+          (35) and below the titlebar (50). */}
       {isConnected && hasSession && !customizationActive && !addPickerOpen && !setupActive && (
         <div
           style={{
             position: 'absolute',
-            left: chatPaneOpen ? Math.max(0, winWidth - chatPaneWidth) : 0,
-            right: 0,
             top: 0,
             bottom: 0,
             zIndex: 38,
             pointerEvents: 'none',
-            transition: 'left 0.32s cubic-bezier(0.16, 1, 0.3, 1)',
+            ...stageBox,
           }}
         >
           {/* Escalation status, stacked text-only labels streaming the
@@ -5565,7 +5640,7 @@ function AppMain() {
               {/* Camera framing toggle, floats just above the input bar.
                   Only while a stream is up and not in customization (which owns
                   its own full-figure framing). */}
-              {isConnected && !customizationActive && !chatPaneOpen && (
+              {isConnected && !customizationActive && (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, marginBottom: 8, pointerEvents: 'auto' }}>
                   {/* Character controls, right-aligned: wardrobe beside the
                       framing toggle. The whole left side above the bar stays

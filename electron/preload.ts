@@ -386,6 +386,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close'),
   togglePin: (pinned: boolean) => ipcRenderer.send('window:toggle-pin', pinned),
+  /** Ask the window to grow by `px` on its side so the chat pane has room
+   *  of its own, instead of taking it from the stage. Resolves with the
+   *  width actually added, which is smaller when the display has no room
+   *  left; pass 0 to hand it all back. */
+  reserveSidePanel: (px: number): Promise<number> =>
+    ipcRenderer.invoke('window:reserve-side', px),
   /** Force the BrowserWindow to take focus. Used by App.tsx's capture-
    *  phase mousedown listener to defeat the PixelStreaming pointer
    *  capture that would otherwise eat the first click on the streamed
