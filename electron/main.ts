@@ -597,7 +597,12 @@ function createWindow() {
   // for it. Hand that width back on every load so the window never stays
   // wide around a pane that is no longer there.
   mainWindow.webContents.on('did-finish-load', () => {
-    reserveSide(0);
+    // A reload drops the renderer's memory of an open chat pane while the
+    // window is still carrying the width it grew to hold it.
+    if (widthWithoutPane > 0 && mainWindow && !mainWindow.isDestroyed()) {
+      const b = mainWindow.getBounds();
+      if (b.width > widthWithoutPane) setWindowWidth(widthWithoutPane);
+    }
   });
 
   // The renderer's console lines are invisible to every log file; mirror the
@@ -704,62 +709,68 @@ ipcMain.on('window:minimize', () => mainWindow?.minimize());
 ipcMain.on('window:close', () => app.quit());
 
 // ---------------------------------------------------------------------
-// Side panel reservation. The chat history pane used to be carved out of
-// the window, so opening it squeezed the streamed character into what was
+// Side panel width. The chat history pane used to be carved out of the
+// window, so opening it squeezed the streamed character into what was
 // left. Instead the window itself GROWS by the width of the pane, so the
 // stage keeps its exact pixel size and the pane arrives beside it.
 //
-// The renderer names the width it wants; this returns the width actually
-// added, which is less when the display runs out of room (the renderer
-// squeezes the stage by the shortfall). Growth goes rightward first; a
-// window already against the right edge, which is where Unclaw usually
-// lives, moves left instead. `sideShiftedX` remembers how far it moved so
-// closing the pane puts it back exactly where it was.
+// The renderer sends the width it wants the window to BE, not a delta to
+// add. That is deliberate: an earlier version kept its own running total
+// of how much it had added and compared it against getBounds(), which on
+// macOS can still report the pre-setBounds size when calls land close
+// together. The total drifted from the truth and the window stopped
+// growing while still reporting that it had. An absolute target is
+// idempotent, so it cannot drift: asking twice is the same as asking once,
+// and a request that fails is fixed by the next one.
+//
+// Growth goes rightward first; a window already against the right edge,
+// which is where Unclaw usually lives, moves left instead. `sideShiftedX`
+// remembers how far it moved so shrinking puts it back where it was.
 // ---------------------------------------------------------------------
-let sideReserved = 0;
 let sideShiftedX = 0;
+// The narrowest this window has been since the last grow, so a renderer
+// reload can put it back rather than leaving it wide around a pane that
+// reloaded away.
+let widthWithoutPane = 0;
 
-function reserveSide(want: number): number {
+function setWindowWidth(target: number): number {
   const win = mainWindow;
   if (!win || win.isDestroyed()) return 0;
-  // A full-screen or maximized window cannot grow. Report nothing
-  // reserved and let the renderer fall back to squeezing the stage.
-  if (win.isFullScreen() || win.isMaximized()) {
-    sideReserved = 0;
-    sideShiftedX = 0;
-    return 0;
-  }
   const b = win.getBounds();
+  // A full-screen or maximized window cannot be resized. Report the width
+  // it has and let the renderer squeeze the stage instead.
+  if (win.isFullScreen() || win.isMaximized()) {
+    sideShiftedX = 0;
+    return b.width;
+  }
   const area = screen.getDisplayMatching(b).workArea;
-  const delta = Math.round(want) - sideReserved;
-  if (delta === 0) return sideReserved;
+  const want = Math.max(320, Math.min(Math.round(target), area.width));
+  const delta = want - b.width;
+  if (delta === 0) return b.width;
 
   if (delta > 0) {
     const roomRight = Math.max(0, area.x + area.width - (b.x + b.width));
     const roomLeft = Math.max(0, b.x - area.x);
     const grow = Math.min(delta, roomRight + roomLeft);
-    if (grow <= 0) return sideReserved;
-    const fromRight = Math.min(grow, roomRight);
-    const fromLeft = grow - fromRight;
+    if (grow <= 0) return b.width;
+    const fromLeft = Math.max(0, grow - roomRight);
+    if (widthWithoutPane === 0 || b.width < widthWithoutPane) widthWithoutPane = b.width;
     win.setBounds({ x: b.x - fromLeft, y: b.y, width: b.width + grow, height: b.height });
     sideShiftedX += fromLeft;
-    sideReserved += grow;
-  } else {
-    const shrink = Math.min(-delta, sideReserved);
-    // Never shrink below the window's own minimum.
-    const width = Math.max(320, b.width - shrink);
-    const applied = b.width - width;
-    const back = Math.min(sideShiftedX, applied);
-    win.setBounds({ x: b.x + back, y: b.y, width, height: b.height });
-    sideShiftedX -= back;
-    sideReserved -= applied;
+    return b.width + grow;
   }
-  return sideReserved;
+
+  const back = Math.min(sideShiftedX, -delta);
+  win.setBounds({ x: b.x + back, y: b.y, width: want, height: b.height });
+  sideShiftedX -= back;
+  widthWithoutPane = want;
+  return want;
 }
 
-ipcMain.handle('window:reserve-side', (_event, want: unknown) => {
-  const px = Math.max(0, Math.round(Number(want) || 0));
-  return reserveSide(px);
+ipcMain.handle('window:set-width', (_event, target: unknown) => {
+  const px = Math.max(0, Math.round(Number(target) || 0));
+  if (px === 0) return mainWindow?.getBounds().width ?? 0;
+  return setWindowWidth(px);
 });
 
 // Explicit focus from the renderer. The PixelStreaming library

@@ -13,10 +13,10 @@ interface ElectronAPI {
   minimize: () => void;
   close: () => void;
   togglePin: (pinned: boolean) => void;
-  /** Grow the window sideways by `px` to hold the chat pane, so the stage
-   *  keeps its size. Resolves with the width actually added (less than
-   *  asked when the display has no room); 0 hands it back. */
-  reserveSidePanel: (px: number) => Promise<number>;
+  /** Ask the window to BE this wide, so the chat pane gets room of its own
+   *  and the stage keeps its size. Resolves with the width the window
+   *  actually ended up at (less when the display has no room). */
+  setWindowWidth: (px: number) => Promise<number>;
   focusWindow: () => void;
   showNotification: (opts: { title: string; body?: string; tag?: string }) => void;
   onNotificationClick: (cb: (tag: string) => void) => () => void;

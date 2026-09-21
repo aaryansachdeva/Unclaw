@@ -749,11 +749,13 @@ function EmptyState() {
  *  and the history once it is open, because the window grows to hold the
  *  pane rather than taking the room out of the stage.
  *
- *  It is quiet at rest. A permanent control parked over her shoulder has to
- *  earn its place every second it is on screen, so it carries the faintest
- *  glass the palette has and only comes up to full strength under the
- *  cursor. The chevron follows Figma's convention for a side panel: pointing
- *  away to send the panel back, pointing in to bring it out. */
+ *  The chevron points the way the window's edge is about to travel: right
+ *  to push it out and make room for the history, left to pull it back in.
+ *
+ *  Big enough to see and to hit without aiming, and it holds a steady glass
+ *  at rest rather than hiding until hovered: it is the only way in to the
+ *  history from the stage, so a control nobody notices is a feature nobody
+ *  finds. It still lifts under the cursor. */
 export function ChatPaneEdgeTab({
   open,
   onToggle,
@@ -761,7 +763,7 @@ export function ChatPaneEdgeTab({
   open: boolean;
   onToggle: () => void;
 }) {
-  const Icon = open ? ChevronRight : ChevronLeft;
+  const Icon = open ? ChevronLeft : ChevronRight;
   return (
     <button
       type="button"
@@ -774,19 +776,20 @@ export function ChatPaneEdgeTab({
         right: 0,
         top: '50%',
         transform: 'translateY(-50%)',
-        width: 20,
-        height: 58,
+        width: 26,
+        height: 78,
         // Flat against the edge it is attached to, rounded on the side
         // facing her, so it reads as part of that edge and not a floating
         // pill that happens to be near it.
-        borderRadius: '9px 0 0 9px',
-        background: 'rgba(40, 48, 65, 0.34)',
-        backdropFilter: 'blur(20px) saturate(1.6)',
-        WebkitBackdropFilter: 'blur(20px) saturate(1.6)',
-        border: '1px solid rgba(255, 255, 255, 0.07)',
+        borderRadius: '11px 0 0 11px',
+        background: 'rgba(40, 48, 65, 0.62)',
+        backdropFilter: 'blur(32px) saturate(1.7)',
+        WebkitBackdropFilter: 'blur(32px) saturate(1.7)',
+        border: '1px solid rgba(255, 255, 255, 0.13)',
         borderRight: 'none',
-        color: 'var(--text-secondary)',
-        opacity: 0.66,
+        boxShadow: '0 2px 12px rgba(0, 0, 0, 0.32)',
+        color: 'var(--text-primary)',
+        opacity: 0.92,
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -799,16 +802,16 @@ export function ChatPaneEdgeTab({
       } as React.CSSProperties}
       onMouseEnter={(e) => {
         e.currentTarget.style.opacity = '1';
-        e.currentTarget.style.background = 'rgba(40, 48, 65, 0.62)';
-        e.currentTarget.style.color = 'var(--text-primary)';
+        e.currentTarget.style.background = 'rgba(40, 48, 65, 0.86)';
+        e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.22)';
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.opacity = '0.66';
-        e.currentTarget.style.background = 'rgba(40, 48, 65, 0.34)';
-        e.currentTarget.style.color = 'var(--text-secondary)';
+        e.currentTarget.style.opacity = '0.92';
+        e.currentTarget.style.background = 'rgba(40, 48, 65, 0.62)';
+        e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.13)';
       }}
     >
-      <Icon size={14} strokeWidth={2.2} />
+      <Icon size={18} strokeWidth={2.4} />
     </button>
   );
 }

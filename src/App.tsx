@@ -896,6 +896,15 @@ function AppMain() {
   useEffect(() => () => paneDragAbortRef.current?.abort(), []);
   const handlePaneResizeStart = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
+    // The stage's width right now, before the handle moves. The drag takes
+    // its space from the stage; the release gives the stage this back and
+    // lets the window carry the difference.
+    const stageAtDragStart = window.innerWidth - (openPaneWidthRef.current ?? 0);
+    // The width the handle is at, kept in the drag's own closure rather
+    // than read back off a ref at the end: refs only catch up on render,
+    // so a release in the same frame as the last move would have saved and
+    // resized to the width before the drag.
+    let dragged = openPaneWidthRef.current ?? PANE_MIN;
     paneDragAbortRef.current?.abort();
     const drag = new AbortController();
     paneDragAbortRef.current = drag;
@@ -908,6 +917,7 @@ function AppMain() {
           Math.max(PANE_MIN, window.innerWidth - ev.clientX),
         ),
       );
+      dragged = next;
       setUserPaneWidth(next);
       setOpenPaneWidth(next);
     };
@@ -915,16 +925,16 @@ function AppMain() {
       drag.abort();
       // Persist the final width AFTER the drag ends so we don't write
       // localStorage on every pixel of motion.
-      const v = userPaneWidthRef.current;
       try {
-        if (typeof v === 'number') {
-          localStorage.setItem('unclaw.chatPaneWidth', String(v));
-        }
+        localStorage.setItem('unclaw.chatPaneWidth', String(dragged));
       } catch {
         // Ignore, quota / private browsing.
       }
-      if (typeof v === 'number') {
-        void window.electronAPI?.reserveSidePanel?.(v);
+      if (stageAtDragStart > 0) {
+        // Hand the window the difference so the stage goes back to the
+        // width it had when the drag began, with the pane now this wide.
+        void window.electronAPI?.setWindowWidth?.(stageAtDragStart + dragged)
+          .then((got) => { paneGrewByRef.current = Math.max(0, got - stageAtDragStart); });
       }
     };
     document.addEventListener('pointermove', onMove, { signal: drag.signal });
@@ -948,6 +958,11 @@ function AppMain() {
   // pinned to its current pixel width for the length of the gap, and only
   // goes back to following the window once the width has actually landed.
   const [heldStage, setHeldStage] = useState<number | null>(null);
+  // How much wider the window actually got to hold the pane. Closing takes
+  // exactly that back, so a grow the display could only partly grant, or
+  // could not grant at all, still closes to the right width instead of
+  // subtracting a pane that was never there.
+  const paneGrewByRef = useRef(0);
   useLayoutEffect(() => {
     // A layout effect, not an effect: this runs in the same frame as the
     // open, before the browser paints, so there is no squeezed frame.
@@ -958,21 +973,27 @@ function AppMain() {
       const want = paneWidthFor(live, userPaneWidthRef.current);
       setOpenPaneWidth(want);
       setHeldStage(live);
-      if (!api?.reserveSidePanel) {
+      if (!api?.setWindowWidth) {
         // Browser dev, or an older preload: no window to widen, so the
         // stage gives up the space the way it always did.
         setHeldStage(null);
         return undefined;
       }
-      void api.reserveSidePanel(want).then(() => { if (!done) setHeldStage(null); });
+      void api.setWindowWidth(live + want).then((got) => {
+        paneGrewByRef.current = Math.max(0, got - live);
+        if (!done) setHeldStage(null);
+      });
     } else {
-      setHeldStage(Math.max(280, live - (openPaneWidthRef.current ?? 0)));
-      if (!api?.reserveSidePanel) {
+      const grew = paneGrewByRef.current;
+      setHeldStage(Math.max(280, live - grew));
+      if (!api?.setWindowWidth || grew <= 0) {
         setHeldStage(null);
         setOpenPaneWidth(null);
+        paneGrewByRef.current = 0;
         return undefined;
       }
-      void api.reserveSidePanel(0).then(() => {
+      void api.setWindowWidth(live - grew).then(() => {
+        paneGrewByRef.current = 0;
         if (done) return;
         setHeldStage(null);
         setOpenPaneWidth(null);
@@ -985,10 +1006,16 @@ function AppMain() {
   // pane's width, so this lands on the same pixel width the stage had
   // before; if the display had no room to grow, the window came back
   // smaller than asked and the stage absorbs whatever is left over.
-  const paneInset = chatPaneOpen ? Math.min(chatPaneWidth, Math.max(0, winWidth - 280)) : 0;
+  const paneInset = chatPaneOpen ? chatPaneWidth : 0;
+  // `minWidth` rather than a `winWidth - 280` clamp: the stage has to track
+  // the REAL window, and winWidth is React's copy of it, a resize event
+  // behind. Opening the pane resizes the window, so that copy is stale at
+  // exactly the moment the stage is laid out, and the stage came out a
+  // hundred pixels too wide for as long as it took the event to land. CSS
+  // resolves both the anchor and the floor against the window itself.
   const stageBox: CSSProperties = heldStage != null
-    ? { left: 0, width: heldStage }
-    : { left: 0, right: paneInset };
+    ? { left: 0, width: heldStage, minWidth: 280 }
+    : { left: 0, right: paneInset, minWidth: 280 };
 
   // Refs to each widget icon so SheetPanel can restore focus on close.
   const reminderRef = useRef<HTMLButtonElement | null>(null);
@@ -6201,9 +6228,10 @@ function AppMain() {
             // the pane's edge (Titlebar `rightInset`), so this header sits
             // at the top of the pane rather than pushed down below it.
             top: 18,
+            // Anchored to the same edge the pane is, so it cannot be laid
+            // out against a stale window width while the window resizes.
             right: 16,
-            // Left edge of the pane region + 16 = where the header sits.
-            left: Math.max(0, winWidth - chatPaneWidth) + 16,
+            width: Math.max(0, chatPaneWidth - 32),
             zIndex: 60,
             display: 'flex',
             alignItems: 'center',
