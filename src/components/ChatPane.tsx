@@ -13,7 +13,6 @@ import { X, Newspaper } from 'lucide-react';
 import type { Turn } from '../hooks/useChatMemory';
 import { PulseGrid } from './PulseGrid';
 
-const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
 interface ToolEvent {
   id: number;
@@ -134,14 +133,19 @@ export function ChatPane({
           key="chat-pane"
           role="complementary"
           aria-label={`${personaName} conversation history`}
-          initial={reduce ? { x: 0 } : { x: width }}
+          // No slide, in either direction. The WINDOW is the animation now:
+          // it grows by this pane's width to open and shrinks back to close
+          // (see `window:reserve-side` in electron/main.ts), so the pane
+          // simply is, or is not, in the space the window made for it.
+          //
+          // The old 0.32s slide out was the "glitchy close": the window had
+          // already narrowed while the pane was still animating, so for a
+          // third of a second a full-width pane was drawn on top of the
+          // character, sweeping across her on its way out.
+          initial={{ x: 0 }}
           animate={{ x: 0 }}
-          exit={reduce ? { x: 0 } : { x: width }}
-          transition={
-            reduce
-              ? { duration: 0 }
-              : { duration: 0.32, ease: EASE_OUT_EXPO }
-          }
+          exit={{ x: 0 }}
+          transition={{ duration: 0 }}
           style={{
             position: 'absolute',
             top: 0,

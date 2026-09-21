@@ -53,6 +53,11 @@ interface TitlebarProps {
    *  alone — WebkitAppRegion hit-testing operates at a different
    *  layer than CSS stacking). */
   leftSlot?: React.ReactNode;
+  /** Pixels to keep clear on the right, so the profile capsule stays over
+   *  the character instead of drifting on top of whatever opened beside
+   *  her. The chat history pane passes its own width. The drag region
+   *  still spans the whole window, so the pane's top edge stays draggable. */
+  rightInset?: number;
   /** When true, the chrome shows a "Reconnecting…" banner under the
    *  bar — used while the pixel stream is dropped. */
   showReconnecting?: boolean;
@@ -108,6 +113,7 @@ function userDisplayName(user: TitlebarUser): string {
 }
 
 export function Titlebar({
+  rightInset = 0,
   showReconnecting = false,
   user = null,
   guestMode = false,
@@ -228,8 +234,8 @@ export function Titlebar({
     typeof navigator !== 'undefined' &&
     /Mac|iPod|iPhone|iPad/.test(navigator.platform);
   const titlebarPadding = isMacPlatform
-    ? '12px 16px 28px 88px'
-    : '12px 16px 28px 16px';
+    ? `12px ${16 + rightInset}px 28px 88px`
+    : `12px ${16 + rightInset}px 28px 16px`;
 
   return (
     <>

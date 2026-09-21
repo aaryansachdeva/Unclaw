@@ -985,9 +985,10 @@ function AppMain() {
   // pane's width, so this lands on the same pixel width the stage had
   // before; if the display had no room to grow, the window came back
   // smaller than asked and the stage absorbs whatever is left over.
+  const paneInset = chatPaneOpen ? Math.min(chatPaneWidth, Math.max(0, winWidth - 280)) : 0;
   const stageBox: CSSProperties = heldStage != null
     ? { left: 0, width: heldStage }
-    : { left: 0, right: chatPaneOpen ? Math.min(chatPaneWidth, Math.max(0, winWidth - 280)) : 0 };
+    : { left: 0, right: paneInset };
 
   // Refs to each widget icon so SheetPanel can restore focus on close.
   const reminderRef = useRef<HTMLButtonElement | null>(null);
@@ -5798,6 +5799,10 @@ function AppMain() {
           the window remains manageable. */}
       <Titlebar
         minimalMode={customizationActive}
+        // Keep the profile capsule over the character. Without this it
+        // rides the window's right edge, which is the chat pane once that
+        // is open, and lands on top of the pane's own header.
+        rightInset={paneInset}
         // Customization mode no longer borrows the Titlebar's leftSlot
         // for its back button. The back button + "Customization" label
         // now live as a single cluster inside CustomizationOverlay,
@@ -6170,9 +6175,10 @@ function AppMain() {
         <div
           style={{
             position: 'absolute',
-            // Below the titlebar capsule (claws, Discord, phone, pin,
-            // avatar), which used to sit on top of this header.
-            top: 64,
+            // On the titlebar's own line: the profile capsule now stops at
+            // the pane's edge (Titlebar `rightInset`), so this header sits
+            // at the top of the pane rather than pushed down below it.
+            top: 18,
             right: 16,
             // Left edge of the pane region + 16 = where the header sits.
             left: Math.max(0, winWidth - chatPaneWidth) + 16,
