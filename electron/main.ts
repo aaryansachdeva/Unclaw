@@ -723,14 +723,17 @@ function dlss5Status(): {
 
 ipcMain.handle('dlss5:tooling-status', () => dlss5Status());
 
-// The three files DLSS 5 needs, all in the ONE folder that holds the real
-// executable (verified against a live process's loaded-module list - they do
-// NOT go in the plugin ThirdParty dirs, which is where stray copies once
-// misled a whole debugging session).
+// DLSS 5 needs three files beside the real executable (verified against a live
+// process's loaded-module list - they do NOT go in the plugin ThirdParty dirs,
+// which is where stray copies once misled a whole debugging session).
 //
-// We ship none of them and never will: nvngx_dlssnr.dll is pre-release NVIDIA
-// under NDA. This only helps a user who already has their own copies put them
-// in the right place, which is otherwise a fiddly manual step.
+// TWO OF THEM NOW SHIP. dxgi.dll (ReShade 6.8.0, crosire), the RenoDX addon and
+// our tuned ReShade.ini are staged into the build: they are not NVIDIA's and not
+// unreleased, and withholding them only meant every eligible user had to source
+// and place three files instead of one.
+//
+// nvngx_dlssnr.dll is the exception and always will be - pre-release NVIDIA
+// under NDA. That one file is what this picker is for.
 const DLSS5_WANTED = {
   proxy: 'dxgi.dll',                 // ReShade 6.x with addon support
   nr:    'nvngx_dlssnr.dll',         // NVIDIA pre-release
@@ -766,10 +769,12 @@ ipcMain.handle('dlss5:install-tooling', async (): Promise<{
   if (!st.buildHasDlss) return fail('build_has_no_dlss');
 
   const picked = await dialog.showOpenDialog({
-    title: 'Select your DLSS 5 files',
-    message: 'Choose dxgi.dll, the .addon64 file, and nvngx_dlssnr.dll',
+    title: 'Select nvngx_dlssnr.dll',
+    message: 'Choose the nvngx_dlssnr.dll from your NVIDIA early access',
+    // Still multi-select: everything else ships, but a user with their own
+    // newer ReShade or addon can drop those in at the same time.
     properties: ['openFile', 'multiSelections', 'dontAddToRecent'],
-    filters: [{ name: 'DLSS 5 tooling', extensions: ['dll', 'addon64'] }],
+    filters: [{ name: 'DLSS 5 model', extensions: ['dll', 'addon64'] }],
   });
   if (picked.canceled || !picked.filePaths.length) return fail('cancelled');
 
@@ -798,7 +803,8 @@ ipcMain.handle('dlss5:install-tooling', async (): Promise<{
   if (!after.hasAddon) missing.push('*.addon64');
   if (!after.hasNR) missing.push(DLSS5_WANTED.nr);
 
-  // Seed the tuned look, but never clobber a user who has already tuned it.
+  // The build ships a tuned ReShade.ini, so this is only a fallback for an
+  // install that somehow lacks one. Never clobber a user who has tuned it.
   try {
     const ini = path.join(st.binDir, 'ReShade.ini');
     const existing = fs.existsSync(ini) ? fs.readFileSync(ini, 'utf8') : '';

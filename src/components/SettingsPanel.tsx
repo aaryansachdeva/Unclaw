@@ -1189,13 +1189,13 @@ function GraphicsFacet({
   );
 }
 
-/** Shown when the build HAS DLSS but the user's own DLSS 5 files are not in
- *  place. Three files have to sit next to the character executable, buried
- *  several folders inside the runtime directory; finding that folder by hand is
- *  the entire difficulty, so this does it for them.
+/** Shown when the build HAS DLSS but nvngx_dlssnr.dll is not in place.
  *
- *  We ship none of the files and never will - nvngx_dlssnr.dll is pre-release
- *  NVIDIA under NDA. This is for users who already have their own copies. */
+ *  ReShade, the RenoDX addon and the tuned ReShade.ini all ship with the build,
+ *  so this is down to ONE file - the NVIDIA pre-release model, which is under
+ *  NDA and will never ship. The user picks it, we put it in the right folder,
+ *  which is buried several levels inside the runtime directory and is the whole
+ *  of the difficulty. */
 function NeuralRenderingInstallRow() {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -1244,9 +1244,9 @@ function NeuralRenderingInstallRow() {
         color: 'var(--text-secondary)',
         marginBottom: 14,
       }}>
-        If you have early access to DLSS 5, select your three files and Unclaw
-        will put them where the character can find them, and apply the tuned
-        settings. Nothing is downloaded.
+        If you have NVIDIA early access to DLSS 5, select your
+        nvngx_dlssnr.dll and Unclaw will put it where the character finds it.
+        Everything else is already installed. Nothing is downloaded.
       </div>
       <button
         type="button"
@@ -1263,7 +1263,7 @@ function NeuralRenderingInstallRow() {
           opacity: busy ? 0.55 : 1,
         }}
       >
-        {busy ? 'Installing…' : 'Select DLSS 5 files…'}
+        {busy ? 'Installing…' : 'Select nvngx_dlssnr.dll…'}
       </button>
       {note && (
         <div style={{
