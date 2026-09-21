@@ -9,7 +9,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Newspaper } from 'lucide-react';
+import { X, Newspaper, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { Turn } from '../hooks/useChatMemory';
 import { PulseGrid } from './PulseGrid';
 
@@ -740,5 +740,75 @@ function EmptyState() {
         Whatever you say lands here, paired with what comes back.
       </div>
     </div>
+  );
+}
+
+/** The handle on the right edge of the stage that opens and closes the
+ *  history. It sits halfway down, welded to the edge it acts on: the
+ *  window's own edge while the history is closed, the divider between her
+ *  and the history once it is open, because the window grows to hold the
+ *  pane rather than taking the room out of the stage.
+ *
+ *  It is quiet at rest. A permanent control parked over her shoulder has to
+ *  earn its place every second it is on screen, so it carries the faintest
+ *  glass the palette has and only comes up to full strength under the
+ *  cursor. The chevron follows Figma's convention for a side panel: pointing
+ *  away to send the panel back, pointing in to bring it out. */
+export function ChatPaneEdgeTab({
+  open,
+  onToggle,
+}: {
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const Icon = open ? ChevronRight : ChevronLeft;
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={open ? 'Close chat history' : 'Open chat history'}
+      aria-expanded={open}
+      title={open ? 'Close chat history' : 'Open chat history'}
+      style={{
+        position: 'absolute',
+        right: 0,
+        top: '50%',
+        transform: 'translateY(-50%)',
+        width: 20,
+        height: 58,
+        // Flat against the edge it is attached to, rounded on the side
+        // facing her, so it reads as part of that edge and not a floating
+        // pill that happens to be near it.
+        borderRadius: '9px 0 0 9px',
+        background: 'rgba(40, 48, 65, 0.34)',
+        backdropFilter: 'blur(20px) saturate(1.6)',
+        WebkitBackdropFilter: 'blur(20px) saturate(1.6)',
+        border: '1px solid rgba(255, 255, 255, 0.07)',
+        borderRight: 'none',
+        color: 'var(--text-secondary)',
+        opacity: 0.66,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: 'pointer',
+        padding: 0,
+        pointerEvents: 'auto',
+        transition:
+          'opacity 0.18s var(--ease-out-quart), background 0.18s var(--ease-out-quart), color 0.18s var(--ease-out-quart)',
+        WebkitAppRegion: 'no-drag',
+      } as React.CSSProperties}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.opacity = '1';
+        e.currentTarget.style.background = 'rgba(40, 48, 65, 0.62)';
+        e.currentTarget.style.color = 'var(--text-primary)';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.opacity = '0.66';
+        e.currentTarget.style.background = 'rgba(40, 48, 65, 0.34)';
+        e.currentTarget.style.color = 'var(--text-secondary)';
+      }}
+    >
+      <Icon size={14} strokeWidth={2.2} />
+    </button>
   );
 }

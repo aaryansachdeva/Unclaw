@@ -7,7 +7,7 @@ import { Greeting, GREETING_TOP } from './components/Greeting';
 import { GlanceColumn } from './components/glance/GlanceColumn';
 import { InputBar, type InputBarHandle } from './components/InputBar';
 import { readArticle, type ArticleRead, type NewsArticle } from './services/news';
-import { ChatPane, ChatPaneHeader } from './components/ChatPane';
+import { ChatPane, ChatPaneHeader, ChatPaneEdgeTab } from './components/ChatPane';
 import { WidgetRail } from './components/WidgetRail';
 // Shared color/lighting constants live in CustomizationOverlay; the unified
 // customization surface itself is CustomWardrobe (drives every character now).
@@ -6145,9 +6145,31 @@ function AppMain() {
         )}
       </AnimatePresence>
 
-      {/* Chat history side pane, slides in from the right; the
-          workspace wrapper above shrinks in unison so the stream is
-          physically pushed in, not overlaid. Only mounted once
+      {/* The handle that opens and closes the history, halfway down the
+          right edge of the stage: the window's edge while it is closed, the
+          divider once it is open. Its own layer so it clears the stage
+          content without joining the dock's bottom-anchored stack. */}
+      {isConnected && hasSession && !customizationActive && !addPickerOpen && !setupActive && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            bottom: 0,
+            zIndex: 39,
+            pointerEvents: 'none',
+            ...stageBox,
+          }}
+        >
+          <ChatPaneEdgeTab
+            open={chatPaneOpen}
+            onToggle={() => setChatPaneOpen((o) => !o)}
+          />
+        </div>
+      )}
+
+      {/* Chat history side pane. It does not slide and the stage does not
+          shrink: the window grows by the pane's width, so the pane simply
+          occupies the room the window made for it. Only mounted once
           a session exists (authed or guest); conversation history
           comes from the per-persona localStorage memory. Hidden
           while customization mode is active. */}
