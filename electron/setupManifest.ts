@@ -251,8 +251,8 @@ export const MANIFEST: SetupManifest = {
   // here said "pakchunk0 + pakchunk5 only" — that predates Syd and was wrong.
   unrealWindows: {
     url: 'https://files.fotonlabs.com/unreal/2026.0920.01.zip',
-    sha256: 'e6023c5b6ba9e8ef6f96a40750c49b84cbca5e2be3394bef1a810aeb673428b2',
-    sizeBytes: 3_445_924_460,
+    sha256: '5a2c7a1801592a1febf29ff701b4e8b955ab8f9b56088c065b881c3e698d4512',
+    sizeBytes: 3_448_425_828,
     version: '2026.0920.01',
   },
 
