@@ -8,7 +8,7 @@
 // makes it feel premium — control panel next to stage.
 
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import { X, Newspaper } from 'lucide-react';
 import type { Turn } from '../hooks/useChatMemory';
 import { PulseGrid } from './PulseGrid';
@@ -55,7 +55,6 @@ export function ChatPane({
   // component) so its z-index isn't trapped inside the chat pane's
   // stacking context — that trap is what was preventing the close
   // button from being clickable through the titlebar's drag region.
-  const reduce = useReducedMotion() ?? false;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Tracks whether the user is already scrolled to the bottom. Only
   // auto-scroll on new turns when this is true — otherwise honor the
@@ -65,15 +64,15 @@ export function ChatPane({
   // No time-gap markers — pure list of turns, simplest possible read.
 
   // Bottom-pin behavior: detect on every scroll, auto-jump on new turn.
-  // Threshold 80px (not 12) accounts for the scroll container's 150px
-  // bottom padding — the user's perceived "bottom" sits above the true
-  // scrollHeight by the height of the floating input bar's overlap.
+  // The threshold is small again now that nothing floats over the bottom
+  // of the pane: the last message IS the bottom, so the user's perceived
+  // bottom and the true scrollHeight are the same place.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = () => {
       const dist = el.scrollHeight - (el.scrollTop + el.clientHeight);
-      pinnedToBottomRef.current = dist < 80;
+      pinnedToBottomRef.current = dist < 16;
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
@@ -240,21 +239,22 @@ export function ChatPane({
             ref={scrollRef}
             className="chat-pane-scroll"
             style={{
-              // Header sits absolutely below the titlebar capsule
-              // (top:64 + ~32 stack + breathing room); the scroll layer
-              // fills the rest of the pane.
+              // Clears the pane's own header, which now sits at the top of
+              // the pane (top:18 + ~36 tall) rather than pushed down below
+              // the titlebar capsule; the scroll layer fills the rest.
               position: 'absolute',
-              top: 112,
+              top: 64,
               left: 0,
               right: 0,
               bottom: 0,
               overflowY: 'auto',
               overflowX: 'hidden',
-              // Wider horizontal padding (18 vs 14) so neither user
-              // nor assistant text crowds the pane edges. Bottom
-              // reserve unchanged: covers the floating InputBar
-              // height at its tallest (with attachments + persona row).
-              padding: '14px 18px 150px',
+              // Wider horizontal padding (18 vs 14) so neither user nor
+              // assistant text crowds the pane edges. The bottom used to
+              // reserve 150px for the floating InputBar, which sat over the
+              // pane; the bar lives on the stage now, so that reserve was
+              // just a dead strip under the last message.
+              padding: '14px 18px 18px',
               // Custom thin scrollbar — see styles.css scoped class.
               scrollbarGutter: 'stable both-edges',
             }}
